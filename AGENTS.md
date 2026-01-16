@@ -62,12 +62,6 @@ deno task test
 └── README.md        # This file
 ```
 
-## Available Endpoints
-
-- `GET /` - Welcome message
-- `GET /health` - Health check endpoint
-- `POST /api/echo` - Example POST endpoint with validation
-
 ## Configuration
 
 Edit `.env` to configure the application:
