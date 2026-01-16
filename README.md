@@ -1,3 +1,3 @@
 # Gleestack
 
-An evil tech stack that will take over the web. 🕷️
+An evil tech stack that will take over the world. 🕷️
