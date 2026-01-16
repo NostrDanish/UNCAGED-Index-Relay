@@ -31,7 +31,7 @@ Start the development server with auto-reload:
 deno task dev
 ```
 
-The server will start on `http://localhost:8000` by default.
+The server will start on `http://localhost:13131` by default.
 
 ### Production
 
@@ -108,7 +108,3 @@ considered best practice. When adding dependencies:
 After you have made changes, always run `deno lint`, `deno task check`, and
 `deno task test`. Always solve problems at their root, eg removing dead code or
 using proper types, not just doing a bandaid fix.
-
-## License
-
-MIT

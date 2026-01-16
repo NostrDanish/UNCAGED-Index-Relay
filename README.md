@@ -1,3 +1,3 @@
 # Gleestack
 
-A minimal boilerplate for building backend applications with Deno and Hono.
+An evil tech stack that will take over the web. 🕷️
