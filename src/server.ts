@@ -20,7 +20,7 @@ const app = new Hono<{ Variables: { config: Config } }>()
 // FIXME: Replace with actual routes
 app.get("/", (c) => {
   return c.json({
-    message: "Hello from Deno + Hono!",
+    message: "Hello from Gleestack!",
   });
 });
 
