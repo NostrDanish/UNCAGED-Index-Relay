@@ -2,52 +2,12 @@
 
 ## Features
 
-- **Deno**: Modern JavaScript/TypeScript runtime
+- **Polymorphic Runtime**: Works with Node.js, Deno, and Bun
 - **Hono**: Fast, lightweight web framework
-- **Request Logging**: Built-in request/response logging with @soapbox/logi
 - **CORS**: Enabled by default
 - **Validation**: Zod for schema validation
 - **Environment Config**: Type-safe configuration management
-
-## Quick Start
-
-### Prerequisites
-
-- [Deno](https://deno.com/) installed
-
-### Installation
-
-1. Clone or copy this template
-2. Copy `.env.example` to `.env`:
-   ```bash
-   cp .env.example .env
-   ```
-
-### Development
-
-Start the development server with auto-reload:
-
-```bash
-deno task dev
-```
-
-The server will start on `http://localhost:13131` by default.
-
-### Production
-
-Start the production server:
-
-```bash
-deno task start
-```
-
-### Testing
-
-Run tests:
-
-```bash
-deno task test
-```
+- **Portable Code**: Uses Node.js builtins for maximum compatibility
 
 ## Project Structure
 
@@ -56,18 +16,18 @@ deno task test
 ├── src/
 │   ├── server.ts    # Main application server
 │   └── config.ts    # Configuration management
-├── deno.json        # Deno configuration and tasks
+├── package.json     # Dependencies and scripts
 ├── .env.example     # Example environment variables
 ├── .gitignore       # Git ignore rules
-└── README.md        # This file
+└── README.md        # Project documentation
 ```
 
 ## Configuration
 
 Edit `.env` to configure the application:
 
-- `PORT` - Server port (default: 13131)
-- `PUBLIC_URL` (required) - URL of the public server, eg `https://example.com`
+- `PORT` - Server port (default: 8000)
+- `PUBLIC_URL` - URL of the public server, eg `https://example.com`
 
 ## Adding Features
 
@@ -76,35 +36,42 @@ Edit `.env` to configure the application:
 To add database support, consider:
 
 - [Kysely](https://kysely.dev/) for SQL query building
-- [postgres](https://deno.land/x/postgres) for PostgreSQL
+- [postgres](https://www.npmjs.com/package/postgres) for PostgreSQL
 
 ### Authentication
 
-Consider adding:
+Consider adding Nostr NIP-98 authentication
 
-- JWT authentication
-- Nostr NIP-98 authentication
+## Code Style
 
-### Additional Middleware
+### Prefer Node.js Builtins
 
-Hono supports many middleware options:
+Always use Node.js builtin modules instead of Bun or Deno globals for better
+portability and compatibility:
 
-- Rate limiting
-- Compression
-- Serving static files
-- And more
+- **Use `node:` imports**: Import Node.js builtins using the `node:` protocol
+- **Avoid Deno globals**: Never use Deno or Bun-specific APIs like
+  `Deno.readFile`, `Bun.file`, etc.
+- **Examples**:
+  - ✅ `import { readFile } from "node:fs/promises"` instead of
+    `Deno.readFile()`
+  - ✅ `import process from "node:process"` instead of `Deno.env`
 
-## Package Management
-
-Modern Deno supports all npm packages. Legacy URL imports are no longer
-considered best practice. When adding dependencies:
-
-- **Prefer npm packages**: Use `deno add npm:<pkgname>` to add packages from npm
-- This creates proper dependency management in `deno.json`
-- Avoid legacy URL imports (e.g., `https://deno.land/x/...`) for new code
+This approach ensures code remains portable and works across different
+JavaScript runtimes.
 
 ## Verifying Your Changes
 
-After you have made changes, always run `deno lint`, `deno task check`, and
-`deno task test`. Always solve problems at their root, eg removing dead code or
-using proper types, not just doing a bandaid fix.
+After you have made changes, verify your code works across runtimes. Prefer
+using Deno tooling when available:
+
+```bash
+deno lint
+deno check .  # Type checking
+deno task test
+```
+
+When writing tests, always use the built-in `node:test` framework.
+
+Always solve problems at their root, eg removing dead code or using proper
+types, not just doing a bandaid fix.
