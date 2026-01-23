@@ -1,6 +1,12 @@
 export class Config {
+  private env: { get(key: string): string | undefined };
+
+  constructor(env: { get(key: string): string | undefined }) {
+    this.env = env;
+  }
+
   get port(): number {
-    const value = Deno.env.get("PORT");
+    const value = this.env.get("PORT");
     if (!value) {
       return 13131; // Default port
     }
@@ -12,6 +18,6 @@ export class Config {
   }
 
   get publicUrl(): string | undefined {
-    return Deno.env.get("PUBLIC_URL");
+    return this.env.get("PUBLIC_URL");
   }
 }

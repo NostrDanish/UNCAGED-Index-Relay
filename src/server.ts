@@ -1,9 +1,14 @@
 import { Hono } from "hono";
 import { cors } from "hono/cors";
+import process from "node:process";
 
 import { Config } from "./config.ts";
 
-const config = new Config();
+const config = new Config({
+  get(key) {
+    return process.env[key];
+  },
+});
 
 const app = new Hono<{ Variables: { config: Config } }>()
   .use(cors())

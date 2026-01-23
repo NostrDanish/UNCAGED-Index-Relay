@@ -1,15 +1,14 @@
 {
-  "tasks": {
+  "scripts": {
     "dev": "deno serve -A --env-file --watch src/server.ts",
     "start": "deno serve -A --env-file src/server.ts",
     "test": "deno test -A --env-file=.env.test"
   },
-  "imports": {
-    "@std/assert": "jsr:@std/assert@1",
-    "hono": "npm:hono@^4.8.5",
-    "zod": "npm:zod@^4.0.8"
+  "dependencies": {
+    "hono": "^4.11.5",
+    "zod": "^4.3.6"
   },
-  "fmt": {
-    "exclude": ["**/*.html"]
+  "devDependencies": {
+    "@types/node": "^25.0.10"
   }
 }
