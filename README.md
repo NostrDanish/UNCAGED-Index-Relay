@@ -1,19 +1,21 @@
 # Ditto Relay
 
-A high-performance Nostr relay backed by OpenSearch, designed for horizontal
+A high-performance NIP-01 compliant Nostr relay backed by OpenSearch, designed for horizontal
 scalability and full-text search capabilities.
 
 ## Features
 
+- **True NIP-01 WebSocket Relay**: Implements the full Nostr protocol via WebSocket
 - **OpenSearch Backend**: Scalable, distributed storage with powerful search
   capabilities
-- **NIP-01 Compliant**: Proper handling of replaceable and parameterized
+- **Replaceable Events**: Proper handling of replaceable and parameterized
   replaceable events
 - **NIP-09 Support**: Event deletion with proper authorization
+- **NIP-11 Support**: Relay information document
 - **NIP-50 Full-Text Search**: Search event content using OpenSearch's powerful
   text analysis
-- **Cluster-Ready**: Stateless design works with node:cluster, Cloudflare
-  Workers, or Deno --parallel
+- **Bun Runtime**: Fast WebSocket handling with Bun's native WebSocket support
+- **Portable Code**: Core logic uses Node.js builtins for maximum compatibility
 - **Efficient Tag Indexing**: All tags are indexed for fast queries while
   preserving original event structure
 - **Event Validation**: Uses Nostrify's NSchema for robust event validation
@@ -81,97 +83,45 @@ OPENSEARCH_PASSWORD=admin
 ### Prerequisites
 
 - OpenSearch 2.x or compatible service
-- Deno, Node.js, or Bun runtime
+- Bun runtime
 
 ### Start the relay
 
 ```bash
-# Using Deno
-deno task start
+# Production mode
+bun start
 
 # Development mode with auto-reload
-deno task dev
-
-# Using Node.js
-npm start
-
-# Using Bun
-bun run src/server.ts
+bun dev
 ```
 
 ### Running in Cluster Mode
 
-The relay is stateless and can be run in cluster mode:
+The relay is stateless and can be run in cluster mode by deploying multiple instances
+behind a load balancer. All instances share the same OpenSearch cluster.
 
-```bash
-# Node.js cluster (create a cluster.js file)
-# Deno parallel
-deno serve --parallel -A --env-file src/server.ts
+## Protocol
 
-# Multiple instances behind a load balancer
-# Deploy to Cloudflare Workers, etc.
-```
+This relay implements NIP-01 (Basic protocol flow) via WebSocket at `/`.
 
-## API Endpoints
+### Client-to-Relay Messages
 
-### POST /event
+- `["EVENT", <event>]` - Submit an event for storage
+- `["REQ", <subscription_id>, <filter>, ...]` - Request events and subscribe
+- `["CLOSE", <subscription_id>]` - Close a subscription
 
-Submit a Nostr event for storage.
+### Relay-to-Client Messages
 
-**Request:**
+- `["EVENT", <subscription_id>, <event>]` - Send an event
+- `["OK", <event_id>, <true|false>, <message>]` - Event acceptance response
+- `["EOSE", <subscription_id>]` - End of stored events
+- `["CLOSED", <subscription_id>, <message>]` - Subscription closed
+- `["NOTICE", <message>]` - Human-readable notice
 
-```json
-{
-  "id": "event-id",
-  "pubkey": "author-pubkey",
-  "created_at": 1234567890,
-  "kind": 1,
-  "tags": [["p", "some-pubkey"]],
-  "content": "Hello, Nostr!",
-  "sig": "signature"
-}
-```
+### NIP-11 Relay Information
 
-**Response:**
-
-```json
-{
-  "ok": true,
-  "message": ""
-}
-```
-
-### POST /req
-
-Query events using Nostr filters.
-
-**Request:**
-
-```json
-{
-  "subscription_id": "sub-1",
-  "filters": [
-    {
-      "kinds": [1],
-      "authors": ["pubkey"],
-      "limit": 20
-    }
-  ]
-}
-```
-
-**Response:**
-
-```json
-{
-  "subscription_id": "sub-1",
-  "events": [...]
-}
-```
-
-### GET / (with Accept: application/nostr+json)
-
-Returns NIP-11 relay information document.
+Send an HTTP GET request to `/` with `Accept: application/nostr+json` header to retrieve
+the relay information document.
 
 ## Supported Filters
 
@@ -186,22 +136,10 @@ Returns NIP-11 relay information document.
 
 ## Development
 
-### Type Checking
-
-```bash
-deno check src/server.ts
-```
-
-### Linting
-
-```bash
-deno lint
-```
-
 ### Testing
 
 ```bash
-deno task test
+bun test
 ```
 
 ## Production Deployment
