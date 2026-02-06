@@ -19,12 +19,12 @@ describe("Protocol Handlers", () => {
     mockStorage = {
       storeEvent: async (_event: NostrEvent) => true,
       deleteEvents: async (_event: NostrEvent) => 0,
-    } as EventStorage;
+    } as unknown as EventStorage;
 
     // Create mock query
     mockQuery = {
       query: async (_filters: Filter[]) => [],
-    } as EventQuery;
+    } as unknown as EventQuery;
   });
 
   describe("handleEventMessage", () => {
