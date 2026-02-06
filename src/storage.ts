@@ -58,7 +58,7 @@ export class EventStorage {
   async storeEvent(event: NostrEvent): Promise<boolean> {
     // Validate event using NSchema
     try {
-      NSchema.json().parse(event);
+      NSchema.event().parse(event);
     } catch (error) {
       throw new Error(`Invalid event: ${error}`);
     }
