@@ -5,8 +5,8 @@ import { verifyEvent } from "nostr-tools";
 
 import { Config } from "./config.ts";
 import { createOpenSearchClient, initializeIndex } from "./opensearch.ts";
-import { EventStorage } from "./storage.ts";
 import { EventQuery } from "./query.ts";
+import { EventStorage } from "./storage.ts";
 
 const config = new Config({
   get(key) {
@@ -87,14 +87,24 @@ async function handleEvent(
     // Verify event signature
     const isValid = verifyEvent(event);
     if (!isValid) {
-      sendMessage(ws, ["OK", event.id, false, "invalid: signature verification failed"]);
+      sendMessage(ws, [
+        "OK",
+        event.id,
+        false,
+        "invalid: signature verification failed",
+      ]);
       return;
     }
 
     // Handle deletion events (kind 5)
     if (event.kind === 5) {
       const deletedCount = await storage.deleteEvents(event);
-      sendMessage(ws, ["OK", event.id, true, `deleted: ${deletedCount} events deleted`]);
+      sendMessage(ws, [
+        "OK",
+        event.id,
+        true,
+        `deleted: ${deletedCount} events deleted`,
+      ]);
       return;
     }
 
@@ -106,7 +116,12 @@ async function handleEvent(
       // Broadcast event to all clients with matching subscriptions
       // Note: In a production relay, you'd iterate through all connected clients
     } else {
-      sendMessage(ws, ["OK", event.id, true, "duplicate: already have this event"]);
+      sendMessage(ws, [
+        "OK",
+        event.id,
+        true,
+        "duplicate: already have this event",
+      ]);
     }
   } catch (error) {
     console.error("Error handling EVENT:", error);
@@ -126,13 +141,21 @@ async function handleReq(
 
     // Validate subscription ID
     if (!subscriptionId || subscriptionId.length > 100) {
-      sendMessage(ws, ["CLOSED", subscriptionId, "invalid: subscription ID too long or empty"]);
+      sendMessage(ws, [
+        "CLOSED",
+        subscriptionId,
+        "invalid: subscription ID too long or empty",
+      ]);
       return;
     }
 
     // Validate filters
     if (!Array.isArray(filters) || filters.length === 0) {
-      sendMessage(ws, ["CLOSED", subscriptionId, "invalid: filters must be a non-empty array"]);
+      sendMessage(ws, [
+        "CLOSED",
+        subscriptionId,
+        "invalid: filters must be a non-empty array",
+      ]);
       return;
     }
 
@@ -143,7 +166,11 @@ async function handleReq(
 
     // Check subscription limit
     if (data.subscriptions.size >= 20) {
-      sendMessage(ws, ["CLOSED", subscriptionId, "rate-limited: too many subscriptions"]);
+      sendMessage(ws, [
+        "CLOSED",
+        subscriptionId,
+        "rate-limited: too many subscriptions",
+      ]);
       return;
     }
 
@@ -152,7 +179,7 @@ async function handleReq(
 
     // Query and send existing events
     const events = await query.query(filters);
-    
+
     for (const event of events) {
       sendMessage(ws, ["EVENT", subscriptionId, event]);
     }
@@ -223,7 +250,7 @@ const server = Bun.serve<WebSocketData>({
   },
 
   websocket: {
-    open(ws) {
+    open(_ws) {
       console.log("WebSocket connection opened");
     },
 
@@ -232,7 +259,10 @@ const server = Bun.serve<WebSocketData>({
         const msg = JSON.parse(message.toString());
 
         if (!Array.isArray(msg) || msg.length === 0) {
-          sendMessage(ws, ["NOTICE", "invalid: message must be a non-empty JSON array"]);
+          sendMessage(ws, [
+            "NOTICE",
+            "invalid: message must be a non-empty JSON array",
+          ]);
           return;
         }
 
@@ -241,31 +271,44 @@ const server = Bun.serve<WebSocketData>({
         switch (type) {
           case "EVENT":
             if (params.length !== 1) {
-              sendMessage(ws, ["NOTICE", "invalid: EVENT message must have exactly 1 parameter"]);
+              sendMessage(ws, [
+                "NOTICE",
+                "invalid: EVENT message must have exactly 1 parameter",
+              ]);
               return;
             }
             await handleEvent(ws, params[0] as NostrEvent);
             break;
 
-          case "REQ":
+          case "REQ": {
             if (params.length < 2) {
-              sendMessage(ws, ["NOTICE", "invalid: REQ message must have subscription ID and at least 1 filter"]);
+              sendMessage(ws, [
+                "NOTICE",
+                "invalid: REQ message must have subscription ID and at least 1 filter",
+              ]);
               return;
             }
             const [subId, ...filters] = params;
             await handleReq(ws, subId as string, filters as Filter[]);
             break;
+          }
 
           case "CLOSE":
             if (params.length !== 1) {
-              sendMessage(ws, ["NOTICE", "invalid: CLOSE message must have exactly 1 parameter"]);
+              sendMessage(ws, [
+                "NOTICE",
+                "invalid: CLOSE message must have exactly 1 parameter",
+              ]);
               return;
             }
             handleClose(ws, params[0] as string);
             break;
 
           default:
-            sendMessage(ws, ["NOTICE", `invalid: unknown message type: ${type}`]);
+            sendMessage(ws, [
+              "NOTICE",
+              `invalid: unknown message type: ${type}`,
+            ]);
         }
       } catch (error) {
         console.error("Error processing message:", error);

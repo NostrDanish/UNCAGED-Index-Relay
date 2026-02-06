@@ -1,6 +1,6 @@
+import { NSchema } from "@nostrify/nostrify";
 import type { Client } from "@opensearch-project/opensearch";
 import type { NostrEvent } from "nostr-tools";
-import { NSchema } from "@nostrify/nostrify";
 
 interface StoredEvent extends NostrEvent {
   tags_map: Record<string, string[]>;
@@ -163,9 +163,11 @@ export class EventStorage {
     }
 
     const eventIdsToDelete: string[] = [];
-    const coordinatesToDelete: Array<
-      { kind: number; pubkey: string; d: string }
-    > = [];
+    const coordinatesToDelete: Array<{
+      kind: number;
+      pubkey: string;
+      d: string;
+    }> = [];
 
     for (const tag of deletionEvent.tags) {
       if (tag[0] === "e" && tag[1]) {

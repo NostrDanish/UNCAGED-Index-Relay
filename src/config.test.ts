@@ -1,5 +1,5 @@
-import { describe, it } from "node:test";
 import { strict as assert } from "node:assert";
+import { describe, it } from "node:test";
 import { Config } from "./config.ts";
 
 describe("Config", () => {
@@ -19,34 +19,25 @@ describe("Config", () => {
     it("should throw error when PORT is not a number", () => {
       const mockEnv = new Map([["PORT", "invalid"]]);
       const config = new Config(mockEnv);
-      assert.throws(
-        () => config.port,
-        {
-          message: "PORT must be a valid port number (1-65535).",
-        },
-      );
+      assert.throws(() => config.port, {
+        message: "PORT must be a valid port number (1-65535).",
+      });
     });
 
     it("should throw error when PORT is below 1", () => {
       const mockEnv = new Map([["PORT", "0"]]);
       const config = new Config(mockEnv);
-      assert.throws(
-        () => config.port,
-        {
-          message: "PORT must be a valid port number (1-65535).",
-        },
-      );
+      assert.throws(() => config.port, {
+        message: "PORT must be a valid port number (1-65535).",
+      });
     });
 
     it("should throw error when PORT is above 65535", () => {
       const mockEnv = new Map([["PORT", "65536"]]);
       const config = new Config(mockEnv);
-      assert.throws(
-        () => config.port,
-        {
-          message: "PORT must be a valid port number (1-65535).",
-        },
-      );
+      assert.throws(() => config.port, {
+        message: "PORT must be a valid port number (1-65535).",
+      });
     });
 
     it("should accept PORT at boundary values", () => {
