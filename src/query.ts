@@ -1,5 +1,6 @@
 import type { Client } from "@opensearch-project/opensearch";
 import type { Filter, NostrEvent } from "nostr-tools";
+import { matchFilter } from "nostr-tools";
 
 interface StoredEvent extends NostrEvent {
   tags_map: Record<string, string[]>;
@@ -68,8 +69,8 @@ export class EventQuery {
       })
       .filter((event): event is NostrEvent => event !== null)
       .filter((event: NostrEvent) => {
-        // Additional client-side filtering if needed
-        return filters.some((filter) => this.matchesFilter(event, filter));
+        // Additional client-side filtering to handle prefix matching and edge cases
+        return filters.some((filter) => matchFilter(filter, event));
       });
   }
 
@@ -152,53 +153,5 @@ export class EventQuery {
     }
 
     return Math.min(Math.max(...limits), 5000); // Cap at 5000
-  }
-
-  private matchesFilter(event: NostrEvent, filter: Filter): boolean {
-    // Additional client-side validation
-    if (filter.ids && !filter.ids.some((id) => event.id.startsWith(id))) {
-      return false;
-    }
-
-    if (
-      filter.authors &&
-      !filter.authors.some((author) => event.pubkey.startsWith(author))
-    ) {
-      return false;
-    }
-
-    if (filter.kinds && !filter.kinds.includes(event.kind)) {
-      return false;
-    }
-
-    if (filter.since && event.created_at < filter.since) {
-      return false;
-    }
-
-    if (filter.until && event.created_at > filter.until) {
-      return false;
-    }
-
-    // Check tag filters
-    for (const [key, values] of Object.entries(filter)) {
-      if (key.startsWith("#") && Array.isArray(values)) {
-        const tagName = key.substring(1);
-        const hasMatchingTag = event.tags.some(
-          (tag) =>
-            tag[0] === tagName &&
-            values.some((v) => {
-              const tagValue = tag[1];
-              const valueStr = String(v);
-              return typeof tagValue === "string" &&
-                tagValue.startsWith(valueStr);
-            }),
-        );
-        if (!hasMatchingTag) {
-          return false;
-        }
-      }
-    }
-
-    return true;
   }
 }
