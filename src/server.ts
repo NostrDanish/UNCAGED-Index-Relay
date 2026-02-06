@@ -1,10 +1,14 @@
 import process from "node:process";
 import type { ServerWebSocket } from "bun";
 import type { Filter, NostrEvent } from "nostr-tools";
-import { verifyEvent } from "nostr-tools";
 
 import { Config } from "./config.ts";
 import { createOpenSearchClient, initializeIndex } from "./opensearch.ts";
+import {
+  handleEventMessage,
+  handleReqMessage,
+  validateSubscriptionCount,
+} from "./protocol.ts";
 import { EventQuery } from "./query.ts";
 import { EventStorage } from "./storage.ts";
 
@@ -84,45 +88,8 @@ async function handleEvent(
   event: NostrEvent,
 ) {
   try {
-    // Verify event signature
-    const isValid = verifyEvent(event);
-    if (!isValid) {
-      sendMessage(ws, [
-        "OK",
-        event.id,
-        false,
-        "invalid: signature verification failed",
-      ]);
-      return;
-    }
-
-    // Handle deletion events (kind 5)
-    if (event.kind === 5) {
-      const deletedCount = await storage.deleteEvents(event);
-      sendMessage(ws, [
-        "OK",
-        event.id,
-        true,
-        `deleted: ${deletedCount} events deleted`,
-      ]);
-      return;
-    }
-
-    // Store the event
-    const stored = await storage.storeEvent(event);
-
-    if (stored) {
-      sendMessage(ws, ["OK", event.id, true, ""]);
-      // Broadcast event to all clients with matching subscriptions
-      // Note: In a production relay, you'd iterate through all connected clients
-    } else {
-      sendMessage(ws, [
-        "OK",
-        event.id,
-        true,
-        "duplicate: already have this event",
-      ]);
-    }
+    const result = await handleEventMessage(event, storage);
+    sendMessage(ws, ["OK", result.eventId, result.accepted, result.message]);
   } catch (error) {
     console.error("Error handling EVENT:", error);
     const message = error instanceof Error ? error.message : String(error);
@@ -139,37 +106,21 @@ async function handleReq(
   try {
     const data = ws.data;
 
-    // Validate subscription ID
-    if (!subscriptionId || subscriptionId.length > 100) {
-      sendMessage(ws, [
-        "CLOSED",
-        subscriptionId,
-        "invalid: subscription ID too long or empty",
-      ]);
+    // Check subscription limit before processing
+    const limitError = validateSubscriptionCount(data.subscriptions.size);
+    if (limitError) {
+      sendMessage(ws, ["CLOSED", subscriptionId, limitError.message]);
       return;
     }
 
-    // Validate filters
-    if (!Array.isArray(filters) || filters.length === 0) {
+    // Process the REQ message
+    const result = await handleReqMessage(subscriptionId, filters, query);
+
+    if (!result.success) {
       sendMessage(ws, [
         "CLOSED",
-        subscriptionId,
-        "invalid: filters must be a non-empty array",
-      ]);
-      return;
-    }
-
-    if (filters.length > 100) {
-      sendMessage(ws, ["CLOSED", subscriptionId, "invalid: too many filters"]);
-      return;
-    }
-
-    // Check subscription limit
-    if (data.subscriptions.size >= 20) {
-      sendMessage(ws, [
-        "CLOSED",
-        subscriptionId,
-        "rate-limited: too many subscriptions",
+        result.error.subscriptionId,
+        result.error.message,
       ]);
       return;
     }
@@ -177,10 +128,8 @@ async function handleReq(
     // Store subscription
     data.subscriptions.set(subscriptionId, { id: subscriptionId, filters });
 
-    // Query and send existing events
-    const events = await query.query(filters);
-
-    for (const event of events) {
+    // Send existing events
+    for (const event of result.events) {
       sendMessage(ws, ["EVENT", subscriptionId, event]);
     }
 
