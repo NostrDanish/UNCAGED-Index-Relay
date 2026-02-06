@@ -176,7 +176,7 @@ function handleClose(
 }
 
 // Create Bun server with WebSocket support
-const server = Bun.serve({
+const server = Bun.serve<WebSocketData>({
   port: config.port,
   fetch(req, server) {
     const url = new URL(req.url);
@@ -186,7 +186,7 @@ const server = Bun.serve({
       const upgraded = server.upgrade(req, {
         data: {
           subscriptions: new Map<string, Subscription>(),
-        } as WebSocketData,
+        },
       });
 
       if (!upgraded) {
@@ -275,11 +275,7 @@ const server = Bun.serve({
 
     close(ws) {
       console.log("WebSocket connection closed");
-      ws.data.subscriptions.clear();
-    },
-
-    error(ws, error) {
-      console.error("WebSocket error:", error);
+      ws.data?.subscriptions.clear();
     },
   },
 });
