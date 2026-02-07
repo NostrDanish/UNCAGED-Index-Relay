@@ -7,24 +7,18 @@ import {
   handleReqMessage,
   validateSubscriptionCount,
 } from "./protocol.ts";
-import type { EventQuery } from "./query.ts";
 import type { EventStorage } from "./storage.ts";
 
 describe("Protocol Handlers", () => {
   let mockStorage: EventStorage;
-  let mockQuery: EventQuery;
 
   beforeEach(() => {
-    // Create mock storage
+    // Create mock storage with query method
     mockStorage = {
       storeEvent: async (_event: NostrEvent) => true,
       deleteEvents: async (_event: NostrEvent) => 0,
-    } as unknown as EventStorage;
-
-    // Create mock query
-    mockQuery = {
       query: async (_filters: Filter[]) => [],
-    } as unknown as EventQuery;
+    } as unknown as EventStorage;
   });
 
   describe("handleEventMessage", () => {
@@ -98,9 +92,9 @@ describe("Protocol Handlers", () => {
       const filters: Filter[] = [{ kinds: [1] }];
       const mockEvents: NostrEvent[] = [];
 
-      mockQuery.query = async () => mockEvents;
+      mockStorage.query = async () => mockEvents;
 
-      const result = await handleReqMessage("sub1", filters, mockQuery);
+      const result = await handleReqMessage("sub1", filters, mockStorage);
 
       assert.equal(result.success, true);
       if (result.success) {
@@ -111,7 +105,7 @@ describe("Protocol Handlers", () => {
     it("should reject empty subscription ID", async () => {
       const filters: Filter[] = [{ kinds: [1] }];
 
-      const result = await handleReqMessage("", filters, mockQuery);
+      const result = await handleReqMessage("", filters, mockStorage);
 
       assert.equal(result.success, false);
       if (!result.success) {
@@ -126,7 +120,7 @@ describe("Protocol Handlers", () => {
       const filters: Filter[] = [{ kinds: [1] }];
       const longSubId = "a".repeat(101);
 
-      const result = await handleReqMessage(longSubId, filters, mockQuery);
+      const result = await handleReqMessage(longSubId, filters, mockStorage);
 
       assert.equal(result.success, false);
       if (!result.success) {
@@ -140,7 +134,7 @@ describe("Protocol Handlers", () => {
     it("should reject empty filters array", async () => {
       const filters: Filter[] = [];
 
-      const result = await handleReqMessage("sub1", filters, mockQuery);
+      const result = await handleReqMessage("sub1", filters, mockStorage);
 
       assert.equal(result.success, false);
       if (!result.success) {
@@ -156,7 +150,7 @@ describe("Protocol Handlers", () => {
         kinds: [1],
       }));
 
-      const result = await handleReqMessage("sub1", filters, mockQuery);
+      const result = await handleReqMessage("sub1", filters, mockStorage);
 
       assert.equal(result.success, false);
       if (!result.success) {
@@ -187,10 +181,10 @@ describe("Protocol Handlers", () => {
         ),
       ];
 
-      mockQuery.query = async () => mockEvents;
+      mockStorage.query = async () => mockEvents;
 
       const filters: Filter[] = [{ kinds: [1] }];
-      const result = await handleReqMessage("sub1", filters, mockQuery);
+      const result = await handleReqMessage("sub1", filters, mockStorage);
 
       assert.equal(result.success, true);
       if (result.success) {
@@ -204,7 +198,7 @@ describe("Protocol Handlers", () => {
         kinds: [1],
       }));
 
-      const result = await handleReqMessage("sub1", filters, mockQuery, {
+      const result = await handleReqMessage("sub1", filters, mockStorage, {
         maxFilters: 10,
       });
 
@@ -218,7 +212,7 @@ describe("Protocol Handlers", () => {
       const filters: Filter[] = [{ kinds: [1] }];
       const subId = "a".repeat(51);
 
-      const result = await handleReqMessage(subId, filters, mockQuery, {
+      const result = await handleReqMessage(subId, filters, mockStorage, {
         maxSubIdLength: 50,
       });
 

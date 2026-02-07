@@ -1,14 +1,12 @@
+import type { NostrRelayInfo } from "@nostrify/nostrify";
 import type { ServerWebSocket } from "bun";
 import type { Filter, NostrEvent } from "nostr-tools";
-
 import {
   handleEventMessage,
   handleReqMessage,
   validateSubscriptionCount,
 } from "./protocol.ts";
-import type { EventQuery } from "./query.ts";
 import type { EventStorage } from "./storage.ts";
-import type { NostrRelayInfo } from "@nostrify/nostrify";
 
 // Track subscriptions per connection
 export interface Subscription {
@@ -22,16 +20,10 @@ export interface WebSocketData {
 
 export class Relay {
   private storage: EventStorage;
-  private query: EventQuery;
   private relayInfo: NostrRelayInfo;
 
-  constructor(
-    storage: EventStorage,
-    query: EventQuery,
-    relayInfo?: Partial<NostrRelayInfo>,
-  ) {
+  constructor(storage: EventStorage, relayInfo?: Partial<NostrRelayInfo>) {
     this.storage = storage;
-    this.query = query;
     this.relayInfo = {
       name: "Ditto Relay",
       description: "A Nostr relay backed by OpenSearch",
@@ -106,7 +98,7 @@ export class Relay {
       const result = await handleReqMessage(
         subscriptionId,
         filters,
-        this.query,
+        this.storage,
       );
 
       if (!result.success) {

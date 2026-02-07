@@ -3,14 +3,12 @@ import { afterEach, beforeEach, describe, it } from "node:test";
 import type { ServerWebSocket } from "bun";
 import type { Filter, NostrEvent } from "nostr-tools";
 import { finalizeEvent, generateSecretKey } from "nostr-tools";
-import type { EventQuery } from "./query.ts";
 import { Relay, type WebSocketData } from "./relay.ts";
 import type { EventStorage } from "./storage.ts";
 
 describe("Relay", () => {
   let relay: Relay;
   let mockStorage: EventStorage;
-  let mockQuery: EventQuery;
   let mockWs: ServerWebSocket<WebSocketData>;
   let sentMessages: unknown[][];
   let consoleErrorSpy: typeof console.error;
@@ -25,16 +23,12 @@ describe("Relay", () => {
     console.error = () => {};
     console.log = () => {};
 
-    // Create mock storage
+    // Create mock storage with query method
     mockStorage = {
       storeEvent: async (_event: NostrEvent) => true,
       deleteEvents: async (_event: NostrEvent) => 0,
-    } as unknown as EventStorage;
-
-    // Create mock query
-    mockQuery = {
       query: async (_filters: Filter[]) => [],
-    } as unknown as EventQuery;
+    } as unknown as EventStorage;
 
     // Create mock WebSocket
     mockWs = {
@@ -46,7 +40,7 @@ describe("Relay", () => {
       },
     } as unknown as ServerWebSocket<WebSocketData>;
 
-    relay = new Relay(mockStorage, mockQuery);
+    relay = new Relay(mockStorage);
   });
 
   afterEach(() => {
@@ -65,7 +59,7 @@ describe("Relay", () => {
     });
 
     it("should allow customizing relay info", () => {
-      const customRelay = new Relay(mockStorage, mockQuery, {
+      const customRelay = new Relay(mockStorage, {
         name: "Custom Relay",
         description: "My custom relay",
         pubkey: "abc123",
@@ -200,7 +194,7 @@ describe("Relay", () => {
         ),
       ];
 
-      mockQuery.query = async () => mockEvents;
+      mockStorage.query = async () => mockEvents;
 
       const filters: Filter[] = [{ kinds: [1] }];
       await relay.handleReq(mockWs, "sub1", filters);
@@ -218,7 +212,7 @@ describe("Relay", () => {
     });
 
     it("should send EOSE even when no events match", async () => {
-      mockQuery.query = async () => [];
+      mockStorage.query = async () => [];
 
       const filters: Filter[] = [{ kinds: [999] }];
       await relay.handleReq(mockWs, "sub1", filters);
@@ -261,7 +255,7 @@ describe("Relay", () => {
     });
 
     it("should handle query errors gracefully", async () => {
-      mockQuery.query = async () => {
+      mockStorage.query = async () => {
         throw new Error("Query failed");
       };
 
@@ -277,7 +271,7 @@ describe("Relay", () => {
     });
 
     it("should store subscription on success", async () => {
-      mockQuery.query = async () => [];
+      mockStorage.query = async () => [];
 
       const filters: Filter[] = [{ kinds: [1], authors: ["abc"] }];
       await relay.handleReq(mockWs, "sub1", filters);
@@ -331,7 +325,7 @@ describe("Relay", () => {
     });
 
     it("should handle REQ message", async () => {
-      mockQuery.query = async () => [];
+      mockStorage.query = async () => [];
 
       const message = JSON.stringify(["REQ", "sub1", { kinds: [1] }]);
       await relay.handleMessage(mockWs, message);
@@ -424,7 +418,7 @@ describe("Relay", () => {
     });
 
     it("should handle Buffer messages", async () => {
-      mockQuery.query = async () => [];
+      mockStorage.query = async () => [];
 
       const messageStr = JSON.stringify(["REQ", "sub1", { kinds: [1] }]);
       const buffer = Buffer.from(messageStr);

@@ -2,7 +2,6 @@ import process from "node:process";
 
 import { Config } from "./config.ts";
 import { createOpenSearchClient, initializeIndex } from "./opensearch.ts";
-import { EventQuery } from "./query.ts";
 import { Relay, type WebSocketData } from "./relay.ts";
 import { EventStorage } from "./storage.ts";
 
@@ -27,10 +26,9 @@ try {
 }
 
 const storage = new EventStorage(opensearchClient, indexName);
-const query = new EventQuery(opensearchClient, indexName);
 
 // Initialize relay
-const relay = new Relay(storage, query);
+const relay = new Relay(storage);
 
 // Create Bun server with WebSocket support
 // Enable reusePort when running in cluster mode (WORKER_ID is set)

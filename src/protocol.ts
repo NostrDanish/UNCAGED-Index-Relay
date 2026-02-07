@@ -1,6 +1,5 @@
 import type { Filter, NostrEvent } from "nostr-tools";
 import { verifyEvent } from "nostr-tools";
-import type { EventQuery } from "./query.ts";
 import type { EventStorage } from "./storage.ts";
 
 export interface OkResponse {
@@ -65,7 +64,7 @@ export async function handleEventMessage(
 export async function handleReqMessage(
   subscriptionId: string,
   filters: Filter[],
-  query: EventQuery,
+  storage: EventStorage,
   options: {
     maxFilters?: number;
     maxSubIdLength?: number;
@@ -109,7 +108,7 @@ export async function handleReqMessage(
   }
 
   // Query and return existing events
-  const events = await query.query(filters);
+  const events = await storage.query(filters);
 
   return { success: true, events };
 }
