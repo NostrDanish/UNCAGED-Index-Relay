@@ -38,24 +38,17 @@ export async function initializeIndex(
             created_at: { type: "long" },
             kind: { type: "integer" },
             tags: {
-              type: "nested",
-              properties: {
-                0: { type: "keyword" },
-                1: { type: "text" },
-                2: { type: "text" },
-                3: { type: "text" },
-              },
+              type: "object",
+              enabled: false,
             },
             tags_map: {
               type: "object",
-              enabled: false,
             },
             content: {
               type: "text",
               analyzer: "standard",
             },
             sig: { type: "keyword" },
-            d_tag: { type: "keyword" },
             deleted: { type: "boolean" },
           },
         },

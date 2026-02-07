@@ -72,9 +72,12 @@ describe("EventStorage", () => {
 
       const indexed = indexedDocs[0] as {
         id: string;
-        body: { deleted: boolean };
+        body: { id: string; deleted: boolean };
       };
-      assert.equal(indexed.id, event.id);
+      // Document ID should be note1... encoded
+      assert.ok(indexed.id.startsWith("note1"));
+      // Event hex ID should still be in the body
+      assert.equal(indexed.body.id, event.id);
       assert.equal(indexed.body.deleted, false);
     });
 
@@ -118,8 +121,10 @@ describe("EventStorage", () => {
 
       await storage.storeEvent(event);
 
-      const indexed = indexedDocs[0] as { body: { d_tag: string } };
-      assert.equal(indexed.body.d_tag, "article-1");
+      const indexed = indexedDocs[0] as {
+        body: { tags_map: Record<string, string[]> };
+      };
+      assert.deepEqual(indexed.body.tags_map.d, ["article-1"]);
     });
 
     it("should reject parameterized replaceable event without d tag", async () => {
@@ -156,16 +161,10 @@ describe("EventStorage", () => {
         deleted: false,
       };
 
-      mockClient.search = (async () => ({
+      // Mock get to return the older event
+      mockClient.get = (async () => ({
         body: {
-          hits: {
-            hits: [
-              {
-                _id: "old123",
-                _source: olderEvent,
-              },
-            ],
-          },
+          _source: olderEvent,
         },
       })) as never;
 
@@ -182,8 +181,8 @@ describe("EventStorage", () => {
       const result = await storage.storeEvent(newerEvent);
 
       assert.equal(result, true);
-      assert.equal(deletedIds.length, 1);
-      assert.equal(deletedIds[0], "old123");
+      // No longer explicitly deletes - just overwrites with index()
+      assert.equal(deletedIds.length, 0);
       assert.equal(indexedDocs.length, 1);
     });
 
@@ -203,16 +202,10 @@ describe("EventStorage", () => {
         deleted: false,
       };
 
-      mockClient.search = (async () => ({
+      // Mock get to return the newer event
+      mockClient.get = (async () => ({
         body: {
-          hits: {
-            hits: [
-              {
-                _id: "new123",
-                _source: newerEvent,
-              },
-            ],
-          },
+          _source: newerEvent,
         },
       })) as never;
 
@@ -268,9 +261,17 @@ describe("EventStorage", () => {
         deleted: false,
       };
 
-      mockClient.get = (async () => ({
+      // Mock search to return the target event
+      mockClient.search = (async () => ({
         body: {
-          _source: targetEvent,
+          hits: {
+            hits: [
+              {
+                _id: "note1xyz", // Document ID would be note1...
+                _source: targetEvent,
+              },
+            ],
+          },
         },
       })) as never;
 
@@ -292,7 +293,7 @@ describe("EventStorage", () => {
         id: string;
         body: { doc: { deleted: boolean } };
       };
-      assert.equal(updated.id, "target123");
+      assert.equal(updated.id, "note1xyz");
       assert.equal(updated.body.doc.deleted, true);
     });
 
@@ -338,13 +339,14 @@ describe("EventStorage", () => {
     it("should handle event not found gracefully", async () => {
       const sk = generateSecretKey();
 
-      mockClient.get = (async () => {
-        const error = new Error("Not found") as Error & {
-          meta?: { statusCode: number };
-        };
-        error.meta = { statusCode: 404 };
-        throw error;
-      }) as never;
+      // Mock search to return no results
+      mockClient.search = (async () => ({
+        body: {
+          hits: {
+            hits: [],
+          },
+        },
+      })) as never;
 
       const deletionEvent = finalizeEvent(
         {
@@ -365,16 +367,6 @@ describe("EventStorage", () => {
       const sk = generateSecretKey();
       const pk = getPublicKey(sk);
 
-      let updateByQueryCalled = false;
-      mockClient.updateByQuery = (async () => {
-        updateByQueryCalled = true;
-        return {
-          body: {
-            updated: 2,
-          },
-        };
-      }) as never;
-
       const deletionEvent = finalizeEvent(
         {
           kind: 5,
@@ -387,8 +379,16 @@ describe("EventStorage", () => {
 
       const deletedCount = await storage.deleteEvents(deletionEvent);
 
-      assert.equal(deletedCount, 2);
-      assert.equal(updateByQueryCalled, true);
+      // Should call update with the naddr-encoded document ID
+      assert.equal(deletedCount, 1);
+      assert.equal(updatedDocs.length, 1);
+      const updated = updatedDocs[0] as {
+        id: string;
+        body: { doc: { deleted: boolean } };
+      };
+      // Document ID should be naddr1... encoded
+      assert.ok(updated.id.startsWith("naddr1"));
+      assert.equal(updated.body.doc.deleted, true);
     });
 
     it("should not delete by coordinate when pubkeys don't match", async () => {

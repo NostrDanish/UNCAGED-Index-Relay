@@ -2,10 +2,10 @@ import { NSchema } from "@nostrify/nostrify";
 import type { Client } from "@opensearch-project/opensearch";
 import type { Filter, NostrEvent } from "nostr-tools";
 import { matchFilter } from "nostr-tools";
+import { naddrEncode, noteEncode } from "nostr-tools/nip19";
 
 interface StoredEvent extends NostrEvent {
   tags_map: Record<string, string[]>;
-  d_tag?: string;
   deleted?: boolean;
 }
 
@@ -53,11 +53,6 @@ export class EventStorage {
     return tagsMap;
   }
 
-  private getDTag(event: NostrEvent): string | undefined {
-    const dTag = event.tags.find((tag) => tag[0] === "d");
-    return dTag?.[1];
-  }
-
   private isReplaceableEvent(kind: number): boolean {
     // Replaceable events: 0, 3, and 10000-19999
     return kind === 0 || kind === 3 || (kind >= 10000 && kind <= 19999);
@@ -66,6 +61,33 @@ export class EventStorage {
   private isParameterizedReplaceableEvent(kind: number): boolean {
     // Parameterized replaceable events: 30000-39999
     return kind >= 30000 && kind <= 39999;
+  }
+
+  private getDocumentId(
+    event: NostrEvent,
+    tagsMap: Record<string, string[]>,
+  ): string {
+    // Replaceable events (kinds 0, 3, 10000-19999) -> naddr with kind:pubkey
+    if (this.isReplaceableEvent(event.kind)) {
+      return naddrEncode({
+        kind: event.kind,
+        pubkey: event.pubkey,
+        identifier: "", // Empty identifier for non-parameterized replaceable events
+      });
+    }
+
+    // Parameterized replaceable events (kinds 30000-39999) -> naddr with kind:pubkey:d
+    if (this.isParameterizedReplaceableEvent(event.kind)) {
+      const identifier = tagsMap.d?.[0] || "";
+      return naddrEncode({
+        kind: event.kind,
+        pubkey: event.pubkey,
+        identifier,
+      });
+    }
+
+    // All other events -> note1 (encoded event ID)
+    return noteEncode(event.id);
   }
 
   async storeEvent(event: NostrEvent): Promise<boolean> {
@@ -77,90 +99,54 @@ export class EventStorage {
     }
 
     const tagsMap = this.buildTagsMap(event.tags);
-    const dTag = this.getDTag(event);
+
+    // Validate parameterized replaceable events have a d tag
+    if (this.isParameterizedReplaceableEvent(event.kind)) {
+      const dTagValue = tagsMap.d?.[0];
+      if (!dTagValue) {
+        throw new Error("Parameterized replaceable event must have a d tag");
+      }
+    }
+
+    // Generate document ID (will be the same for replaceable events with same coordinate)
+    const documentId = this.getDocumentId(event, tagsMap);
+
+    // For replaceable/addressable events, check if a newer event already exists
+    if (
+      this.isReplaceableEvent(event.kind) ||
+      this.isParameterizedReplaceableEvent(event.kind)
+    ) {
+      try {
+        const existing = await this.client.get({
+          index: this.indexName,
+          id: documentId,
+        });
+
+        const existingEvent = existing.body._source as StoredEvent;
+        if (existingEvent && existingEvent.created_at >= event.created_at) {
+          return false; // Older event, reject
+        }
+        // Will overwrite the older event below
+      } catch (error) {
+        const osError = error as OpenSearchError;
+        if (osError.meta?.statusCode !== 404) {
+          throw error;
+        }
+        // Document doesn't exist yet, continue to insert
+      }
+    }
 
     const storedEvent: StoredEvent = {
       ...event,
       tags_map: tagsMap,
-      d_tag: dTag,
       deleted: false,
     };
 
-    // Handle replaceable events
-    if (this.isReplaceableEvent(event.kind)) {
-      // Check if a newer event already exists
-      const existing = await this.client.search({
-        index: this.indexName,
-        body: {
-          query: {
-            bool: {
-              must: [
-                { term: { pubkey: event.pubkey } },
-                { term: { kind: event.kind } },
-                { term: { deleted: false } },
-              ],
-            },
-          },
-          size: 1,
-          sort: [{ created_at: "desc" }],
-        },
-      });
-
-      if (existing.body.hits.hits.length > 0) {
-        const existingEvent = existing.body.hits.hits[0]._source as StoredEvent;
-        if (existingEvent && existingEvent.created_at >= event.created_at) {
-          return false; // Older event, reject
-        }
-        // Delete older event
-        await this.client.delete({
-          index: this.indexName,
-          id: existing.body.hits.hits[0]._id,
-        });
-      }
-    }
-
-    // Handle parameterized replaceable events
-    if (this.isParameterizedReplaceableEvent(event.kind)) {
-      if (!dTag) {
-        throw new Error("Parameterized replaceable event must have a d tag");
-      }
-
-      // Check if a newer event already exists with same pubkey, kind, and d tag
-      const existing = await this.client.search({
-        index: this.indexName,
-        body: {
-          query: {
-            bool: {
-              must: [
-                { term: { pubkey: event.pubkey } },
-                { term: { kind: event.kind } },
-                { term: { d_tag: dTag } },
-                { term: { deleted: false } },
-              ],
-            },
-          },
-          size: 1,
-          sort: [{ created_at: "desc" }],
-        },
-      });
-
-      if (existing.body.hits.hits.length > 0) {
-        const existingEvent = existing.body.hits.hits[0]._source as StoredEvent;
-        if (existingEvent && existingEvent.created_at >= event.created_at) {
-          return false; // Older event, reject
-        }
-        // Delete older event
-        await this.client.delete({
-          index: this.indexName,
-          id: existing.body.hits.hits[0]._id,
-        });
-      }
-    }
-
-    // Store the event
+    // Store the event with NIP-19 encoded document ID
+    // For replaceable/addressable events, this will overwrite the old document
     await this.client.index({
       index: this.indexName,
-      id: event.id,
+      id: documentId,
       body: storedEvent,
       refresh: true,
     });
@@ -199,20 +185,29 @@ export class EventStorage {
 
     let deletedCount = 0;
 
-    // Delete by event ID
+    // Delete by event ID (search by hex ID field, not document ID)
     for (const eventId of eventIdsToDelete) {
       try {
-        const event = await this.client.get({
+        const result = await this.client.search({
           index: this.indexName,
-          id: eventId,
+          body: {
+            query: {
+              bool: {
+                must: [
+                  { term: { id: eventId } },
+                  { term: { pubkey: deletionEvent.pubkey } },
+                ],
+              },
+            },
+            size: 1,
+          },
         });
 
-        const eventData = event.body._source as StoredEvent;
-        // Only allow deletion if the deletion request is from the same author
-        if (eventData && eventData.pubkey === deletionEvent.pubkey) {
+        if (result.body.hits.hits.length > 0) {
+          const documentId = result.body.hits.hits[0]._id;
           await this.client.update({
             index: this.indexName,
-            id: eventId,
+            id: documentId,
             body: {
               doc: { deleted: true },
             },
@@ -222,39 +217,38 @@ export class EventStorage {
         }
       } catch (error) {
         // Event not found or other error, continue
-        const osError = error as OpenSearchError;
-        if (osError.meta?.statusCode !== 404) {
-          console.error(`Error deleting event ${eventId}:`, error);
-        }
+        console.error(`Error deleting event ${eventId}:`, error);
       }
     }
 
-    // Delete by coordinate (kind:pubkey:d-tag)
+    // Delete by coordinate (kind:pubkey:d-tag) - use naddr as document ID
     for (const coord of coordinatesToDelete) {
       // Only allow deletion if the deletion request is from the same author
       if (coord.pubkey === deletionEvent.pubkey) {
-        const result = await this.client.updateByQuery({
-          index: this.indexName,
-          body: {
-            query: {
-              bool: {
-                must: [
-                  { term: { kind: coord.kind } },
-                  { term: { pubkey: coord.pubkey } },
-                  { term: { d_tag: coord.d } },
-                ],
-              },
+        try {
+          const documentId = naddrEncode({
+            kind: coord.kind,
+            pubkey: coord.pubkey,
+            identifier: coord.d,
+          });
+
+          await this.client.update({
+            index: this.indexName,
+            id: documentId,
+            body: {
+              doc: { deleted: true },
             },
-            script: {
-              source: "ctx._source.deleted = true",
-            },
-          },
-          refresh: true,
-        });
-        // Handle both response formats (direct response or task)
-        const updateResponse = result.body as UpdateByQueryResponse;
-        if (typeof updateResponse.updated === "number") {
-          deletedCount += updateResponse.updated;
+            refresh: true,
+          });
+          deletedCount++;
+        } catch (error) {
+          const osError = error as OpenSearchError;
+          if (osError.meta?.statusCode !== 404) {
+            console.error(
+              `Error deleting coordinate ${coord.kind}:${coord.pubkey}:${coord.d}:`,
+              error,
+            );
+          }
         }
       }
     }
@@ -346,19 +340,9 @@ export class EventStorage {
     for (const [key, values] of Object.entries(filter)) {
       if (key.startsWith("#") && Array.isArray(values) && values.length > 0) {
         const tagName = key.substring(1);
-        // Use nested query for tag matching
+        // Query tags_map directly - each tag name maps to array of values
         must.push({
-          nested: {
-            path: "tags",
-            query: {
-              bool: {
-                must: [
-                  { term: { "tags.0": tagName } },
-                  { terms: { "tags.1": values } },
-                ],
-              },
-            },
-          },
+          terms: { [`tags_map.${tagName}`]: values },
         });
       }
     }
