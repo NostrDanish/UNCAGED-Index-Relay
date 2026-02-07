@@ -77,7 +77,7 @@ After you have made changes, test your code with Bun:
 bun test
 ```
 
-When writing tests, always use the built-in `bun:test` framework.
+When writing tests, always use the built-in `node:test` framework.
 
 Always solve problems at their root, eg removing dead code or using proper
 types, not just doing a bandaid fix.
