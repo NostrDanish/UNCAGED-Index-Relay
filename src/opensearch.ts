@@ -6,7 +6,7 @@ import type {
   NostrRelayEVENT,
   NRelay,
 } from "@nostrify/nostrify";
-import { NIP50 } from "@nostrify/nostrify";
+import { NIP50, NKinds } from "@nostrify/nostrify";
 import type { Client, ClientOptions } from "@opensearch-project/opensearch";
 import { Client as OpenSearchClient } from "@opensearch-project/opensearch";
 import { naddrEncode, noteEncode } from "nostr-tools/nip19";
@@ -18,17 +18,6 @@ import type { Config } from "./config.ts";
 interface NostrEventDocument extends NostrEvent {
   tags_map: Record<string, string[]>;
   deleted?: boolean;
-}
-
-/**
- * Event kind categories based on NIP-01
- */
-function isReplaceableEvent(kind: number): boolean {
-  return kind === 0 || kind === 3 || (kind >= 10000 && kind < 20000);
-}
-
-function isAddressableEvent(kind: number): boolean {
-  return kind >= 30000 && kind < 40000;
 }
 
 /**
@@ -92,7 +81,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     event: NostrEvent,
     tagsMap: Record<string, string[]>,
   ): string {
-    if (isReplaceableEvent(event.kind)) {
+    if (NKinds.replaceable(event.kind)) {
       return naddrEncode({
         kind: event.kind,
         pubkey: event.pubkey,
@@ -100,7 +89,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
       });
     }
 
-    if (isAddressableEvent(event.kind)) {
+    if (NKinds.addressable(event.kind)) {
       const identifier = tagsMap.d?.[0] || "";
       return naddrEncode({
         kind: event.kind,
@@ -270,7 +259,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     const docId = this.getDocumentId(event, doc.tags_map);
 
     // For replaceable/addressable events, check if we should replace
-    if (isReplaceableEvent(event.kind) || isAddressableEvent(event.kind)) {
+    if (NKinds.replaceable(event.kind) || NKinds.addressable(event.kind)) {
       try {
         const existing = await this.client.get({
           index: this.indexName,
