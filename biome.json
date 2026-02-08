@@ -17,6 +17,17 @@
     "enabled": true,
     "rules": {
       "recommended": true,
+      "style": {
+        "noRestrictedGlobals": {
+          "level": "error",
+          "options": {
+            "deniedGlobals": {
+              "Bun": "Import specific functions from 'bun' instead of using the global",
+              "Deno": "Use a 'node:' builtin instead of the Deno global"
+            }
+          }
+        }
+      },
       "suspicious": {
         "noExplicitAny": "error"
       }

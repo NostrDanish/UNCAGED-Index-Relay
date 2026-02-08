@@ -1,5 +1,5 @@
 import process from "node:process";
-import { spawn, type Subprocess } from "bun";
+import { type Subprocess, spawn } from "bun";
 import { Config } from "./config.ts";
 
 const config = new Config({

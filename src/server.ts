@@ -1,5 +1,5 @@
-import { serve } from "bun";
 import process from "node:process";
+import { serve } from "bun";
 
 import { Config } from "./config.ts";
 import { OpenSearchRelay } from "./opensearch.ts";
