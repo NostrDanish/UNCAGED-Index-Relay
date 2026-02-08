@@ -129,6 +129,87 @@ describe("Relay", () => {
       assert.deepEqual(sentMessages[0], ["OK", deletionEvent.id, true, ""]);
     });
 
+    it("should only allow deletion of own events via a-tag (NIP-09)", async () => {
+      const sk = generateSecretKey();
+      const otherPubkey = finalizeEvent(
+        { kind: 1, created_at: 0, tags: [], content: "" },
+        generateSecretKey(),
+      ).pubkey;
+
+      let removeCalled = false;
+      let removeFilters: Filter[] = [];
+
+      mockStorage.remove = async (filters: Filter[]) => {
+        removeCalled = true;
+        removeFilters = filters;
+      };
+
+      const deletionEvent = finalizeEvent(
+        {
+          kind: 5,
+          created_at: Math.floor(Date.now() / 1000),
+          tags: [
+            ["a", `30023:${otherPubkey}:my-article`], // Trying to delete someone else's event
+          ],
+          content: "",
+        },
+        sk,
+      );
+
+      await relay.handleEvent(mockWs, deletionEvent);
+
+      // Event should be accepted (deletion events are always stored)
+      assert.equal(sentMessages.length, 1);
+      assert.deepEqual(sentMessages[0], ["OK", deletionEvent.id, true, ""]);
+
+      // But remove should not be called with the mismatched pubkey
+      if (removeCalled) {
+        // If remove was called, verify it has no filters (a-tag was rejected)
+        assert.equal(removeFilters.length, 0);
+      }
+    });
+
+    it("should allow deletion of own events via a-tag (NIP-09)", async () => {
+      const sk = generateSecretKey();
+      const myPubkey = finalizeEvent(
+        { kind: 1, created_at: 0, tags: [], content: "" },
+        sk,
+      ).pubkey;
+
+      let removeCalled = false;
+      let removeFilters: Filter[] = [];
+
+      mockStorage.remove = async (filters: Filter[]) => {
+        removeCalled = true;
+        removeFilters = filters;
+      };
+
+      const deletionEvent = finalizeEvent(
+        {
+          kind: 5,
+          created_at: Math.floor(Date.now() / 1000),
+          tags: [
+            ["a", `30023:${myPubkey}:my-article`], // Deleting own event
+          ],
+          content: "",
+        },
+        sk,
+      );
+
+      await relay.handleEvent(mockWs, deletionEvent);
+
+      // Event should be accepted
+      assert.equal(sentMessages.length, 1);
+      assert.deepEqual(sentMessages[0], ["OK", deletionEvent.id, true, ""]);
+
+      // Remove should be called with the correct filter
+      assert.ok(removeCalled);
+      assert.equal(removeFilters.length, 1);
+      assert.deepEqual(removeFilters[0].kinds, [30023]);
+      assert.deepEqual(removeFilters[0].authors, [myPubkey]);
+      assert.deepEqual(removeFilters[0]["#d"], ["my-article"]);
+    });
+
     it("should handle storage errors gracefully", async () => {
       mockStorage.event = async () => {
         throw new Error("Storage error");

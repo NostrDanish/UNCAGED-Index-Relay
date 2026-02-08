@@ -90,12 +90,17 @@ export class Relay {
             if (parts.length === 3) {
               const [kindStr, pubkey, dTag] = parts;
               const kind = Number.parseInt(kindStr, 10);
-              if (!Number.isNaN(kind)) {
-                aTagFilters.push({
+              // NIP-09: Only allow deletion of own events (pubkey must match)
+              if (!Number.isNaN(kind) && pubkey === event.pubkey) {
+                const filter: Filter = {
                   kinds: [kind],
                   authors: [pubkey],
-                  "#d": [dTag],
-                });
+                };
+                // Only add d-tag filter for addressable events (with non-empty d-tag)
+                if (dTag) {
+                  filter["#d"] = [dTag];
+                }
+                aTagFilters.push(filter);
               }
             }
           }
