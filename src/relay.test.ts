@@ -1,4 +1,5 @@
 import { strict as assert } from "node:assert";
+import { Buffer } from "node:buffer";
 import { afterEach, beforeEach, describe, it } from "node:test";
 import type { NRelay } from "@nostrify/nostrify";
 import type { ServerWebSocket } from "bun";

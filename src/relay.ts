@@ -1,3 +1,4 @@
+import type { Buffer } from "node:buffer";
 import type { NostrRelayInfo, NRelay } from "@nostrify/nostrify";
 import type { ServerWebSocket } from "bun";
 import type { Filter, NostrEvent } from "nostr-tools";
