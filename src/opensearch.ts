@@ -227,26 +227,8 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
   }
 
   /**
-   * Check if a new event should replace an existing one
-   * Returns true if newEvent is newer (higher created_at, or lower id if equal timestamps)
-   */
-  private shouldReplace(
-    newEvent: NostrEvent,
-    existingEvent: NostrEvent,
-  ): boolean {
-    if (newEvent.created_at > existingEvent.created_at) {
-      return true;
-    }
-    if (newEvent.created_at === existingEvent.created_at) {
-      // Lower ID wins (lexical order)
-      return newEvent.id < existingEvent.id;
-    }
-    return false;
-  }
-
-  /**
    * Insert a single event into OpenSearch
-   * For replaceable/addressable events, only stores if newer than existing
+   * For replaceable/addressable events, uses atomic scripted upsert to only store if newer
    */
   async event(
     event: NostrEvent,
@@ -255,53 +237,45 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     const doc = this.eventToDocument(event);
     const docId = this.getDocumentId(event);
 
-    // For replaceable/addressable events, check if we should replace
+    // For replaceable/addressable events, use atomic scripted upsert
     if (NKinds.replaceable(event.kind) || NKinds.addressable(event.kind)) {
-      try {
-        const existing = await this.client.get({
-          index: this.indexName,
-          id: docId,
-          _source: ["id", "created_at", "deleted"],
-        });
-
-        if (existing.body.found) {
-          const existingDoc = existing.body._source as {
-            id: string;
-            created_at: number;
-            deleted?: boolean;
-          };
-
-          // Skip if already deleted
-          if (existingDoc.deleted) {
-            return;
-          }
-
-          const existingEvent: NostrEvent = {
-            id: existingDoc.id,
-            created_at: existingDoc.created_at,
-          } as NostrEvent;
-
-          // Only insert if new event should replace existing one
-          if (!this.shouldReplace(event, existingEvent)) {
-            return; // Don't replace - existing event is newer or equal
-          }
-        }
-      } catch (error) {
-        // Document doesn't exist, proceed with insert
-        if ((error as { statusCode?: number }).statusCode !== 404) {
-          throw error;
-        }
-      }
+      await this.client.update({
+        index: this.indexName,
+        id: docId,
+        body: {
+          script: {
+            source: `
+              if (ctx._source.deleted == true) {
+                ctx.op = 'none';
+              } else if (params.event.created_at > ctx._source.created_at) {
+                ctx._source = params.event;
+              } else if (params.event.created_at == ctx._source.created_at && 
+                         params.event.id.compareTo(ctx._source.id) < 0) {
+                ctx._source = params.event;
+              } else {
+                ctx.op = 'none';
+              }
+            `,
+            lang: "painless",
+            params: { event: doc },
+          },
+          upsert: doc,
+        },
+        refresh: false,
+        // @ts-expect-error: signal not in types but supported by underlying HTTP client
+        signal: opts?.signal,
+      });
+    } else {
+      // Regular events - just index normally
+      await this.client.index({
+        index: this.indexName,
+        id: docId,
+        body: doc,
+        refresh: false,
+        // @ts-expect-error: signal not in types but supported by underlying HTTP client
+        signal: opts?.signal,
+      });
     }
-
-    await this.client.index({
-      index: this.indexName,
-      id: docId,
-      body: doc,
-      refresh: false, // Don't refresh immediately for better performance
-      // @ts-expect-error: signal not in types but supported by underlying HTTP client
-      signal: opts?.signal,
-    });
   }
 
   /**
