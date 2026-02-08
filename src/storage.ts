@@ -100,50 +100,86 @@ export class EventStorage {
 
     const tagsMap = this.buildTagsMap(event.tags);
 
-    // Validate parameterized replaceable events have a d tag
-    if (this.isParameterizedReplaceableEvent(event.kind)) {
-      const dTagValue = tagsMap.d?.[0];
-      if (!dTagValue) {
-        throw new Error("Parameterized replaceable event must have a d tag");
-      }
-    }
-
-    // Generate document ID (will be the same for replaceable events with same coordinate)
-    const documentId = this.getDocumentId(event, tagsMap);
-
-    // For replaceable/addressable events, check if a newer event already exists
-    if (
-      this.isReplaceableEvent(event.kind) ||
-      this.isParameterizedReplaceableEvent(event.kind)
-    ) {
-      try {
-        const existing = await this.client.get({
-          index: this.indexName,
-          id: documentId,
-        });
-
-        const existingEvent = existing.body._source as StoredEvent;
-        if (existingEvent && existingEvent.created_at >= event.created_at) {
-          return false; // Older event, reject
-        }
-        // Will overwrite the older event below
-      } catch (error) {
-        const osError = error as OpenSearchError;
-        if (osError.meta?.statusCode !== 404) {
-          throw error;
-        }
-        // Document doesn't exist yet, continue to insert
-      }
-    }
-
     const storedEvent: StoredEvent = {
       ...event,
       tags_map: tagsMap,
       deleted: false,
     };
 
+    // Handle replaceable events
+    if (this.isReplaceableEvent(event.kind)) {
+      // Check if a newer event already exists
+      const existing = await this.client.search({
+        index: this.indexName,
+        body: {
+          query: {
+            bool: {
+              must: [
+                { term: { pubkey: event.pubkey } },
+                { term: { kind: event.kind } },
+                { term: { deleted: false } },
+              ],
+            },
+          },
+          size: 1,
+          sort: [{ created_at: "desc" }],
+        },
+      });
+
+      if (existing.body.hits.hits.length > 0) {
+        const existingEvent = existing.body.hits.hits[0]._source as StoredEvent;
+        if (existingEvent && existingEvent.created_at >= event.created_at) {
+          return false; // Older event, reject
+        }
+        // Delete older event
+        await this.client.delete({
+          index: this.indexName,
+          id: existing.body.hits.hits[0]._id,
+        });
+      }
+    }
+
+    // Handle parameterized replaceable events
+    if (this.isParameterizedReplaceableEvent(event.kind)) {
+      const dTagValue = tagsMap.d?.[0];
+      if (!dTagValue) {
+        throw new Error("Parameterized replaceable event must have a d tag");
+      }
+
+      // Check if a newer event already exists with same pubkey, kind, and d tag
+      const existing = await this.client.search({
+        index: this.indexName,
+        body: {
+          query: {
+            bool: {
+              must: [
+                { term: { pubkey: event.pubkey } },
+                { term: { kind: event.kind } },
+                { term: { "tags_map.d": dTagValue } },
+                { term: { deleted: false } },
+              ],
+            },
+          },
+          size: 1,
+          sort: [{ created_at: "desc" }],
+        },
+      });
+
+      if (existing.body.hits.hits.length > 0) {
+        const existingEvent = existing.body.hits.hits[0]._source as StoredEvent;
+        if (existingEvent && existingEvent.created_at >= event.created_at) {
+          return false; // Older event, reject
+        }
+        // Delete older event
+        await this.client.delete({
+          index: this.indexName,
+          id: existing.body.hits.hits[0]._id,
+        });
+      }
+    }
+
     // Store the event with NIP-19 encoded document ID
-    // For replaceable/addressable events, this will overwrite the old document
+    const documentId = this.getDocumentId(event, tagsMap);
     await this.client.index({
       index: this.indexName,
       id: documentId,
