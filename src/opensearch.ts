@@ -9,37 +9,22 @@ import type {
 import { NIP50 } from "@nostrify/nostrify";
 import type { Client, ClientOptions } from "@opensearch-project/opensearch";
 import { Client as OpenSearchClient } from "@opensearch-project/opensearch";
+import { naddrEncode, noteEncode } from "nostr-tools/nip19";
 import type { Config } from "./config.ts";
 
 /**
  * OpenSearch document structure for Nostr events
  */
-interface NostrEventDocument {
-  id: string;
-  pubkey: string;
-  created_at: number;
-  kind: number;
-  content: string;
-  sig: string;
-  tags: string[][];
-  indexed_at: number;
-  // Flattened tag fields for fast filtering
-  tag_e?: string[];
-  tag_p?: string[];
-  tag_a?: string[];
-  tag_d?: string[];
-  tag_t?: string[];
-  tag_r?: string[];
-  tag_g?: string[];
-  // Generic tag storage for all other tags
-  tags_flat?: Array<{ name: string; value: string }>;
+interface NostrEventDocument extends NostrEvent {
+  tags_map: Record<string, string[]>;
+  deleted?: boolean;
 }
 
 /**
  * Event kind categories based on NIP-01
  */
 function isReplaceableEvent(kind: number): boolean {
-  return (kind >= 10000 && kind < 20000) || kind === 0 || kind === 3;
+  return kind === 0 || kind === 3 || (kind >= 10000 && kind < 20000);
 }
 
 function isAddressableEvent(kind: number): boolean {
@@ -79,89 +64,66 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
   }
 
   /**
-   * Extract tag values for indexing
+   * Build tags_map from tags array
    */
-  private extractTagValues(tags: string[][], tagName: string): string[] {
-    return tags
-      .filter((tag) => tag[0] === tagName && tag.length >= 2)
-      .map((tag) => tag[1]);
-  }
+  private buildTagsMap(tags: string[][]): Record<string, string[]> {
+    const tagsMap: Record<string, string[]> = {};
 
-  /**
-   * Get the first value of a specific tag, or empty string if not found
-   */
-  private getTagValue(tags: string[][], tagName: string): string {
-    const values = this.extractTagValues(tags, tagName);
-    return values.length > 0 ? values[0] : "";
-  }
-
-  /**
-   * Generate OpenSearch document ID for an event
-   * - Regular events: use event.id
-   * - Replaceable events: use kind:pubkey:
-   * - Addressable events: use kind:pubkey:d-tag
-   * This ensures only the latest event is stored for replaceable/addressable events
-   */
-  private getDocumentId(event: NostrEvent): string {
-    if (isAddressableEvent(event.kind)) {
-      const dTag = this.getTagValue(event.tags, "d");
-      return `${event.kind}:${event.pubkey}:${dTag}`;
+    for (const tag of tags) {
+      if (tag.length >= 2) {
+        const [tagName, ...values] = tag;
+        if (!tagsMap[tagName]) {
+          tagsMap[tagName] = [];
+        }
+        tagsMap[tagName].push(...values);
+      }
     }
+
+    return tagsMap;
+  }
+
+  /**
+   * Generate OpenSearch document ID for an event using NIP-19 encoding
+   * - Regular events: note1... (noteEncode)
+   * - Replaceable events: naddr1... with kind:pubkey
+   * - Addressable events: naddr1... with kind:pubkey:d-tag
+   */
+  private getDocumentId(
+    event: NostrEvent,
+    tagsMap: Record<string, string[]>,
+  ): string {
     if (isReplaceableEvent(event.kind)) {
-      return `${event.kind}:${event.pubkey}:`;
+      return naddrEncode({
+        kind: event.kind,
+        pubkey: event.pubkey,
+        identifier: "", // Empty identifier for non-parameterized replaceable events
+      });
     }
-    // Regular and ephemeral events use their event ID
-    return event.id;
+
+    if (isAddressableEvent(event.kind)) {
+      const identifier = tagsMap.d?.[0] || "";
+      return naddrEncode({
+        kind: event.kind,
+        pubkey: event.pubkey,
+        identifier,
+      });
+    }
+
+    // All other events -> note1 (encoded event ID)
+    return noteEncode(event.id);
   }
 
   /**
    * Convert NostrEvent to OpenSearch document
    */
   private eventToDocument(event: NostrEvent): NostrEventDocument {
-    const doc: NostrEventDocument = {
-      id: event.id,
-      pubkey: event.pubkey,
-      created_at: event.created_at,
-      kind: event.kind,
-      content: event.content,
-      sig: event.sig,
-      tags: event.tags,
-      indexed_at: Math.floor(Date.now() / 1000),
+    const tagsMap = this.buildTagsMap(event.tags);
+
+    return {
+      ...event,
+      tags_map: tagsMap,
+      deleted: false,
     };
-
-    // Index common tags for fast filtering
-    const eValues = this.extractTagValues(event.tags, "e");
-    if (eValues.length > 0) doc.tag_e = eValues;
-
-    const pValues = this.extractTagValues(event.tags, "p");
-    if (pValues.length > 0) doc.tag_p = pValues;
-
-    const aValues = this.extractTagValues(event.tags, "a");
-    if (aValues.length > 0) doc.tag_a = aValues;
-
-    const dValues = this.extractTagValues(event.tags, "d");
-    if (dValues.length > 0) doc.tag_d = dValues;
-
-    const tValues = this.extractTagValues(event.tags, "t");
-    if (tValues.length > 0) doc.tag_t = tValues;
-
-    const rValues = this.extractTagValues(event.tags, "r");
-    if (rValues.length > 0) doc.tag_r = rValues;
-
-    const gValues = this.extractTagValues(event.tags, "g");
-    if (gValues.length > 0) doc.tag_g = gValues;
-
-    // Index all other tags in a flattened structure for generic queries
-    const commonTags = new Set(["e", "p", "a", "d", "t", "r", "g"]);
-    const otherTags = event.tags
-      .filter((tag) => tag.length >= 2 && !commonTags.has(tag[0]))
-      .map((tag) => ({ name: tag[0], value: tag[1] }));
-
-    if (otherTags.length > 0) {
-      doc.tags_flat = otherTags;
-    }
-
-    return doc;
   }
 
   /**
@@ -183,7 +145,9 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
    * Build OpenSearch query from Nostr filter
    */
   private buildQuery(filter: NostrFilter): Record<string, unknown> {
-    const must: Record<string, unknown>[] = [];
+    const must: Record<string, unknown>[] = [
+      { term: { deleted: false } }, // Always exclude deleted events
+    ];
 
     // ID filter
     if (filter.ids && filter.ids.length > 0) {
@@ -208,31 +172,11 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
       must.push({ range: { created_at: range } });
     }
 
-    // Tag filters
+    // Tag filters using tags_map
     for (const [key, values] of Object.entries(filter)) {
       if (key.startsWith("#") && Array.isArray(values) && values.length > 0) {
         const tagName = key.substring(1);
-
-        // Use optimized fields for common tags
-        const commonTags = new Set(["e", "p", "a", "d", "t", "r", "g"]);
-        if (commonTags.has(tagName)) {
-          must.push({ terms: { [`tag_${tagName}`]: values } });
-        } else {
-          // Use nested query for other tags
-          must.push({
-            nested: {
-              path: "tags_flat",
-              query: {
-                bool: {
-                  must: [
-                    { term: { "tags_flat.name": tagName } },
-                    { terms: { "tags_flat.value": values } },
-                  ],
-                },
-              },
-            },
-          });
-        }
+        must.push({ terms: { [`tags_map.${tagName}`]: values } });
       }
     }
 
@@ -241,23 +185,16 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
       const tokens = NIP50.parseInput(filter.search);
       const searchText = tokens.filter((t) => typeof t === "string").join(" ");
 
-      // Use match query with boosting for better relevance if there's search text
       if (searchText.trim()) {
         must.push({
           match: {
             content: {
               query: searchText,
               operator: "and",
-              fuzziness: "AUTO",
             },
           },
         });
       }
-    }
-
-    // If no conditions, match all
-    if (must.length === 0) {
-      return { match_all: {} };
     }
 
     return { bool: { must } };
@@ -280,15 +217,8 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
 
     const query = this.buildQuery(filter);
 
-    // For NIP-50 search queries with text, sort by relevance score first, then by created_at
-    // For regular queries, sort by created_at only (newest first)
-    const hasFullTextSearch = filter.search ? !!filter.search.trim() : false;
-    const sort = hasFullTextSearch
-      ? [
-          { _score: { order: "desc" as const } },
-          { created_at: { order: "desc" as const } },
-        ]
-      : [{ created_at: { order: "desc" as const } }];
+    // Sort by created_at (newest first)
+    const sort = [{ created_at: { order: "desc" as const } }];
 
     try {
       const response = await this.client.search({
@@ -297,15 +227,6 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
           query,
           sort,
           size: limit,
-          _source: [
-            "id",
-            "pubkey",
-            "created_at",
-            "kind",
-            "tags",
-            "content",
-            "sig",
-          ],
         },
       });
 
@@ -346,7 +267,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     opts?: { signal?: AbortSignal },
   ): Promise<void> {
     const doc = this.eventToDocument(event);
-    const docId = this.getDocumentId(event);
+    const docId = this.getDocumentId(event, doc.tags_map);
 
     // For replaceable/addressable events, check if we should replace
     if (isReplaceableEvent(event.kind) || isAddressableEvent(event.kind)) {
@@ -354,18 +275,24 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
         const existing = await this.client.get({
           index: this.indexName,
           id: docId,
-          _source: ["id", "created_at"],
+          _source: ["id", "created_at", "deleted"],
         });
 
         if (existing.body.found) {
           const existingDoc = existing.body._source as {
             id: string;
             created_at: number;
+            deleted?: boolean;
           };
+
+          // Skip if already deleted
+          if (existingDoc.deleted) {
+            return;
+          }
+
           const existingEvent: NostrEvent = {
             id: existingDoc.id,
             created_at: existingDoc.created_at,
-            // We only need id and created_at for comparison
           } as NostrEvent;
 
           // Only insert if new event should replace existing one
@@ -448,7 +375,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
   }
 
   /**
-   * Remove events matching the given filters
+   * Remove events matching the given filters (soft delete using deleted field)
    */
   async remove(
     filters: NostrFilter[],
@@ -467,7 +394,8 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
 
         // Get document IDs for matched events
         for (const event of events) {
-          const docId = this.getDocumentId(event);
+          const tagsMap = this.buildTagsMap(event.tags);
+          const docId = this.getDocumentId(event, tagsMap);
           docIdsToDelete.push(docId);
         }
       } catch (error) {
@@ -478,23 +406,26 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     // Remove duplicates
     const uniqueDocIds = [...new Set(docIdsToDelete)];
 
-    // Delete all matching documents in bulk
+    // Soft delete all matching documents by setting deleted: true
     if (uniqueDocIds.length > 0) {
       const body: Array<Record<string, unknown>> = [];
 
       for (const docId of uniqueDocIds) {
         body.push({
-          delete: {
+          update: {
             _index: this.indexName,
             _id: docId,
           },
+        });
+        body.push({
+          doc: { deleted: true },
         });
       }
 
       try {
         const response = await this.client.bulk({
           body,
-          refresh: false,
+          refresh: true, // Refresh to make deletions visible immediately
           // @ts-expect-error: signal not in types but supported by underlying HTTP client
           signal: opts?.signal,
         });
@@ -502,24 +433,24 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
         if (response.body.errors) {
           const erroredDocuments = response.body.items.filter(
             (item: Record<string, unknown>) =>
-              (item.delete as Record<string, unknown>)?.error,
+              (item.update as Record<string, unknown>)?.error,
           );
           console.error(
-            `Bulk delete had ${erroredDocuments.length} errors:`,
+            `Bulk update had ${erroredDocuments.length} errors:`,
             erroredDocuments.slice(0, 5),
           );
         } else {
-          console.log(`🗑️  Deleted ${uniqueDocIds.length} events`);
+          console.log(`🗑️  Soft deleted ${uniqueDocIds.length} events`);
         }
       } catch (error) {
-        console.error("Bulk delete failed:", error);
+        console.error("Bulk update failed:", error);
         throw error;
       }
     }
   }
 
   /**
-   * Initialize OpenSearch index with optimized mappings
+   * Initialize OpenSearch index with simple mappings
    */
   async migrate(): Promise<void> {
     try {
@@ -533,100 +464,40 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
         return;
       }
 
-      // Create index with optimized mappings
+      // Create index with simple mappings
       await this.client.indices.create({
         index: this.indexName,
         body: {
           settings: {
             number_of_shards: 3,
             number_of_replicas: 1,
-            refresh_interval: "5s", // Batch refreshes for better write performance
-            "index.mapping.total_fields.limit": 2000,
-            analysis: {
-              analyzer: {
-                nostr_content_analyzer: {
-                  type: "standard",
-                  stopwords: "_none_", // Don't remove stop words for Nostr content
-                },
-              },
-            },
+            "index.max_result_window": 100000,
           },
           mappings: {
-            dynamic: "strict",
             properties: {
-              id: {
-                type: "keyword",
+              id: { type: "keyword" },
+              pubkey: { type: "keyword" },
+              created_at: { type: "long" },
+              kind: { type: "integer" },
+              tags: {
+                type: "object",
+                enabled: false,
               },
-              pubkey: {
-                type: "keyword",
-              },
-              created_at: {
-                type: "long",
-              },
-              kind: {
-                type: "integer",
+              tags_map: {
+                type: "object",
               },
               content: {
                 type: "text",
-                analyzer: "nostr_content_analyzer",
-                // Also store as keyword for exact matching if needed
-                fields: {
-                  keyword: {
-                    type: "keyword",
-                    ignore_above: 256,
-                  },
-                },
+                analyzer: "standard",
               },
-              sig: {
-                type: "keyword",
-              },
-              tags: {
-                type: "keyword",
-                // Store full tag arrays
-              },
-              indexed_at: {
-                type: "long",
-              },
-              // Optimized tag fields for common tags
-              tag_e: {
-                type: "keyword",
-              },
-              tag_p: {
-                type: "keyword",
-              },
-              tag_a: {
-                type: "keyword",
-              },
-              tag_d: {
-                type: "keyword",
-              },
-              tag_t: {
-                type: "keyword",
-              },
-              tag_r: {
-                type: "keyword",
-              },
-              tag_g: {
-                type: "keyword",
-              },
-              // Nested structure for all other tags
-              tags_flat: {
-                type: "nested",
-                properties: {
-                  name: {
-                    type: "keyword",
-                  },
-                  value: {
-                    type: "keyword",
-                  },
-                },
-              },
+              sig: { type: "keyword" },
+              deleted: { type: "boolean" },
             },
           },
         },
       });
 
-      console.log(`✅ Created index ${this.indexName} with optimized mappings`);
+      console.log(`✅ Created index ${this.indexName}`);
     } catch (error) {
       console.error("Failed to create index:", error);
       throw error;
