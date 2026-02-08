@@ -1,6 +1,6 @@
+import type { NRelay } from "@nostrify/nostrify";
 import type { Filter, NostrEvent } from "nostr-tools";
 import { verifyEvent } from "nostr-tools";
-import type { EventStorage } from "./storage.ts";
 
 export interface OkResponse {
   eventId: string;
@@ -18,7 +18,7 @@ export interface ClosedResponse {
  */
 export async function handleEventMessage(
   event: NostrEvent,
-  storage: EventStorage,
+  storage: NRelay,
 ): Promise<OkResponse> {
   // Verify event signature
   const isValid = verifyEvent(event);
@@ -30,32 +30,81 @@ export async function handleEventMessage(
     };
   }
 
-  // Handle deletion events (kind 5)
+  // Handle deletion events (kind 5) using NRelay's remove method
   if (event.kind === 5) {
-    const deletedCount = await storage.deleteEvents(event);
-    return {
-      eventId: event.id,
-      accepted: true,
-      message: `deleted: ${deletedCount} events deleted`,
-    };
+    try {
+      // Extract e and a tags for deletion
+      const eTagValues = event.tags
+        .filter((tag) => tag[0] === "e" && tag.length >= 2)
+        .map((tag) => tag[1]);
+
+      const aTagFilters: Filter[] = [];
+      for (const tag of event.tags) {
+        if (tag[0] === "a" && tag.length >= 2) {
+          const parts = tag[1].split(":");
+          if (parts.length === 3) {
+            const [kindStr, pubkey, dTag] = parts;
+            const kind = Number.parseInt(kindStr, 10);
+            if (!Number.isNaN(kind)) {
+              aTagFilters.push({
+                kinds: [kind],
+                authors: [pubkey],
+                "#d": [dTag],
+              });
+            }
+          }
+        }
+      }
+
+      const filters: Filter[] = [];
+
+      // Filter for event IDs
+      if (eTagValues.length > 0) {
+        filters.push({
+          ids: eTagValues,
+          authors: [event.pubkey], // Only delete own events
+        });
+      }
+
+      // Add addressable event filters
+      filters.push(...aTagFilters);
+
+      // Remove matching events
+      if (filters.length > 0 && storage.remove) {
+        await storage.remove(filters);
+      }
+
+      return {
+        eventId: event.id,
+        accepted: true,
+        message: "",
+      };
+    } catch (error) {
+      console.error("Failed to process deletion event:", error);
+      return {
+        eventId: event.id,
+        accepted: false,
+        message: `error: ${error instanceof Error ? error.message : String(error)}`,
+      };
+    }
   }
 
-  // Store the event
-  const stored = await storage.storeEvent(event);
-
-  if (stored) {
+  // Store the event using NRelay's event method
+  try {
+    await storage.event(event);
     return {
       eventId: event.id,
       accepted: true,
       message: "",
     };
+  } catch (error) {
+    console.error("Failed to store event:", error);
+    return {
+      eventId: event.id,
+      accepted: false,
+      message: `error: ${error instanceof Error ? error.message : String(error)}`,
+    };
   }
-
-  return {
-    eventId: event.id,
-    accepted: true,
-    message: "duplicate: already have this event",
-  };
 }
 
 /**
@@ -64,7 +113,7 @@ export async function handleEventMessage(
 export async function handleReqMessage(
   subscriptionId: string,
   filters: Filter[],
-  storage: EventStorage,
+  storage: NRelay,
   options: {
     maxFilters?: number;
     maxSubIdLength?: number;
@@ -107,10 +156,20 @@ export async function handleReqMessage(
     };
   }
 
-  // Query and return existing events
-  const events = await storage.query(filters);
-
-  return { success: true, events };
+  // Query and return existing events using NRelay's query method
+  try {
+    const events = await storage.query(filters);
+    return { success: true, events };
+  } catch (error) {
+    console.error("Failed to query events:", error);
+    return {
+      success: false,
+      error: {
+        subscriptionId,
+        message: `error: ${error instanceof Error ? error.message : String(error)}`,
+      },
+    };
+  }
 }
 
 /**

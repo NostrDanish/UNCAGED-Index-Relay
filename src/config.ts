@@ -40,7 +40,7 @@ export class Config {
   get clusterWorkers(): number {
     const value = this.env.get("CLUSTER_WORKERS");
     if (!value) {
-       return navigator.hardwareConcurrency;
+      return navigator.hardwareConcurrency;
     }
     const workers = parseInt(value, 10);
     if (Number.isNaN(workers) || workers < 0) {

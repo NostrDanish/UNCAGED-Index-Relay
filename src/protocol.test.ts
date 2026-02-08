@@ -1,5 +1,6 @@
 import { strict as assert } from "node:assert";
 import { beforeEach, describe, it } from "node:test";
+import type { NRelay } from "@nostrify/nostrify";
 import type { Filter, NostrEvent } from "nostr-tools";
 import { finalizeEvent, generateSecretKey } from "nostr-tools";
 import {
@@ -7,18 +8,17 @@ import {
   handleReqMessage,
   validateSubscriptionCount,
 } from "./protocol.ts";
-import type { EventStorage } from "./storage.ts";
 
 describe("Protocol Handlers", () => {
-  let mockStorage: EventStorage;
+  let mockStorage: NRelay;
 
   beforeEach(() => {
-    // Create mock storage with query method
+    // Create mock storage with NRelay interface
     mockStorage = {
-      storeEvent: async (_event: NostrEvent) => true,
-      deleteEvents: async (_event: NostrEvent) => 0,
+      event: async (_event: NostrEvent) => {},
       query: async (_filters: Filter[]) => [],
-    } as unknown as EventStorage;
+      remove: async (_filters: Filter[]) => {},
+    } as unknown as NRelay;
   });
 
   describe("handleEventMessage", () => {
@@ -56,34 +56,30 @@ describe("Protocol Handlers", () => {
         sk,
       );
 
-      mockStorage.deleteEvents = async () => 3;
-
       const result = await handleEventMessage(deletionEvent, mockStorage);
 
       assert.equal(result.accepted, true);
       assert.equal(result.eventId, deletionEvent.id);
-      assert.equal(result.message, "deleted: 3 events deleted");
+      assert.equal(result.message, "");
     });
 
-    it("should return duplicate message when event already exists", async () => {
+    it("should successfully store event", async () => {
       const sk = generateSecretKey();
       const event = finalizeEvent(
         {
           kind: 1,
           created_at: Math.floor(Date.now() / 1000),
           tags: [],
-          content: "Duplicate event",
+          content: "Test event",
         },
         sk,
       );
-
-      mockStorage.storeEvent = async () => false;
 
       const result = await handleEventMessage(event, mockStorage);
 
       assert.equal(result.accepted, true);
       assert.equal(result.eventId, event.id);
-      assert.equal(result.message, "duplicate: already have this event");
+      assert.equal(result.message, "");
     });
   });
 

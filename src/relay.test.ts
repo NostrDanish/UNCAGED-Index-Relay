@@ -1,14 +1,14 @@
 import { strict as assert } from "node:assert";
 import { afterEach, beforeEach, describe, it } from "node:test";
+import type { NRelay } from "@nostrify/nostrify";
 import type { ServerWebSocket } from "bun";
 import type { Filter, NostrEvent } from "nostr-tools";
 import { finalizeEvent, generateSecretKey } from "nostr-tools";
 import { Relay, type WebSocketData } from "./relay.ts";
-import type { EventStorage } from "./storage.ts";
 
 describe("Relay", () => {
   let relay: Relay;
-  let mockStorage: EventStorage;
+  let mockStorage: NRelay;
   let mockWs: ServerWebSocket<WebSocketData>;
   let sentMessages: unknown[][];
   let consoleErrorSpy: typeof console.error;
@@ -23,12 +23,12 @@ describe("Relay", () => {
     console.error = () => {};
     console.log = () => {};
 
-    // Create mock storage with query method
+    // Create mock storage with NRelay interface
     mockStorage = {
-      storeEvent: async (_event: NostrEvent) => true,
-      deleteEvents: async (_event: NostrEvent) => 0,
+      event: async (_event: NostrEvent) => {},
       query: async (_filters: Filter[]) => [],
-    } as unknown as EventStorage;
+      remove: async (_filters: Filter[]) => {},
+    } as unknown as NRelay;
 
     // Create mock WebSocket
     mockWs = {
@@ -101,16 +101,14 @@ describe("Relay", () => {
       assert.deepEqual(sentMessages[0], ["OK", event.id, true, ""]);
     });
 
-    it("should send duplicate message when event already exists", async () => {
-      mockStorage.storeEvent = async () => false;
-
+    it("should successfully store event", async () => {
       const sk = generateSecretKey();
       const event = finalizeEvent(
         {
           kind: 1,
           created_at: Math.floor(Date.now() / 1000),
           tags: [],
-          content: "Duplicate event",
+          content: "Test event",
         },
         sk,
       );
@@ -118,17 +116,10 @@ describe("Relay", () => {
       await relay.handleEvent(mockWs, event);
 
       assert.equal(sentMessages.length, 1);
-      assert.deepEqual(sentMessages[0], [
-        "OK",
-        event.id,
-        true,
-        "duplicate: already have this event",
-      ]);
+      assert.deepEqual(sentMessages[0], ["OK", event.id, true, ""]);
     });
 
     it("should handle deletion events (kind 5)", async () => {
-      mockStorage.deleteEvents = async () => 3;
-
       const sk = generateSecretKey();
       const deletionEvent = finalizeEvent(
         {
@@ -143,16 +134,11 @@ describe("Relay", () => {
       await relay.handleEvent(mockWs, deletionEvent);
 
       assert.equal(sentMessages.length, 1);
-      assert.deepEqual(sentMessages[0], [
-        "OK",
-        deletionEvent.id,
-        true,
-        "deleted: 3 events deleted",
-      ]);
+      assert.deepEqual(sentMessages[0], ["OK", deletionEvent.id, true, ""]);
     });
 
     it("should handle storage errors gracefully", async () => {
-      mockStorage.storeEvent = async () => {
+      mockStorage.event = async () => {
         throw new Error("Storage error");
       };
 

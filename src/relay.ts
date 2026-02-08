@@ -1,4 +1,4 @@
-import type { NostrRelayInfo } from "@nostrify/nostrify";
+import type { NostrRelayInfo, NRelay } from "@nostrify/nostrify";
 import type { ServerWebSocket } from "bun";
 import type { Filter, NostrEvent } from "nostr-tools";
 import {
@@ -6,7 +6,6 @@ import {
   handleReqMessage,
   validateSubscriptionCount,
 } from "./protocol.ts";
-import type { EventStorage } from "./storage.ts";
 
 // Track subscriptions per connection
 export interface Subscription {
@@ -19,10 +18,10 @@ export interface WebSocketData {
 }
 
 export class Relay {
-  private storage: EventStorage;
+  public storage: NRelay;
   private relayInfo: NostrRelayInfo;
 
-  constructor(storage: EventStorage, relayInfo?: Partial<NostrRelayInfo>) {
+  constructor(storage: NRelay, relayInfo?: Partial<NostrRelayInfo>) {
     this.storage = storage;
     this.relayInfo = {
       name: "Ditto Relay",

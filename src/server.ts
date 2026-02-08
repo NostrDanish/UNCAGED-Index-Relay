@@ -1,9 +1,8 @@
 import process from "node:process";
 
 import { Config } from "./config.ts";
-import { createOpenSearchClient, initializeIndex } from "./opensearch.ts";
+import { OpenSearchRelay } from "./opensearch.ts";
 import { Relay, type WebSocketData } from "./relay.ts";
-import { EventStorage } from "./storage.ts";
 
 const config = new Config({
   get(key) {
@@ -11,24 +10,19 @@ const config = new Config({
   },
 });
 
-// Initialize OpenSearch client
-const opensearchClient = createOpenSearchClient(config);
-const indexName = config.opensearchIndex;
+// Initialize OpenSearch relay
+const opensearchRelay = OpenSearchRelay.fromConfig(config);
+const relay = new Relay(opensearchRelay);
 
 // Initialize index on startup
 try {
-  await initializeIndex(opensearchClient, indexName);
+  await opensearchRelay.migrate();
   console.log("Connected to OpenSearch and initialized index");
 } catch (error) {
   console.error("Failed to connect to OpenSearch:", error);
   console.error(`Make sure OpenSearch is running at ${config.opensearchNode}`);
   process.exit(1);
 }
-
-const storage = new EventStorage(opensearchClient, indexName);
-
-// Initialize relay
-const relay = new Relay(storage);
 
 // Create Bun server with WebSocket support
 // Enable reusePort when running in cluster mode (WORKER_ID is set)
