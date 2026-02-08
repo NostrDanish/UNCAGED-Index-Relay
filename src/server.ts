@@ -1,3 +1,4 @@
+import { serve } from "bun";
 import process from "node:process";
 
 import { Config } from "./config.ts";
@@ -26,7 +27,7 @@ try {
 
 // Create Bun server with WebSocket support
 // Enable reusePort when running in cluster mode (WORKER_ID is set)
-const server = Bun.serve<WebSocketData>({
+const server = serve<WebSocketData>({
   port: config.port,
   reusePort: !!process.env.WORKER_ID,
   fetch(req, server) {
