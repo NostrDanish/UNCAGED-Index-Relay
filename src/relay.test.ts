@@ -73,15 +73,6 @@ describe("Relay", () => {
     });
   });
 
-  describe("sendMessage", () => {
-    it("should send JSON-encoded message to client", () => {
-      relay.sendMessage(mockWs, ["OK", "event123", true, ""]);
-
-      assert.equal(sentMessages.length, 1);
-      assert.deepEqual(sentMessages[0], ["OK", "event123", true, ""]);
-    });
-  });
-
   describe("handleEvent", () => {
     it("should accept valid event and send OK response", async () => {
       const sk = generateSecretKey();

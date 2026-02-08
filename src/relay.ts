@@ -1,11 +1,7 @@
 import type { NostrRelayInfo, NRelay } from "@nostrify/nostrify";
 import type { ServerWebSocket } from "bun";
 import type { Filter, NostrEvent } from "nostr-tools";
-import {
-  handleEventMessage,
-  handleReqMessage,
-  validateSubscriptionCount,
-} from "./protocol.ts";
+import { verifyEvent } from "nostr-tools";
 
 // Track subscriptions per connection
 export interface Subscription {
@@ -56,14 +52,187 @@ export class Relay {
   }
 
   // Helper to send JSON message to client
-  sendMessage(ws: ServerWebSocket<WebSocketData>, message: unknown[]) {
+  private sendMessage(ws: ServerWebSocket<WebSocketData>, message: unknown[]) {
     ws.send(JSON.stringify(message));
+  }
+
+  /**
+   * Handle an EVENT message according to NIP-01
+   */
+  private async handleEventMessage(event: NostrEvent): Promise<{
+    eventId: string;
+    accepted: boolean;
+    message: string;
+  }> {
+    // Verify event signature
+    const isValid = verifyEvent(event);
+    if (!isValid) {
+      return {
+        eventId: event.id,
+        accepted: false,
+        message: "invalid: signature verification failed",
+      };
+    }
+
+    // Handle deletion events (kind 5) using NRelay's remove method
+    if (event.kind === 5) {
+      try {
+        // Extract e and a tags for deletion
+        const eTagValues = event.tags
+          .filter((tag) => tag[0] === "e" && tag.length >= 2)
+          .map((tag) => tag[1]);
+
+        const aTagFilters: Filter[] = [];
+        for (const tag of event.tags) {
+          if (tag[0] === "a" && tag.length >= 2) {
+            const parts = tag[1].split(":");
+            if (parts.length === 3) {
+              const [kindStr, pubkey, dTag] = parts;
+              const kind = Number.parseInt(kindStr, 10);
+              if (!Number.isNaN(kind)) {
+                aTagFilters.push({
+                  kinds: [kind],
+                  authors: [pubkey],
+                  "#d": [dTag],
+                });
+              }
+            }
+          }
+        }
+
+        const filters: Filter[] = [];
+
+        // Filter for event IDs
+        if (eTagValues.length > 0) {
+          filters.push({
+            ids: eTagValues,
+            authors: [event.pubkey], // Only delete own events
+          });
+        }
+
+        // Add addressable event filters
+        filters.push(...aTagFilters);
+
+        // Remove matching events
+        if (filters.length > 0 && this.storage.remove) {
+          await this.storage.remove(filters);
+        }
+
+        return {
+          eventId: event.id,
+          accepted: true,
+          message: "",
+        };
+      } catch (error) {
+        console.error("Failed to process deletion event:", error);
+        return {
+          eventId: event.id,
+          accepted: false,
+          message: `error: ${error instanceof Error ? error.message : String(error)}`,
+        };
+      }
+    }
+
+    // Store the event using NRelay's event method
+    try {
+      await this.storage.event(event);
+      return {
+        eventId: event.id,
+        accepted: true,
+        message: "",
+      };
+    } catch (error) {
+      console.error("Failed to store event:", error);
+      return {
+        eventId: event.id,
+        accepted: false,
+        message: `error: ${error instanceof Error ? error.message : String(error)}`,
+      };
+    }
+  }
+
+  /**
+   * Handle a REQ message according to NIP-01
+   */
+  private async handleReqMessage(
+    subscriptionId: string,
+    filters: Filter[],
+  ): Promise<
+    | { success: true; events: NostrEvent[] }
+    | { success: false; error: { subscriptionId: string; message: string } }
+  > {
+    const maxFilters = this.relayInfo.limitation?.max_filters || 100;
+    const maxSubIdLength = this.relayInfo.limitation?.max_subid_length || 100;
+
+    // Validate subscription ID
+    if (!subscriptionId || subscriptionId.length > maxSubIdLength) {
+      return {
+        success: false,
+        error: {
+          subscriptionId,
+          message: "invalid: subscription ID too long or empty",
+        },
+      };
+    }
+
+    // Validate filters
+    if (!Array.isArray(filters) || filters.length === 0) {
+      return {
+        success: false,
+        error: {
+          subscriptionId,
+          message: "invalid: filters must be a non-empty array",
+        },
+      };
+    }
+
+    if (filters.length > maxFilters) {
+      return {
+        success: false,
+        error: {
+          subscriptionId,
+          message: "invalid: too many filters",
+        },
+      };
+    }
+
+    // Query and return existing events using NRelay's query method
+    try {
+      const events = await this.storage.query(filters);
+      return { success: true, events };
+    } catch (error) {
+      console.error("Failed to query events:", error);
+      return {
+        success: false,
+        error: {
+          subscriptionId,
+          message: `error: ${error instanceof Error ? error.message : String(error)}`,
+        },
+      };
+    }
+  }
+
+  /**
+   * Validate subscription count before adding a new one
+   */
+  private validateSubscriptionCount(currentCount: number): {
+    subscriptionId: string;
+    message: string;
+  } | null {
+    const maxSubscriptions = this.relayInfo.limitation?.max_subscriptions || 20;
+    if (currentCount >= maxSubscriptions) {
+      return {
+        subscriptionId: "",
+        message: "rate-limited: too many subscriptions",
+      };
+    }
+    return null;
   }
 
   // Handle EVENT message
   async handleEvent(ws: ServerWebSocket<WebSocketData>, event: NostrEvent) {
     try {
-      const result = await handleEventMessage(event, this.storage);
+      const result = await this.handleEventMessage(event);
       this.sendMessage(ws, [
         "OK",
         result.eventId,
@@ -87,18 +256,16 @@ export class Relay {
       const data = ws.data;
 
       // Check subscription limit before processing
-      const limitError = validateSubscriptionCount(data.subscriptions.size);
+      const limitError = this.validateSubscriptionCount(
+        data.subscriptions.size,
+      );
       if (limitError) {
         this.sendMessage(ws, ["CLOSED", subscriptionId, limitError.message]);
         return;
       }
 
       // Process the REQ message
-      const result = await handleReqMessage(
-        subscriptionId,
-        filters,
-        this.storage,
-      );
+      const result = await this.handleReqMessage(subscriptionId, filters);
 
       if (!result.success) {
         this.sendMessage(ws, [
