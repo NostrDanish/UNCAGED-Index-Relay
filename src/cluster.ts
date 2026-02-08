@@ -1,5 +1,5 @@
 import process from "node:process";
-import type { Subprocess } from "bun";
+import { spawn, type Subprocess } from "bun";
 import { Config } from "./config.ts";
 
 const config = new Config({
@@ -17,7 +17,7 @@ console.log(
 const workers: Subprocess[] = new Array(numWorkers);
 
 for (let i = 0; i < numWorkers; i++) {
-  workers[i] = Bun.spawn({
+  workers[i] = spawn({
     cmd: ["bun", "src/server.ts"],
     stdout: "inherit",
     stderr: "inherit",
