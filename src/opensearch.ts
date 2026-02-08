@@ -77,10 +77,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
    * - Replaceable events: naddr1... with kind:pubkey
    * - Addressable events: naddr1... with kind:pubkey:d-tag
    */
-  private getDocumentId(
-    event: NostrEvent,
-    tagsMap: Record<string, string[]>,
-  ): string {
+  private getDocumentId(event: NostrEvent): string {
     if (NKinds.replaceable(event.kind)) {
       return naddrEncode({
         kind: event.kind,
@@ -90,7 +87,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     }
 
     if (NKinds.addressable(event.kind)) {
-      const identifier = tagsMap.d?.[0] || "";
+      const identifier = event.tags.find(([name]) => name === "d")?.[1] || "";
       return naddrEncode({
         kind: event.kind,
         pubkey: event.pubkey,
@@ -256,7 +253,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     opts?: { signal?: AbortSignal },
   ): Promise<void> {
     const doc = this.eventToDocument(event);
-    const docId = this.getDocumentId(event, doc.tags_map);
+    const docId = this.getDocumentId(event);
 
     // For replaceable/addressable events, check if we should replace
     if (NKinds.replaceable(event.kind) || NKinds.addressable(event.kind)) {
@@ -384,7 +381,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
         // Get document IDs for matched events
         for (const event of events) {
           const tagsMap = this.buildTagsMap(event.tags);
-          const docId = this.getDocumentId(event, tagsMap);
+          const docId = this.getDocumentId(event);
           docIdsToDelete.push(docId);
         }
       } catch (error) {
