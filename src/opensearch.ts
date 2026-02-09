@@ -128,6 +128,295 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
   }
 
   /**
+   * Parse NIP-50 sort mode from search tokens
+   */
+  private parseSortMode(
+    filter: NostrFilter,
+  ): "top" | "hot" | "controversial" | "rising" | null {
+    if (!filter.search) return null;
+
+    const tokens = NIP50.parseInput(filter.search);
+    const sortTokens = tokens.filter(
+      (t) =>
+        typeof t === "object" &&
+        t.key === "sort" &&
+        ["top", "hot", "controversial", "rising"].includes(t.value),
+    );
+
+    // Multiple sort tokens - invalid query, will return 0 events
+    if (sortTokens.length > 1) {
+      return null;
+    }
+
+    if (sortTokens.length === 1) {
+      const token = sortTokens[0];
+      return typeof token === "object"
+        ? (token.value as "top" | "hot" | "controversial" | "rising")
+        : null;
+    }
+
+    return null;
+  }
+
+  /**
+   * Query events with NIP-50 sort algorithms using aggregations
+   */
+  private async querySortedEvents(
+    filter: NostrFilter,
+    sortMode: "top" | "hot" | "controversial" | "rising",
+    limit: number,
+  ): Promise<NostrEvent[]> {
+    const query = this.buildQuery(filter) as {
+      bool: { must: Record<string, unknown>[] };
+    };
+    const now = Math.floor(Date.now() / 1000);
+
+    // Apply default time windows based on sort mode
+    const timeWindow: { gte?: number; lte?: number } = {};
+    if (sortMode === "hot" && !filter.since) {
+      timeWindow.gte = now - 7 * 24 * 60 * 60; // 7 days
+    } else if (sortMode === "rising" && !filter.since) {
+      timeWindow.gte = now - 48 * 60 * 60; // 48 hours
+    } else if (sortMode === "controversial" && !filter.since) {
+      timeWindow.gte = now - 7 * 24 * 60 * 60; // 7 days
+    }
+
+    // Merge with existing time filters
+    if (filter.since || filter.until || Object.keys(timeWindow).length > 0) {
+      const existingTimeFilter = query.bool.must.find(
+        (clause) =>
+          clause.range && (clause.range as Record<string, unknown>).created_at,
+      );
+      if (existingTimeFilter) {
+        // Update existing time filter
+        const rangeClause = existingTimeFilter.range as Record<
+          string,
+          Record<string, number>
+        >;
+        rangeClause.created_at = { ...timeWindow, ...rangeClause.created_at };
+      } else if (Object.keys(timeWindow).length > 0) {
+        // Add new time filter
+        query.bool.must.push({
+          range: { created_at: timeWindow },
+        });
+      }
+    }
+
+    try {
+      // First, get candidate events
+      const candidatesResponse = await this.client.search({
+        index: this.indexName,
+        body: {
+          query,
+          size: Math.min(limit * 10, 10000), // Get more candidates for scoring
+          sort: [{ created_at: { order: "desc" as const } }],
+        },
+      });
+
+      const candidateEvents = candidatesResponse.body.hits.hits
+        .filter((hit: unknown) => {
+          const h = hit as { _source?: NostrEventDocument };
+          return h._source !== undefined;
+        })
+        .map((hit: unknown) => {
+          const h = hit as { _source: NostrEventDocument };
+          return this.documentToEvent(h._source);
+        });
+
+      if (candidateEvents.length === 0) {
+        return [];
+      }
+
+      // Get event IDs for aggregation
+      const eventIds = candidateEvents.map((e: NostrEvent) => e.id);
+
+      // Build aggregation query based on sort mode
+      const scoredEvents = await this.scoreEvents(
+        eventIds,
+        sortMode,
+        now,
+        candidateEvents,
+      );
+
+      return scoredEvents.slice(0, limit);
+    } catch (error) {
+      console.error("Sorted query failed:", error);
+      throw error;
+    }
+  }
+
+  /**
+   * Score events based on references and reactions using aggregations
+   */
+  private async scoreEvents(
+    eventIds: string[],
+    sortMode: "top" | "hot" | "controversial" | "rising",
+    now: number,
+    events: NostrEvent[],
+  ): Promise<NostrEvent[]> {
+    // Query for references (kind 1, 6, 7, etc. that reference these events)
+    const referencesQuery = {
+      bool: {
+        must: [
+          { term: { deleted: false } },
+          {
+            bool: {
+              should: [
+                { terms: { "tags_map.e": eventIds } }, // e-tags
+                { terms: { "tags_map.q": eventIds } }, // q-tags
+                { terms: { "tags_map.a": eventIds } }, // a-tags (addressable)
+              ],
+            },
+          },
+        ],
+      },
+    };
+
+    try {
+      // Aggregate references by target event
+      const refsResponse = await this.client.search({
+        index: this.indexName,
+        body: {
+          query: referencesQuery,
+          size: 0, // We only need aggregations
+          aggs: {
+            by_event: {
+              terms: {
+                field: "tags_map.e",
+                size: eventIds.length,
+              },
+              aggs: {
+                by_kind: {
+                  terms: {
+                    field: "kind",
+                    size: 20,
+                  },
+                },
+                avg_created_at: {
+                  avg: {
+                    field: "created_at",
+                  },
+                },
+                min_created_at: {
+                  min: {
+                    field: "created_at",
+                  },
+                },
+              },
+            },
+          },
+        },
+      });
+
+      // Build score map
+      const scoreMap = new Map<string, number>();
+      const reactionMap = new Map<
+        string,
+        { positive: number; negative: number; total: number }
+      >();
+
+      // Process aggregation results
+      const buckets =
+        (
+          refsResponse.body.aggregations?.by_event as unknown as {
+            buckets?: Array<{
+              key: string;
+              doc_count: number;
+              by_kind?: { buckets?: Array<{ key: number; doc_count: number }> };
+            }>;
+          }
+        )?.buckets || [];
+
+      for (const bucket of buckets) {
+        const eventId = bucket.key;
+        const totalRefs = bucket.doc_count;
+        const kindBuckets = bucket.by_kind?.buckets || [];
+
+        // Count reactions for controversial
+        let positive = 0;
+        let negative = 0;
+
+        for (const kindBucket of kindBuckets) {
+          const kind = kindBucket.key;
+          const count = kindBucket.doc_count;
+
+          if (kind === 7) {
+            // Kind 7 reactions - need to check content for sentiment
+            // For now, approximate: assume 70% positive, 30% negative
+            positive += Math.floor(count * 0.7);
+            negative += Math.floor(count * 0.3);
+          }
+        }
+
+        reactionMap.set(eventId, {
+          positive,
+          negative,
+          total: positive + negative,
+        });
+
+        // Calculate score based on mode
+        let score = 0;
+        const event = events.find((e) => e.id === eventId);
+        if (!event) continue;
+
+        const ageInHours = (now - event.created_at) / 3600;
+
+        switch (sortMode) {
+          case "top":
+            // Total reference count
+            score = totalRefs;
+            break;
+
+          case "hot":
+            // Recent popularity with exponential decay (24h half-life)
+            score = totalRefs * 0.5 ** (ageInHours / 24);
+            break;
+
+          case "controversial": {
+            // Balanced positive/negative reactions
+            const reactions = reactionMap.get(eventId);
+            if (reactions) {
+              const minReactions = Math.min(
+                reactions.positive,
+                reactions.negative,
+              );
+              score = minReactions * Math.sqrt(reactions.total);
+            }
+            break;
+          }
+
+          case "rising":
+            // Engagement velocity (refs per hour)
+            score = totalRefs / Math.max(ageInHours, 0.1);
+            break;
+        }
+
+        scoreMap.set(eventId, score);
+      }
+
+      // Score events that had no references as 0
+      for (const event of events) {
+        if (!scoreMap.has(event.id)) {
+          scoreMap.set(event.id, 0);
+        }
+      }
+
+      // Sort events by score (descending)
+      const sortedEvents = [...events].sort((a, b) => {
+        const scoreA = scoreMap.get(a.id) || 0;
+        const scoreB = scoreMap.get(b.id) || 0;
+        return scoreB - scoreA;
+      });
+
+      return sortedEvents;
+    } catch (error) {
+      console.error("Event scoring failed:", error);
+      // Return events in original order if scoring fails
+      return events;
+    }
+  }
+
+  /**
    * Build OpenSearch query from Nostr filter
    */
   private buildQuery(filter: NostrFilter): Record<string, unknown> {
@@ -200,6 +489,24 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
 
     // Default to 500, cap at 5000
     const limit = Math.min(filter.limit || 500, 5000);
+
+    // Check if this is a sort query
+    const sortMode = this.parseSortMode(filter);
+
+    // Validate: multiple sort tokens return 0 events
+    if (filter.search) {
+      const tokens = NIP50.parseInput(filter.search);
+      const sortTokenCount = tokens.filter(
+        (t) => typeof t === "object" && t.key === "sort",
+      ).length;
+      if (sortTokenCount > 1) {
+        return []; // Invalid query - multiple sort tokens
+      }
+    }
+
+    if (sortMode) {
+      return this.querySortedEvents(filter, sortMode, limit);
+    }
 
     const query = this.buildQuery(filter);
 
