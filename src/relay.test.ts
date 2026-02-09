@@ -355,8 +355,26 @@ describe("Relay", () => {
       assert.deepEqual(sentMessages[0][2], { count: 42 });
     });
 
-    it("should return count with approximate flag", async () => {
-      mockStorage.count = async () => ({ count: 1000, approximate: true });
+    it("should return count with approximate flag for multiple filters", async () => {
+      mockStorage.count = async (filters: Filter[]) => ({
+        count: 1000,
+        approximate: filters.length > 1 ? true : undefined,
+      });
+
+      const filters: Filter[] = [{ kinds: [1] }, { kinds: [7] }];
+      await relay.handleCount(mockWs, "count1", filters);
+
+      assert.equal(sentMessages.length, 1);
+      assert.equal(sentMessages[0][0], "COUNT");
+      assert.equal(sentMessages[0][1], "count1");
+      assert.deepEqual(sentMessages[0][2], { count: 1000, approximate: true });
+    });
+
+    it("should not set approximate flag for single filter", async () => {
+      mockStorage.count = async (filters: Filter[]) => ({
+        count: 42,
+        approximate: filters.length > 1 ? true : undefined,
+      });
 
       const filters: Filter[] = [{ kinds: [1] }];
       await relay.handleCount(mockWs, "count1", filters);
@@ -364,7 +382,7 @@ describe("Relay", () => {
       assert.equal(sentMessages.length, 1);
       assert.equal(sentMessages[0][0], "COUNT");
       assert.equal(sentMessages[0][1], "count1");
-      assert.deepEqual(sentMessages[0][2], { count: 1000, approximate: true });
+      assert.deepEqual(sentMessages[0][2], { count: 42 });
     });
 
     it("should send CLOSED when storage does not support count", async () => {

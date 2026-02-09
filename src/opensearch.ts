@@ -336,12 +336,14 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
 
   /**
    * Count events matching the given filters (NIP-45)
+   * Uses OpenSearch count API for efficiency. For multiple filters, sums the counts
+   * and marks as approximate since we don't deduplicate across filters.
    */
   async count(
     filters: NostrFilter[],
     opts?: { signal?: AbortSignal },
   ): Promise<{ count: number; approximate?: boolean }> {
-    const seenIds = new Set<string>();
+    let totalCount = 0;
 
     for (const filter of filters) {
       if (opts?.signal?.aborted) {
@@ -351,30 +353,23 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
       try {
         const query = this.buildQuery(filter);
 
-        // For accurate counts across filters, we need to fetch IDs to deduplicate
-        // This is necessary because filters are OR'd together
-        const searchResponse = await this.client.search({
+        // Use count API - much more efficient than search, no document fetching
+        const response = await this.client.count({
           index: this.indexName,
-          body: {
-            query,
-            _source: ["id"],
-            size: 10000, // Reasonable limit for counting
-          },
+          body: { query },
         });
 
-        const hits = searchResponse.body.hits.hits;
-        for (const hit of hits) {
-          const id = hit._source?.id;
-          if (id && !seenIds.has(id)) {
-            seenIds.add(id);
-          }
-        }
+        totalCount += response.body.count;
       } catch (error) {
         console.error("Count query failed for filter:", filter, error);
       }
     }
 
-    return { count: seenIds.size };
+    // Mark as approximate if multiple filters (can't deduplicate across filters)
+    return {
+      count: totalCount,
+      approximate: filters.length > 1 ? true : undefined,
+    };
   }
 
   /**
