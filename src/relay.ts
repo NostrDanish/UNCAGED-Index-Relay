@@ -25,7 +25,7 @@ export class Relay {
       description: "A Nostr relay backed by OpenSearch",
       pubkey: "",
       contact: "",
-      supported_nips: [1, 9, 11, 50],
+      supported_nips: [1, 9, 11, 45, 50],
       software: "ditto-relay",
       version: "1.0.0",
       limitation: {
@@ -153,6 +153,77 @@ export class Relay {
         eventId: event.id,
         accepted: false,
         message: `error: ${error instanceof Error ? error.message : String(error)}`,
+      };
+    }
+  }
+
+  /**
+   * Handle a COUNT message according to NIP-45
+   */
+  private async handleCountMessage(
+    subscriptionId: string,
+    filters: Filter[],
+  ): Promise<
+    | { success: true; count: number; approximate?: boolean }
+    | { success: false; error: { subscriptionId: string; message: string } }
+  > {
+    const maxFilters = this.relayInfo.limitation?.max_filters || 100;
+    const maxSubIdLength = this.relayInfo.limitation?.max_subid_length || 100;
+
+    // Validate subscription ID
+    if (!subscriptionId || subscriptionId.length > maxSubIdLength) {
+      return {
+        success: false,
+        error: {
+          subscriptionId,
+          message: "invalid: subscription ID too long or empty",
+        },
+      };
+    }
+
+    // Validate filters
+    if (!Array.isArray(filters) || filters.length === 0) {
+      return {
+        success: false,
+        error: {
+          subscriptionId,
+          message: "invalid: filters must be a non-empty array",
+        },
+      };
+    }
+
+    if (filters.length > maxFilters) {
+      return {
+        success: false,
+        error: {
+          subscriptionId,
+          message: "invalid: too many filters",
+        },
+      };
+    }
+
+    // Count events using the storage backend
+    try {
+      if (!this.storage.count) {
+        return {
+          success: false,
+          error: {
+            subscriptionId,
+            message: "error: COUNT not supported by this relay",
+          },
+        };
+      }
+
+      const result = await this.storage.count(filters);
+      return { success: true, ...result };
+    } catch (error) {
+      console.error("Failed to count events:", error);
+      return {
+        success: false,
+        error: {
+          subscriptionId,
+          message: `error: ${error instanceof Error ? error.message : String(error)}`,
+        },
       };
     }
   }
@@ -299,6 +370,41 @@ export class Relay {
     }
   }
 
+  // Handle COUNT message
+  async handleCount(
+    ws: ServerWebSocket<WebSocketData>,
+    subscriptionId: string,
+    filters: Filter[],
+  ) {
+    try {
+      // Process the COUNT message
+      const result = await this.handleCountMessage(subscriptionId, filters);
+
+      if (!result.success) {
+        this.sendMessage(ws, [
+          "CLOSED",
+          result.error.subscriptionId,
+          result.error.message,
+        ]);
+        return;
+      }
+
+      // Send count response
+      const response: { count: number; approximate?: boolean } = {
+        count: result.count,
+      };
+      if (result.approximate !== undefined) {
+        response.approximate = result.approximate;
+      }
+
+      this.sendMessage(ws, ["COUNT", subscriptionId, response]);
+    } catch (error) {
+      console.error("Error handling COUNT:", error);
+      const message = error instanceof Error ? error.message : String(error);
+      this.sendMessage(ws, ["CLOSED", subscriptionId, `error: ${message}`]);
+    }
+  }
+
   // Handle CLOSE message
   handleClose(ws: ServerWebSocket<WebSocketData>, subscriptionId: string) {
     const data = ws.data;
@@ -345,6 +451,23 @@ export class Relay {
           }
           const [subId, ...filters] = params;
           await this.handleReq(ws, subId as string, filters as Filter[]);
+          break;
+        }
+
+        case "COUNT": {
+          if (params.length < 2) {
+            this.sendMessage(ws, [
+              "NOTICE",
+              "invalid: COUNT message must have subscription ID and at least 1 filter",
+            ]);
+            return;
+          }
+          const [countSubId, ...countFilters] = params;
+          await this.handleCount(
+            ws,
+            countSubId as string,
+            countFilters as Filter[],
+          );
           break;
         }
 

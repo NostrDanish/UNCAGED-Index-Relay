@@ -335,6 +335,49 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
   }
 
   /**
+   * Count events matching the given filters (NIP-45)
+   */
+  async count(
+    filters: NostrFilter[],
+    opts?: { signal?: AbortSignal },
+  ): Promise<{ count: number; approximate?: boolean }> {
+    const seenIds = new Set<string>();
+
+    for (const filter of filters) {
+      if (opts?.signal?.aborted) {
+        break;
+      }
+
+      try {
+        const query = this.buildQuery(filter);
+
+        // For accurate counts across filters, we need to fetch IDs to deduplicate
+        // This is necessary because filters are OR'd together
+        const searchResponse = await this.client.search({
+          index: this.indexName,
+          body: {
+            query,
+            _source: ["id"],
+            size: 10000, // Reasonable limit for counting
+          },
+        });
+
+        const hits = searchResponse.body.hits.hits;
+        for (const hit of hits) {
+          const id = hit._source?.id;
+          if (id && !seenIds.has(id)) {
+            seenIds.add(id);
+          }
+        }
+      } catch (error) {
+        console.error("Count query failed for filter:", filter, error);
+      }
+    }
+
+    return { count: seenIds.size };
+  }
+
+  /**
    * Remove events matching the given filters (soft delete using deleted field)
    */
   async remove(

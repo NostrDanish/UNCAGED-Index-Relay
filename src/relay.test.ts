@@ -56,7 +56,7 @@ describe("Relay", () => {
       assert.equal(info.name, "Ditto Relay");
       assert.equal(info.software, "ditto-relay");
       assert.equal(info.version, "1.0.0");
-      assert.deepEqual(info.supported_nips, [1, 9, 11, 50]);
+      assert.deepEqual(info.supported_nips, [1, 9, 11, 45, 50]);
     });
 
     it("should allow customizing relay info", () => {
@@ -342,6 +342,73 @@ describe("Relay", () => {
     });
   });
 
+  describe("handleCount", () => {
+    it("should return count when storage supports it", async () => {
+      mockStorage.count = async () => ({ count: 42 });
+
+      const filters: Filter[] = [{ kinds: [1] }];
+      await relay.handleCount(mockWs, "count1", filters);
+
+      assert.equal(sentMessages.length, 1);
+      assert.equal(sentMessages[0][0], "COUNT");
+      assert.equal(sentMessages[0][1], "count1");
+      assert.deepEqual(sentMessages[0][2], { count: 42 });
+    });
+
+    it("should return count with approximate flag", async () => {
+      mockStorage.count = async () => ({ count: 1000, approximate: true });
+
+      const filters: Filter[] = [{ kinds: [1] }];
+      await relay.handleCount(mockWs, "count1", filters);
+
+      assert.equal(sentMessages.length, 1);
+      assert.equal(sentMessages[0][0], "COUNT");
+      assert.equal(sentMessages[0][1], "count1");
+      assert.deepEqual(sentMessages[0][2], { count: 1000, approximate: true });
+    });
+
+    it("should send CLOSED when storage does not support count", async () => {
+      // Remove count method from storage
+      mockStorage.count = undefined;
+
+      const filters: Filter[] = [{ kinds: [1] }];
+      await relay.handleCount(mockWs, "count1", filters);
+
+      assert.equal(sentMessages.length, 1);
+      assert.equal(sentMessages[0][0], "CLOSED");
+      assert.equal(sentMessages[0][1], "count1");
+      assert.ok((sentMessages[0][2] as string).includes("COUNT not supported"));
+    });
+
+    it("should send CLOSED on validation error (empty filters)", async () => {
+      mockStorage.count = async () => ({ count: 0 });
+
+      const filters: Filter[] = []; // Empty filters - invalid
+      await relay.handleCount(mockWs, "count1", filters);
+
+      assert.equal(sentMessages.length, 1);
+      assert.equal(sentMessages[0][0], "CLOSED");
+      assert.equal(sentMessages[0][1], "count1");
+      assert.ok((sentMessages[0][2] as string).includes("non-empty array"));
+    });
+
+    it("should handle count errors gracefully", async () => {
+      mockStorage.count = async () => {
+        throw new Error("Count failed");
+      };
+
+      const filters: Filter[] = [{ kinds: [1] }];
+      await relay.handleCount(mockWs, "count1", filters);
+
+      assert.equal(sentMessages.length, 1);
+      assert.deepEqual(sentMessages[0], [
+        "CLOSED",
+        "count1",
+        "error: Count failed",
+      ]);
+    });
+  });
+
   describe("handleClose", () => {
     it("should remove subscription", () => {
       // Add a subscription
@@ -391,6 +458,18 @@ describe("Relay", () => {
 
       assert.ok(sentMessages.length > 0);
       assert.equal(sentMessages[sentMessages.length - 1][0], "EOSE");
+    });
+
+    it("should handle COUNT message", async () => {
+      mockStorage.count = async () => ({ count: 5 });
+
+      const message = JSON.stringify(["COUNT", "count1", { kinds: [1] }]);
+      await relay.handleMessage(mockWs, message);
+
+      assert.equal(sentMessages.length, 1);
+      assert.equal(sentMessages[0][0], "COUNT");
+      assert.equal(sentMessages[0][1], "count1");
+      assert.deepEqual(sentMessages[0][2], { count: 5 });
     });
 
     it("should handle CLOSE message", async () => {
@@ -460,6 +539,15 @@ describe("Relay", () => {
 
     it("should reject REQ with missing parameters", async () => {
       const message = JSON.stringify(["REQ", "sub1"]);
+      await relay.handleMessage(mockWs, message);
+
+      assert.equal(sentMessages.length, 1);
+      assert.equal(sentMessages[0][0], "NOTICE");
+      assert.ok((sentMessages[0][1] as string).includes("at least 1 filter"));
+    });
+
+    it("should reject COUNT with missing parameters", async () => {
+      const message = JSON.stringify(["COUNT", "count1"]);
       await relay.handleMessage(mockWs, message);
 
       assert.equal(sentMessages.length, 1);
