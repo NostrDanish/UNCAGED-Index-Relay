@@ -94,43 +94,42 @@ describe("OpenSearchRelay", () => {
             };
           },
           bulk: async ({ body }: { body: unknown[] }) => {
-            // Process bulk updates
+            const items: Array<Record<string, unknown>> = [];
             for (let i = 0; i < body.length; i += 2) {
-              const action = body[i] as { update: { _id: string } };
-              const doc = body[i + 1] as { doc: { deleted: boolean } };
-              if (action.update) {
-                const existing = documents.get(action.update._id);
-                if (existing) {
-                  documents.set(action.update._id, {
-                    ...existing,
-                    ...doc.doc,
-                  });
+              const action = body[i] as {
+                index?: { _id: string };
+                update?: { _id: string };
+              };
+              const payload = body[i + 1] as Record<string, unknown>;
+
+              if (action.index) {
+                documents.set(action.index._id, payload);
+                items.push({ index: {} });
+              } else if (action.update) {
+                if (payload.doc) {
+                  // Partial update (used by remove)
+                  const existing = documents.get(action.update._id);
+                  if (existing) {
+                    documents.set(action.update._id, {
+                      ...existing,
+                      ...(payload.doc as Record<string, unknown>),
+                    });
+                  }
+                } else if (payload.upsert) {
+                  // Scripted upsert (used by replaceable events)
+                  if (!documents.has(action.update._id)) {
+                    documents.set(action.update._id, payload.upsert);
+                  }
                 }
+                items.push({ update: {} });
               }
             }
             return {
               body: {
                 errors: false,
-                items: [],
+                items,
               },
             };
-          },
-          index: async ({ id, body }: { id: string; body: unknown }) => {
-            documents.set(id, body);
-            return { body: {} };
-          },
-          update: async ({
-            id,
-            body,
-          }: {
-            id: string;
-            body: { upsert: unknown };
-          }) => {
-            // Simplified - just upsert for testing
-            if (!documents.has(id)) {
-              documents.set(id, body.upsert);
-            }
-            return { body: {} };
           },
           get: async ({ id }: { id: string }) => {
             const doc = documents.get(id);
@@ -150,10 +149,10 @@ describe("OpenSearchRelay", () => {
 
     it("should delete events by e-tag (event ID)", async () => {
       const { client, documents } = createMockClient();
-      const relay = new OpenSearchRelay(
-        client as unknown as Client,
-        "test-index",
-      );
+      const relay = new OpenSearchRelay(client as unknown as Client, {
+        indexName: "test-index",
+        bulkMaxSize: 1,
+      });
 
       const sk = generateSecretKey();
       const event = finalizeEvent(
@@ -184,10 +183,10 @@ describe("OpenSearchRelay", () => {
 
     it("should delete addressable events by a-tag", async () => {
       const { client, documents } = createMockClient();
-      const relay = new OpenSearchRelay(
-        client as unknown as Client,
-        "test-index",
-      );
+      const relay = new OpenSearchRelay(client as unknown as Client, {
+        indexName: "test-index",
+        bulkMaxSize: 1,
+      });
 
       const sk = generateSecretKey();
       const pubkeyHex = Buffer.from(sk).toString("hex");
@@ -226,10 +225,10 @@ describe("OpenSearchRelay", () => {
 
     it("should delete replaceable events by kind and author", async () => {
       const { client, documents } = createMockClient();
-      const relay = new OpenSearchRelay(
-        client as unknown as Client,
-        "test-index",
-      );
+      const relay = new OpenSearchRelay(client as unknown as Client, {
+        indexName: "test-index",
+        bulkMaxSize: 1,
+      });
 
       const sk = generateSecretKey();
       const event = finalizeEvent(
@@ -265,10 +264,10 @@ describe("OpenSearchRelay", () => {
 
     it("should not delete events from different authors", async () => {
       const { client, documents } = createMockClient();
-      const relay = new OpenSearchRelay(
-        client as unknown as Client,
-        "test-index",
-      );
+      const relay = new OpenSearchRelay(client as unknown as Client, {
+        indexName: "test-index",
+        bulkMaxSize: 1,
+      });
 
       const sk1 = generateSecretKey();
       const sk2 = generateSecretKey();
@@ -308,10 +307,10 @@ describe("OpenSearchRelay", () => {
 
     it("should delete replaceable events using a-tag with empty d-identifier", async () => {
       const { client, documents } = createMockClient();
-      const relay = new OpenSearchRelay(
-        client as unknown as Client,
-        "test-index",
-      );
+      const relay = new OpenSearchRelay(client as unknown as Client, {
+        indexName: "test-index",
+        bulkMaxSize: 1,
+      });
 
       const sk = generateSecretKey();
       const event = finalizeEvent(
@@ -421,21 +420,33 @@ describe("OpenSearchRelay", () => {
               },
             };
           },
-          index: async ({ id, body }: { id: string; body: unknown }) => {
-            documents.set(id, body);
-            return { body: {} };
-          },
-          update: async ({
-            id,
-            body,
-          }: {
-            id: string;
-            body: { upsert: unknown };
-          }) => {
-            if (!documents.has(id)) {
-              documents.set(id, body.upsert);
+          bulk: async ({ body }: { body: unknown[] }) => {
+            const items: Array<Record<string, unknown>> = [];
+            for (let i = 0; i < body.length; i += 2) {
+              const action = body[i] as {
+                index?: { _id: string };
+                update?: { _id: string };
+              };
+              const payload = body[i + 1] as Record<string, unknown>;
+
+              if (action.index) {
+                documents.set(action.index._id, payload);
+                items.push({ index: {} });
+              } else if (action.update) {
+                if (payload.upsert) {
+                  if (!documents.has(action.update._id)) {
+                    documents.set(action.update._id, payload.upsert);
+                  }
+                }
+                items.push({ update: {} });
+              }
             }
-            return { body: {} };
+            return {
+              body: {
+                errors: false,
+                items,
+              },
+            };
           },
           indices: {
             exists: async () => ({ body: true }),
@@ -448,10 +459,10 @@ describe("OpenSearchRelay", () => {
 
     it("should handle sort:top query", async () => {
       const { client, documents, references } = createSortMockClient();
-      const relay = new OpenSearchRelay(
-        client as unknown as Client,
-        "test-index",
-      );
+      const relay = new OpenSearchRelay(client as unknown as Client, {
+        indexName: "test-index",
+        bulkMaxSize: 1,
+      });
 
       const sk = generateSecretKey();
       const now = Math.floor(Date.now() / 1000);
@@ -495,10 +506,10 @@ describe("OpenSearchRelay", () => {
 
     it("should reject queries with multiple sort tokens", async () => {
       const { client } = createSortMockClient();
-      const relay = new OpenSearchRelay(
-        client as unknown as Client,
-        "test-index",
-      );
+      const relay = new OpenSearchRelay(client as unknown as Client, {
+        indexName: "test-index",
+        bulkMaxSize: 1,
+      });
 
       const sk = generateSecretKey();
       const event = finalizeEvent(
@@ -523,10 +534,10 @@ describe("OpenSearchRelay", () => {
 
     it("should handle sort:hot with time decay", async () => {
       const { client, documents, references } = createSortMockClient();
-      const relay = new OpenSearchRelay(
-        client as unknown as Client,
-        "test-index",
-      );
+      const relay = new OpenSearchRelay(client as unknown as Client, {
+        indexName: "test-index",
+        bulkMaxSize: 1,
+      });
 
       const sk = generateSecretKey();
       const now = Math.floor(Date.now() / 1000);
@@ -581,10 +592,10 @@ describe("OpenSearchRelay", () => {
 
     it("should combine sort with full-text search", async () => {
       const { client, documents, references } = createSortMockClient();
-      const relay = new OpenSearchRelay(
-        client as unknown as Client,
-        "test-index",
-      );
+      const relay = new OpenSearchRelay(client as unknown as Client, {
+        indexName: "test-index",
+        bulkMaxSize: 1,
+      });
 
       const sk = generateSecretKey();
       const now = Math.floor(Date.now() / 1000);

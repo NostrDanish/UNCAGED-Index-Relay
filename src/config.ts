@@ -36,16 +36,4 @@ export class Config {
   get opensearchPassword(): string | undefined {
     return this.env.get("OPENSEARCH_PASSWORD");
   }
-
-  get clusterWorkers(): number {
-    const value = this.env.get("CLUSTER_WORKERS");
-    if (!value) {
-      return navigator.hardwareConcurrency;
-    }
-    const workers = parseInt(value, 10);
-    if (Number.isNaN(workers) || workers < 0) {
-      throw new Error("CLUSTER_WORKERS must be a non-negative number.");
-    }
-    return workers;
-  }
 }

@@ -4,6 +4,9 @@ import type { ServerWebSocket } from "bun";
 import type { Filter, NostrEvent } from "nostr-tools";
 import { verifyEvent } from "nostr-tools";
 
+/** Function that verifies a Nostr event signature. */
+export type VerifyFn = (event: NostrEvent) => boolean | Promise<boolean>;
+
 // Track subscriptions per connection
 export interface Subscription {
   id: string;
@@ -17,9 +20,14 @@ export interface WebSocketData {
 export class Relay {
   public storage: NRelay;
   private relayInfo: NostrRelayInfo;
+  private verify: VerifyFn;
 
-  constructor(storage: NRelay, relayInfo?: Partial<NostrRelayInfo>) {
+  constructor(
+    storage: NRelay,
+    opts?: { relayInfo?: Partial<NostrRelayInfo>; verify?: VerifyFn },
+  ) {
     this.storage = storage;
+    this.verify = opts?.verify ?? verifyEvent;
     this.relayInfo = {
       name: "Ditto Relay",
       description: "A Nostr relay backed by OpenSearch",
@@ -44,7 +52,7 @@ export class Relay {
       language_tags: [],
       tags: [],
       posting_policy: "",
-      ...relayInfo,
+      ...opts?.relayInfo,
     };
   }
 
@@ -65,8 +73,8 @@ export class Relay {
     accepted: boolean;
     message: string;
   }> {
-    // Verify event signature
-    const isValid = verifyEvent(event);
+    // Verify event signature (may be async when using worker pool)
+    const isValid = await this.verify(event);
     if (!isValid) {
       return {
         eventId: event.id,

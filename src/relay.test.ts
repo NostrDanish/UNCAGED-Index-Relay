@@ -61,9 +61,11 @@ describe("Relay", () => {
 
     it("should allow customizing relay info", () => {
       const customRelay = new Relay(mockStorage, {
-        name: "Custom Relay",
-        description: "My custom relay",
-        pubkey: "abc123",
+        relayInfo: {
+          name: "Custom Relay",
+          description: "My custom relay",
+          pubkey: "abc123",
+        },
       });
 
       const info = customRelay.getRelayInfo();

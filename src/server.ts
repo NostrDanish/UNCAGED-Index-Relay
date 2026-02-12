@@ -4,6 +4,7 @@ import { serve } from "bun";
 import { Config } from "./config.ts";
 import { OpenSearchRelay } from "./opensearch.ts";
 import { Relay, type WebSocketData } from "./relay.ts";
+import { VerifyPool } from "./verify-pool.ts";
 
 const config = new Config({
   get(key) {
@@ -11,9 +12,14 @@ const config = new Config({
   },
 });
 
+// Initialize signature verification worker pool
+const verifyPool = new VerifyPool();
+
 // Initialize OpenSearch relay
 const opensearchRelay = OpenSearchRelay.fromConfig(config);
-const relay = new Relay(opensearchRelay);
+const relay = new Relay(opensearchRelay, {
+  verify: (event) => verifyPool.verify(event),
+});
 
 // Initialize index on startup
 try {
@@ -26,10 +32,8 @@ try {
 }
 
 // Create Bun server with WebSocket support
-// Enable reusePort when running in cluster mode (WORKER_ID is set)
 const server = serve<WebSocketData>({
   port: config.port,
-  reusePort: !!process.env.WORKER_ID,
   fetch(req, server) {
     const url = new URL(req.url);
 
@@ -89,7 +93,4 @@ const server = serve<WebSocketData>({
   },
 });
 
-const workerId = process.env.WORKER_ID || "main";
-console.log(
-  `Nostr relay [${workerId}] listening on ws://localhost:${server.port}${process.env.WORKER_ID ? " (SO_REUSEPORT)" : ""}`,
-);
+console.log(`Nostr relay listening on ws://localhost:${server.port}`);

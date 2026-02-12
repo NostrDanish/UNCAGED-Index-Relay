@@ -20,6 +20,15 @@ interface NostrEventDocument extends NostrEvent {
   deleted?: boolean;
 }
 
+/** Pending bulk operation for an event. */
+interface BulkEntry {
+  event: NostrEvent;
+  doc: NostrEventDocument;
+  docId: string;
+  resolve: () => void;
+  reject: (error: Error) => void;
+}
+
 /**
  * OpenSearch-backed Nostr relay implementation
  * Handles event storage and querying with full-text search support (NIP-50)
@@ -28,9 +37,20 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
   private client: Client;
   private indexName: string;
 
-  constructor(client: Client, indexName?: string) {
+  /** Bulk indexing queue. */
+  private bulkQueue: BulkEntry[] = [];
+  private bulkTimer: ReturnType<typeof setTimeout> | null = null;
+  private bulkMaxSize: number;
+  private bulkFlushMs: number;
+
+  constructor(
+    client: Client,
+    opts?: { indexName?: string; bulkMaxSize?: number; bulkFlushMs?: number },
+  ) {
     this.client = client;
-    this.indexName = indexName || "nostr-events";
+    this.indexName = opts?.indexName || "nostr-events";
+    this.bulkMaxSize = opts?.bulkMaxSize ?? 100;
+    this.bulkFlushMs = opts?.bulkFlushMs ?? 200;
   }
 
   /**
@@ -49,7 +69,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     }
 
     const client = new OpenSearchClient(clientOptions);
-    return new OpenSearchRelay(client, config.opensearchIndex);
+    return new OpenSearchRelay(client, { indexName: config.opensearchIndex });
   }
 
   /**
@@ -534,54 +554,111 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
   }
 
   /**
-   * Insert a single event into OpenSearch
-   * For replaceable/addressable events, uses atomic scripted upsert to only store if newer
+   * Enqueue an event for bulk indexing.
+   * The returned promise resolves once the event has been flushed to OpenSearch.
    */
   async event(
     event: NostrEvent,
-    opts?: { signal?: AbortSignal },
+    _opts?: { signal?: AbortSignal },
   ): Promise<void> {
     const doc = this.eventToDocument(event);
     const docId = this.getDocumentId(event);
 
-    // For replaceable/addressable events, use atomic scripted upsert
-    if (NKinds.replaceable(event.kind) || NKinds.addressable(event.kind)) {
-      await this.client.update({
-        index: this.indexName,
-        id: docId,
-        body: {
+    return new Promise<void>((resolve, reject) => {
+      this.bulkQueue.push({ event, doc, docId, resolve, reject });
+
+      if (this.bulkQueue.length >= this.bulkMaxSize) {
+        this.flush();
+      } else if (!this.bulkTimer) {
+        this.bulkTimer = setTimeout(() => this.flush(), this.bulkFlushMs);
+      }
+    });
+  }
+
+  /**
+   * Flush the bulk queue to OpenSearch.
+   */
+  async flush(): Promise<void> {
+    if (this.bulkTimer) {
+      clearTimeout(this.bulkTimer);
+      this.bulkTimer = null;
+    }
+
+    if (this.bulkQueue.length === 0) return;
+
+    const entries = this.bulkQueue.splice(0);
+    const body: Array<Record<string, unknown>> = [];
+
+    const replaceable_upsert_script = `
+      if (ctx._source.deleted == true) {
+        ctx.op = 'none';
+      } else if (params.event.created_at > ctx._source.created_at) {
+        ctx._source = params.event;
+      } else if (params.event.created_at == ctx._source.created_at && 
+                 params.event.id.compareTo(ctx._source.id) < 0) {
+        ctx._source = params.event;
+      } else {
+        ctx.op = 'none';
+      }
+    `;
+
+    for (const entry of entries) {
+      if (
+        NKinds.replaceable(entry.event.kind) ||
+        NKinds.addressable(entry.event.kind)
+      ) {
+        // Scripted upsert for replaceable/addressable events
+        body.push({
+          update: { _index: this.indexName, _id: entry.docId },
+        });
+        body.push({
           script: {
-            source: `
-              if (ctx._source.deleted == true) {
-                ctx.op = 'none';
-              } else if (params.event.created_at > ctx._source.created_at) {
-                ctx._source = params.event;
-              } else if (params.event.created_at == ctx._source.created_at && 
-                         params.event.id.compareTo(ctx._source.id) < 0) {
-                ctx._source = params.event;
-              } else {
-                ctx.op = 'none';
-              }
-            `,
+            source: replaceable_upsert_script,
             lang: "painless",
-            params: { event: doc },
+            params: { event: entry.doc },
           },
-          upsert: doc,
-        },
-        refresh: false,
-        // @ts-expect-error: signal not in types but supported by underlying HTTP client
-        signal: opts?.signal,
-      });
-    } else {
-      // Regular events - just index normally
-      await this.client.index({
-        index: this.indexName,
-        id: docId,
-        body: doc,
-        refresh: false,
-        // @ts-expect-error: signal not in types but supported by underlying HTTP client
-        signal: opts?.signal,
-      });
+          upsert: entry.doc,
+        });
+      } else {
+        // Regular index
+        body.push({
+          index: { _index: this.indexName, _id: entry.docId },
+        });
+        body.push(entry.doc as unknown as Record<string, unknown>);
+      }
+    }
+
+    try {
+      const response = await this.client.bulk({ body, refresh: false });
+
+      if (response.body.errors) {
+        // Resolve/reject individual entries based on per-item results
+        const items: Array<Record<string, { error?: unknown }>> =
+          response.body.items;
+        for (let i = 0; i < entries.length; i++) {
+          const item = items[i];
+          const result =
+            (item.index as { error?: unknown } | undefined) ??
+            (item.update as { error?: unknown } | undefined);
+          if (result?.error) {
+            entries[i].reject(
+              new Error(`Bulk index failed: ${JSON.stringify(result.error)}`),
+            );
+          } else {
+            entries[i].resolve();
+          }
+        }
+      } else {
+        for (const entry of entries) {
+          entry.resolve();
+        }
+      }
+    } catch (error) {
+      // Entire bulk request failed — reject all entries
+      const err = error instanceof Error ? error : new Error(String(error));
+      for (const entry of entries) {
+        entry.reject(err);
+      }
     }
   }
 
@@ -810,9 +887,10 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
   }
 
   /**
-   * Close the OpenSearch connection
+   * Flush remaining events and close the OpenSearch connection.
    */
   async close(): Promise<void> {
+    await this.flush();
     await this.client.close();
   }
 
