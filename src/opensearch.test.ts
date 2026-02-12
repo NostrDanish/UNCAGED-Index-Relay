@@ -935,7 +935,50 @@ describe("OpenSearchRelay", () => {
       assert.equal(results[1].id, event1.id);
     });
 
-    it("should handle sort:zaps with no zaps", async () => {
+    it("should exclude events with no zaps from sort:zaps results", async () => {
+      const { client, zaps } = createSortMockClient();
+      const relay = new OpenSearchRelay(client as unknown as Client, {
+        indexName: "test-index",
+        bulkMaxSize: 1,
+      });
+
+      const sk = generateSecretKey();
+      const now = Math.floor(Date.now() / 1000);
+
+      const zappedEvent = finalizeEvent(
+        {
+          kind: 1,
+          created_at: now - 100,
+          tags: [],
+          content: "This one got zapped",
+        },
+        sk,
+      );
+
+      const unzappedEvent = finalizeEvent(
+        {
+          kind: 1,
+          created_at: now - 200,
+          tags: [],
+          content: "No zaps here",
+        },
+        sk,
+      );
+
+      await relay.event(zappedEvent);
+      await relay.event(unzappedEvent);
+
+      // Only one event has zaps
+      zaps.set(zappedEvent.id, 5000);
+
+      const results = await relay.query([{ kinds: [1], search: "sort:zaps" }]);
+
+      // Only the zapped event should be returned
+      assert.equal(results.length, 1);
+      assert.equal(results[0].id, zappedEvent.id);
+    });
+
+    it("should return empty results when no events have zaps", async () => {
       const { client } = createSortMockClient();
       const relay = new OpenSearchRelay(client as unknown as Client, {
         indexName: "test-index",
@@ -945,33 +988,16 @@ describe("OpenSearchRelay", () => {
       const sk = generateSecretKey();
       const now = Math.floor(Date.now() / 1000);
 
-      const event1 = finalizeEvent(
-        {
-          kind: 1,
-          created_at: now - 100,
-          tags: [],
-          content: "No zaps here",
-        },
-        sk,
+      await relay.event(
+        finalizeEvent(
+          { kind: 1, created_at: now - 100, tags: [], content: "No zaps" },
+          sk,
+        ),
       );
 
-      const event2 = finalizeEvent(
-        {
-          kind: 1,
-          created_at: now - 200,
-          tags: [],
-          content: "No zaps here either",
-        },
-        sk,
-      );
-
-      await relay.event(event1);
-      await relay.event(event2);
-
-      // No zaps set — both events should still be returned with score 0
       const results = await relay.query([{ kinds: [1], search: "sort:zaps" }]);
 
-      assert.equal(results.length, 2);
+      assert.equal(results.length, 0);
     });
 
     it("should combine distinct:author with sort:zaps", async () => {

@@ -520,19 +520,16 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
         scoreMap.set(bucket.key, bucket.total_sats?.value ?? 0);
       }
 
-      // Events with no zaps get score 0
-      for (const event of events) {
-        if (!scoreMap.has(event.id)) {
-          scoreMap.set(event.id, 0);
-        }
-      }
-
-      // Sort by total sats descending
-      return [...events].sort((a, b) => {
-        const scoreA = scoreMap.get(a.id) || 0;
-        const scoreB = scoreMap.get(b.id) || 0;
-        return scoreB - scoreA;
-      });
+      // Only include events that have actually been zapped, sorted by total sats descending
+      return events
+        .filter(
+          (event) => scoreMap.has(event.id) && scoreMap.get(event.id)! > 0,
+        )
+        .sort((a, b) => {
+          const scoreA = scoreMap.get(a.id) || 0;
+          const scoreB = scoreMap.get(b.id) || 0;
+          return scoreB - scoreA;
+        });
     } catch (error) {
       console.error("Zap scoring failed:", error);
       return events;
