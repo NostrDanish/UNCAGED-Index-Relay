@@ -148,6 +148,19 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
   }
 
   /**
+   * Check if the NIP-50 search string contains a distinct:author extension token.
+   */
+  private hasDistinctAuthor(filter: NostrFilter): boolean {
+    if (!filter.search) return false;
+
+    const tokens = NIP50.parseInput(filter.search);
+    return tokens.some(
+      (t) =>
+        typeof t === "object" && t.key === "distinct" && t.value === "author",
+    );
+  }
+
+  /**
    * Parse NIP-50 sort mode from search tokens
    */
   private parseSortMode(
@@ -251,12 +264,22 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
       const eventIds = candidateEvents.map((e: NostrEvent) => e.id);
 
       // Build aggregation query based on sort mode
-      const scoredEvents = await this.scoreEvents(
+      let scoredEvents = await this.scoreEvents(
         eventIds,
         sortMode,
         now,
         candidateEvents,
       );
+
+      // Apply distinct:author — keep only the highest-scored event per pubkey
+      if (this.hasDistinctAuthor(filter)) {
+        const seenPubkeys = new Set<string>();
+        scoredEvents = scoredEvents.filter((event) => {
+          if (seenPubkeys.has(event.pubkey)) return false;
+          seenPubkeys.add(event.pubkey);
+          return true;
+        });
+      }
 
       return scoredEvents.slice(0, limit);
     } catch (error) {
@@ -529,18 +552,26 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     }
 
     const query = this.buildQuery(filter);
+    const distinctAuthor = this.hasDistinctAuthor(filter);
 
     // Sort by created_at (newest first)
     const sort = [{ created_at: { order: "desc" as const } }];
 
     try {
+      const searchBody: Record<string, unknown> = {
+        query,
+        sort,
+        size: limit,
+      };
+
+      // Use OpenSearch field collapsing to return only 1 event per pubkey
+      if (distinctAuthor) {
+        searchBody.collapse = { field: "pubkey" };
+      }
+
       const response = await this.client.search({
         index: this.indexName,
-        body: {
-          query,
-          sort,
-          size: limit,
-        },
+        body: searchBody,
       });
 
       const hits = response.body.hits.hits;

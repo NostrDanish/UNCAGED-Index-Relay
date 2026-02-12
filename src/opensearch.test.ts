@@ -403,6 +403,26 @@ describe("OpenSearchRelay", () => {
               return bDoc.created_at - aDoc.created_at;
             });
 
+            // Simulate OpenSearch collapse (field collapsing)
+            const collapse = body.collapse as { field: string } | undefined;
+            if (collapse?.field) {
+              const seen = new Set<string>();
+              const collapsed: unknown[] = [];
+              for (const hit of results) {
+                const src = (hit as { _source: NostrEvent })._source;
+                const val = src[collapse.field as keyof NostrEvent] as string;
+                if (!seen.has(val)) {
+                  seen.add(val);
+                  collapsed.push(hit);
+                }
+              }
+              return {
+                body: {
+                  hits: { hits: collapsed },
+                },
+              };
+            }
+
             return {
               body: {
                 hits: { hits: results },
@@ -609,6 +629,235 @@ describe("OpenSearchRelay", () => {
 
       assert.equal(results.length, 1);
       assert.equal(results[0].id, event.id);
+    });
+
+    it("should return only one event per author with distinct:author", async () => {
+      const { client } = createSortMockClient();
+      const relay = new OpenSearchRelay(client as unknown as Client, {
+        indexName: "test-index",
+        bulkMaxSize: 1,
+      });
+
+      const sk1 = generateSecretKey();
+      const sk2 = generateSecretKey();
+      const now = Math.floor(Date.now() / 1000);
+
+      // Create two events from author 1
+      const event1a = finalizeEvent(
+        {
+          kind: 1,
+          created_at: now - 100,
+          tags: [],
+          content: "First event from author 1",
+        },
+        sk1,
+      );
+
+      const event1b = finalizeEvent(
+        {
+          kind: 1,
+          created_at: now,
+          tags: [],
+          content: "Second event from author 1",
+        },
+        sk1,
+      );
+
+      // Create one event from author 2
+      const event2 = finalizeEvent(
+        {
+          kind: 1,
+          created_at: now - 50,
+          tags: [],
+          content: "Event from author 2",
+        },
+        sk2,
+      );
+
+      await relay.event(event1a);
+      await relay.event(event1b);
+      await relay.event(event2);
+
+      // Query with distinct:author
+      const results = await relay.query([
+        { kinds: [1], search: "distinct:author" },
+      ]);
+
+      // Should return only 2 events (one per author)
+      assert.equal(results.length, 2);
+
+      // Each author should appear exactly once
+      const pubkeys = results.map((e) => e.pubkey);
+      assert.equal(new Set(pubkeys).size, 2);
+    });
+
+    it("should combine distinct:author with full-text search", async () => {
+      const { client } = createSortMockClient();
+      const relay = new OpenSearchRelay(client as unknown as Client, {
+        indexName: "test-index",
+        bulkMaxSize: 1,
+      });
+
+      const sk1 = generateSecretKey();
+      const sk2 = generateSecretKey();
+      const now = Math.floor(Date.now() / 1000);
+
+      const event1a = finalizeEvent(
+        {
+          kind: 1,
+          created_at: now - 100,
+          tags: [],
+          content: "Bitcoin price analysis",
+        },
+        sk1,
+      );
+
+      const event1b = finalizeEvent(
+        {
+          kind: 1,
+          created_at: now,
+          tags: [],
+          content: "Bitcoin mining update",
+        },
+        sk1,
+      );
+
+      const event2 = finalizeEvent(
+        {
+          kind: 1,
+          created_at: now - 50,
+          tags: [],
+          content: "Bitcoin trading strategy",
+        },
+        sk2,
+      );
+
+      await relay.event(event1a);
+      await relay.event(event1b);
+      await relay.event(event2);
+
+      // Query combining search text and distinct:author
+      const results = await relay.query([
+        { kinds: [1], search: "bitcoin distinct:author" },
+      ]);
+
+      // Should return only 2 events (one per author)
+      assert.equal(results.length, 2);
+      const pubkeys = results.map((e) => e.pubkey);
+      assert.equal(new Set(pubkeys).size, 2);
+    });
+
+    it("should combine distinct:author with sort:top", async () => {
+      const { client, references } = createSortMockClient();
+      const relay = new OpenSearchRelay(client as unknown as Client, {
+        indexName: "test-index",
+        bulkMaxSize: 1,
+      });
+
+      const sk1 = generateSecretKey();
+      const sk2 = generateSecretKey();
+      const now = Math.floor(Date.now() / 1000);
+
+      // Author 1: two events, one popular and one not
+      const event1a = finalizeEvent(
+        {
+          kind: 1,
+          created_at: now - 100,
+          tags: [],
+          content: "Less popular from author 1",
+        },
+        sk1,
+      );
+
+      const event1b = finalizeEvent(
+        {
+          kind: 1,
+          created_at: now,
+          tags: [],
+          content: "Popular from author 1",
+        },
+        sk1,
+      );
+
+      // Author 2: one event
+      const event2 = finalizeEvent(
+        {
+          kind: 1,
+          created_at: now - 50,
+          tags: [],
+          content: "Event from author 2",
+        },
+        sk2,
+      );
+
+      await relay.event(event1a);
+      await relay.event(event1b);
+      await relay.event(event2);
+
+      // event1b has 5 refs, event1a has 1 ref, event2 has 3 refs
+      references.set(event1b.id, [
+        { kind: 1 },
+        { kind: 1 },
+        { kind: 1 },
+        { kind: 1 },
+        { kind: 1 },
+      ]);
+      references.set(event1a.id, [{ kind: 1 }]);
+      references.set(event2.id, [{ kind: 1 }, { kind: 1 }, { kind: 1 }]);
+
+      // Query with sort:top and distinct:author
+      const results = await relay.query([
+        { kinds: [1], search: "sort:top distinct:author" },
+      ]);
+
+      // Should return 2 events (one per author)
+      assert.equal(results.length, 2);
+      const pubkeys = results.map((e) => e.pubkey);
+      assert.equal(new Set(pubkeys).size, 2);
+
+      // event1b should be first (highest score from author 1), event2 second
+      assert.equal(results[0].id, event1b.id);
+      assert.equal(results[1].id, event2.id);
+    });
+
+    it("should return all events without distinct:author", async () => {
+      const { client } = createSortMockClient();
+      const relay = new OpenSearchRelay(client as unknown as Client, {
+        indexName: "test-index",
+        bulkMaxSize: 1,
+      });
+
+      const sk = generateSecretKey();
+      const now = Math.floor(Date.now() / 1000);
+
+      // Create multiple events from the same author
+      const event1 = finalizeEvent(
+        {
+          kind: 1,
+          created_at: now - 100,
+          tags: [],
+          content: "First event",
+        },
+        sk,
+      );
+
+      const event2 = finalizeEvent(
+        {
+          kind: 1,
+          created_at: now,
+          tags: [],
+          content: "Second event",
+        },
+        sk,
+      );
+
+      await relay.event(event1);
+      await relay.event(event2);
+
+      // Query without distinct:author should return all events
+      const results = await relay.query([{ kinds: [1] }]);
+
+      assert.equal(results.length, 2);
     });
   });
 });
