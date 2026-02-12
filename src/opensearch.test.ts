@@ -354,8 +354,29 @@ describe("OpenSearchRelay", () => {
         references,
         client: {
           search: async ({ body }: { body: Record<string, unknown> }) => {
-            // Handle aggregation queries for references
+            // Handle aggregation queries
             if (body.aggs) {
+              const aggs = body.aggs as Record<string, unknown>;
+
+              // Handle cardinality aggregation (used by distinct:author count)
+              if (aggs.unique_authors) {
+                const allDocs = Array.from(documents.values());
+                const uniquePubkeys = new Set(
+                  allDocs
+                    .filter((doc) => !(doc as { deleted?: boolean }).deleted)
+                    .map((doc) => (doc as NostrEvent).pubkey),
+                );
+                return {
+                  body: {
+                    aggregations: {
+                      unique_authors: { value: uniquePubkeys.size },
+                    },
+                    hits: { hits: [] },
+                  },
+                };
+              }
+
+              // Handle reference aggregation queries (used by sort modes)
               const buckets: Array<{
                 key: string;
                 doc_count: number;
@@ -456,6 +477,12 @@ describe("OpenSearchRelay", () => {
                 items,
               },
             };
+          },
+          count: async () => {
+            const nonDeleted = Array.from(documents.values()).filter(
+              (doc) => !(doc as { deleted?: boolean }).deleted,
+            );
+            return { body: { count: nonDeleted.length } };
           },
           indices: {
             exists: async () => ({ body: true }),
@@ -858,6 +885,85 @@ describe("OpenSearchRelay", () => {
       const results = await relay.query([{ kinds: [1] }]);
 
       assert.equal(results.length, 2);
+    });
+
+    it("should count unique authors with distinct:author", async () => {
+      const { client } = createSortMockClient();
+      const relay = new OpenSearchRelay(client as unknown as Client, {
+        indexName: "test-index",
+        bulkMaxSize: 1,
+      });
+
+      const sk1 = generateSecretKey();
+      const sk2 = generateSecretKey();
+      const sk3 = generateSecretKey();
+      const now = Math.floor(Date.now() / 1000);
+
+      // Create multiple events from 3 authors
+      await relay.event(
+        finalizeEvent(
+          { kind: 1, created_at: now, tags: [], content: "Event 1a" },
+          sk1,
+        ),
+      );
+      await relay.event(
+        finalizeEvent(
+          { kind: 1, created_at: now - 10, tags: [], content: "Event 1b" },
+          sk1,
+        ),
+      );
+      await relay.event(
+        finalizeEvent(
+          { kind: 1, created_at: now - 20, tags: [], content: "Event 2" },
+          sk2,
+        ),
+      );
+      await relay.event(
+        finalizeEvent(
+          { kind: 1, created_at: now - 30, tags: [], content: "Event 3" },
+          sk3,
+        ),
+      );
+
+      // COUNT with distinct:author should return 3 (unique authors)
+      const result = await relay.count([{ search: "distinct:author" }]);
+      assert.equal(result.count, 3);
+      assert.equal(result.approximate, true);
+    });
+
+    it("should count all events without distinct:author", async () => {
+      const { client } = createSortMockClient();
+      const relay = new OpenSearchRelay(client as unknown as Client, {
+        indexName: "test-index",
+        bulkMaxSize: 1,
+      });
+
+      const sk1 = generateSecretKey();
+      const sk2 = generateSecretKey();
+      const now = Math.floor(Date.now() / 1000);
+
+      await relay.event(
+        finalizeEvent(
+          { kind: 1, created_at: now, tags: [], content: "Event 1a" },
+          sk1,
+        ),
+      );
+      await relay.event(
+        finalizeEvent(
+          { kind: 1, created_at: now - 10, tags: [], content: "Event 1b" },
+          sk1,
+        ),
+      );
+      await relay.event(
+        finalizeEvent(
+          { kind: 1, created_at: now - 20, tags: [], content: "Event 2" },
+          sk2,
+        ),
+      );
+
+      // COUNT without distinct:author should return total events (3)
+      const result = await relay.count([{ kinds: [1] }]);
+      assert.equal(result.count, 3);
     });
   });
 });

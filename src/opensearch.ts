@@ -753,12 +753,16 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
    * Count events matching the given filters (NIP-45)
    * Uses OpenSearch count API for efficiency. For multiple filters, sums the counts
    * and marks as approximate since we don't deduplicate across filters.
+   *
+   * When distinct:author is present, uses a cardinality aggregation on pubkey
+   * to return the number of unique authors instead of total events.
    */
   async count(
     filters: NostrFilter[],
     opts?: { signal?: AbortSignal },
   ): Promise<{ count: number; approximate?: boolean }> {
     let totalCount = 0;
+    let approximate: boolean | undefined;
 
     for (const filter of filters) {
       if (opts?.signal?.aborted) {
@@ -768,22 +772,49 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
       try {
         const query = this.buildQuery(filter);
 
-        // Use count API - much more efficient than search, no document fetching
-        const response = await this.client.count({
-          index: this.indexName,
-          body: { query },
-        });
+        if (this.hasDistinctAuthor(filter)) {
+          // Use cardinality aggregation for distinct author count
+          const response = await this.client.search({
+            index: this.indexName,
+            body: {
+              query,
+              size: 0,
+              aggs: {
+                unique_authors: {
+                  cardinality: { field: "pubkey" },
+                },
+              },
+            },
+          });
 
-        totalCount += response.body.count;
+          const cardinality = response.body.aggregations?.unique_authors as
+            | { value: number }
+            | undefined;
+          totalCount += cardinality?.value ?? 0;
+          // Cardinality aggregation is inherently approximate
+          approximate = true;
+        } else {
+          // Use count API - much more efficient than search, no document fetching
+          const response = await this.client.count({
+            index: this.indexName,
+            body: { query },
+          });
+
+          totalCount += response.body.count;
+        }
       } catch (error) {
         console.error("Count query failed for filter:", filter, error);
       }
     }
 
-    // Mark as approximate if multiple filters (can't deduplicate across filters)
+    // Mark as approximate if multiple filters or cardinality was used
+    if (filters.length > 1) {
+      approximate = true;
+    }
+
     return {
       count: totalCount,
-      approximate: filters.length > 1 ? true : undefined,
+      approximate,
     };
   }
 
