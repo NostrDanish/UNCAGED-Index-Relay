@@ -776,7 +776,6 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
 
         // Get document IDs for matched events
         for (const event of events) {
-          const tagsMap = this.buildTagsMap(event.tags);
           const docId = this.getDocumentId(event);
           docIdsToDelete.push(docId);
         }

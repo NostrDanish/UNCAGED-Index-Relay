@@ -1,7 +1,7 @@
 {
   "scripts": {
-    "dev": "bun --watch src/start.ts",
-    "start": "bun src/start.ts",
+    "dev": "bun --watch src/server.ts",
+    "start": "bun src/server.ts",
     "test": "bun test",
     "typecheck": "tsc --noEmit",
     "lint": "biome check .",

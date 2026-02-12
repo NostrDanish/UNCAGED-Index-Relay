@@ -1,5 +1,4 @@
 import { strict as assert } from "node:assert";
-import { Buffer } from "node:buffer";
 import { describe, it } from "node:test";
 import type { Client } from "@opensearch-project/opensearch";
 import type { NostrEvent } from "nostr-tools";
@@ -189,7 +188,6 @@ describe("OpenSearchRelay", () => {
       });
 
       const sk = generateSecretKey();
-      const pubkeyHex = Buffer.from(sk).toString("hex");
 
       const event = finalizeEvent(
         {
@@ -358,15 +356,6 @@ describe("OpenSearchRelay", () => {
           search: async ({ body }: { body: Record<string, unknown> }) => {
             // Handle aggregation queries for references
             if (body.aggs) {
-              const eventIds = (body.query as Record<string, unknown>)
-                ?.bool as {
-                must: Array<{
-                  bool?: {
-                    should?: Array<{ terms?: Record<string, string[]> }>;
-                  };
-                }>;
-              };
-
               const buckets: Array<{
                 key: string;
                 doc_count: number;
@@ -458,7 +447,7 @@ describe("OpenSearchRelay", () => {
     };
 
     it("should handle sort:top query", async () => {
-      const { client, documents, references } = createSortMockClient();
+      const { client, references } = createSortMockClient();
       const relay = new OpenSearchRelay(client as unknown as Client, {
         indexName: "test-index",
         bulkMaxSize: 1,
@@ -533,7 +522,7 @@ describe("OpenSearchRelay", () => {
     });
 
     it("should handle sort:hot with time decay", async () => {
-      const { client, documents, references } = createSortMockClient();
+      const { client, references } = createSortMockClient();
       const relay = new OpenSearchRelay(client as unknown as Client, {
         indexName: "test-index",
         bulkMaxSize: 1,
@@ -591,7 +580,7 @@ describe("OpenSearchRelay", () => {
     });
 
     it("should combine sort with full-text search", async () => {
-      const { client, documents, references } = createSortMockClient();
+      const { client, references } = createSortMockClient();
       const relay = new OpenSearchRelay(client as unknown as Client, {
         indexName: "test-index",
         bulkMaxSize: 1,
