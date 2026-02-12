@@ -2,7 +2,7 @@ import type { Buffer } from "node:buffer";
 import type { NostrRelayInfo, NRelay } from "@nostrify/nostrify";
 import type { ServerWebSocket } from "bun";
 import type { Filter, NostrEvent } from "nostr-tools";
-import { verifyEvent } from "nostr-tools";
+import { matchFilter, verifyEvent } from "nostr-tools";
 
 /** Function that verifies a Nostr event signature. */
 export type VerifyFn = (event: NostrEvent) => boolean | Promise<boolean>;
@@ -17,10 +17,30 @@ export interface WebSocketData {
   subscriptions: Map<string, Subscription>;
 }
 
+/** A single filter entry in the subscription index. */
+interface IndexedFilter {
+  ws: ServerWebSocket<WebSocketData>;
+  subscriptionId: string;
+  filter: Filter;
+}
+
 export class Relay {
   public storage: NRelay;
   private relayInfo: NostrRelayInfo;
   private verify: VerifyFn;
+
+  /** All open WebSocket connections. */
+  private connections = new Set<ServerWebSocket<WebSocketData>>();
+
+  /** Kind → indexed filters for that kind. */
+  private kindIndex = new Map<number, Set<IndexedFilter>>();
+  /** Filters with no `kinds` constraint (must be checked against every event). */
+  private catchAll = new Set<IndexedFilter>();
+  /** Reverse map: ws → all IndexedFilter entries for that connection (for fast cleanup). */
+  private connectionFilters = new Map<
+    ServerWebSocket<WebSocketData>,
+    Set<IndexedFilter>
+  >();
 
   constructor(
     storage: NRelay,
@@ -63,6 +83,123 @@ export class Relay {
   // Helper to send JSON message to client
   private sendMessage(ws: ServerWebSocket<WebSocketData>, message: unknown[]) {
     ws.send(JSON.stringify(message));
+  }
+
+  /**
+   * Add a subscription's filters to the broadcast index.
+   * Call removeFromIndex first if replacing an existing subscription.
+   */
+  private addToIndex(
+    ws: ServerWebSocket<WebSocketData>,
+    subscriptionId: string,
+    filters: Filter[],
+  ): void {
+    let connFilters = this.connectionFilters.get(ws);
+    if (!connFilters) {
+      connFilters = new Set();
+      this.connectionFilters.set(ws, connFilters);
+    }
+
+    for (const filter of filters) {
+      const entry: IndexedFilter = { ws, subscriptionId, filter };
+      connFilters.add(entry);
+
+      if (filter.kinds && filter.kinds.length > 0) {
+        for (const kind of filter.kinds) {
+          let kindSet = this.kindIndex.get(kind);
+          if (!kindSet) {
+            kindSet = new Set();
+            this.kindIndex.set(kind, kindSet);
+          }
+          kindSet.add(entry);
+        }
+      } else {
+        this.catchAll.add(entry);
+      }
+    }
+  }
+
+  /**
+   * Remove indexed filters for a connection, optionally scoped to a single subscription.
+   */
+  private removeFromIndex(
+    ws: ServerWebSocket<WebSocketData>,
+    subscriptionId?: string,
+  ): void {
+    const connFilters = this.connectionFilters.get(ws);
+    if (!connFilters) return;
+
+    const toRemove: IndexedFilter[] = [];
+    for (const entry of connFilters) {
+      if (
+        subscriptionId === undefined ||
+        entry.subscriptionId === subscriptionId
+      ) {
+        toRemove.push(entry);
+      }
+    }
+
+    for (const entry of toRemove) {
+      connFilters.delete(entry);
+
+      if (entry.filter.kinds && entry.filter.kinds.length > 0) {
+        for (const kind of entry.filter.kinds) {
+          const kindSet = this.kindIndex.get(kind);
+          if (kindSet) {
+            kindSet.delete(entry);
+            if (kindSet.size === 0) {
+              this.kindIndex.delete(kind);
+            }
+          }
+        }
+      } else {
+        this.catchAll.delete(entry);
+      }
+    }
+
+    if (connFilters.size === 0) {
+      this.connectionFilters.delete(ws);
+    }
+  }
+
+  /**
+   * Broadcast an event to all subscriptions whose filters match.
+   * Deduplicates so each (connection, subscriptionId) pair receives the event at most once,
+   * even if multiple filters within the subscription match.
+   */
+  private broadcast(event: NostrEvent): void {
+    // Collect candidate indexed filters: kind-specific + catchAll
+    const kindSet = this.kindIndex.get(event.kind);
+
+    // Track which (ws, subscriptionId) pairs have already been sent to.
+    // Outer map uses ws reference identity, inner set is subscriptionId strings.
+    const sent = new Map<ServerWebSocket<WebSocketData>, Set<string>>();
+
+    const check = (entry: IndexedFilter) => {
+      // Skip if already sent to this (ws, subId)
+      const wsSent = sent.get(entry.ws);
+      if (wsSent?.has(entry.subscriptionId)) return;
+
+      if (!matchFilter(entry.filter, event)) return;
+
+      // Mark as sent
+      if (wsSent) {
+        wsSent.add(entry.subscriptionId);
+      } else {
+        sent.set(entry.ws, new Set([entry.subscriptionId]));
+      }
+
+      this.sendMessage(entry.ws, ["EVENT", entry.subscriptionId, event]);
+    };
+
+    if (kindSet) {
+      for (const entry of kindSet) {
+        check(entry);
+      }
+    }
+    for (const entry of this.catchAll) {
+      check(entry);
+    }
   }
 
   /**
@@ -324,6 +461,11 @@ export class Relay {
         result.accepted,
         result.message,
       ]);
+
+      // Broadcast to all matching subscriptions
+      if (result.accepted) {
+        this.broadcast(event);
+      }
     } catch (error) {
       console.error("Error handling EVENT:", error);
       const message = error instanceof Error ? error.message : String(error);
@@ -361,8 +503,10 @@ export class Relay {
         return;
       }
 
-      // Store subscription
+      // Store subscription (remove old one first if replacing)
+      this.removeFromIndex(ws, subscriptionId);
       data.subscriptions.set(subscriptionId, { id: subscriptionId, filters });
+      this.addToIndex(ws, subscriptionId, filters);
 
       // Send existing events
       for (const event of result.events) {
@@ -417,6 +561,7 @@ export class Relay {
   handleClose(ws: ServerWebSocket<WebSocketData>, subscriptionId: string) {
     const data = ws.data;
     data.subscriptions.delete(subscriptionId);
+    this.removeFromIndex(ws, subscriptionId);
   }
 
   // Handle incoming WebSocket message
@@ -503,13 +648,16 @@ export class Relay {
   }
 
   // Handle WebSocket open
-  handleOpen(_ws: ServerWebSocket<WebSocketData>) {
+  handleOpen(ws: ServerWebSocket<WebSocketData>) {
+    this.connections.add(ws);
     console.log("WebSocket connection opened");
   }
 
   // Handle WebSocket close
   handleCloseConnection(ws: ServerWebSocket<WebSocketData>) {
     console.log("WebSocket connection closed");
+    this.connections.delete(ws);
+    this.removeFromIndex(ws);
     ws.data?.subscriptions.clear();
   }
 }

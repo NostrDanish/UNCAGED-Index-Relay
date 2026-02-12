@@ -630,4 +630,352 @@ describe("Relay", () => {
       });
     });
   });
+
+  describe("broadcast / live subscriptions", () => {
+    /** Helper to create a mock WebSocket that records sent messages. */
+    function createMockWs(): {
+      ws: ServerWebSocket<WebSocketData>;
+      messages: unknown[][];
+    } {
+      const messages: unknown[][] = [];
+      const ws = {
+        send: (message: string) => {
+          messages.push(JSON.parse(message));
+        },
+        data: {
+          subscriptions: new Map(),
+        },
+      } as unknown as ServerWebSocket<WebSocketData>;
+      return { ws, messages };
+    }
+
+    it("should broadcast event to matching subscription on another connection", async () => {
+      // Subscriber
+      const sub = createMockWs();
+      relay.handleOpen(sub.ws);
+      mockStorage.query = async () => [];
+      await relay.handleReq(sub.ws, "sub1", [{ kinds: [1] }]);
+      sub.messages.length = 0; // clear EOSE
+
+      // Publisher (uses the default mockWs)
+      relay.handleOpen(mockWs);
+      const sk = generateSecretKey();
+      const event = finalizeEvent(
+        {
+          kind: 1,
+          created_at: Math.floor(Date.now() / 1000),
+          tags: [],
+          content: "live!",
+        },
+        sk,
+      );
+      await relay.handleEvent(mockWs, event);
+
+      // Subscriber should have received the event
+      assert.equal(sub.messages.length, 1);
+      assert.equal(sub.messages[0][0], "EVENT");
+      assert.equal(sub.messages[0][1], "sub1");
+      assert.equal((sub.messages[0][2] as NostrEvent).id, event.id);
+    });
+
+    it("should not broadcast to non-matching kind", async () => {
+      const sub = createMockWs();
+      relay.handleOpen(sub.ws);
+      mockStorage.query = async () => [];
+      await relay.handleReq(sub.ws, "sub1", [{ kinds: [7] }]); // wants kind 7
+      sub.messages.length = 0;
+
+      relay.handleOpen(mockWs);
+      const sk = generateSecretKey();
+      const event = finalizeEvent(
+        {
+          kind: 1,
+          created_at: Math.floor(Date.now() / 1000),
+          tags: [],
+          content: "nope",
+        },
+        sk,
+      );
+      await relay.handleEvent(mockWs, event);
+
+      // Subscriber should NOT receive the event
+      assert.equal(sub.messages.length, 0);
+    });
+
+    it("should broadcast to subscription with matching author filter", async () => {
+      const authorSk = generateSecretKey();
+      const authorEvent = finalizeEvent(
+        { kind: 1, created_at: 0, tags: [], content: "" },
+        authorSk,
+      );
+      const authorPubkey = authorEvent.pubkey;
+
+      const sub = createMockWs();
+      relay.handleOpen(sub.ws);
+      mockStorage.query = async () => [];
+      await relay.handleReq(sub.ws, "sub1", [
+        { kinds: [1], authors: [authorPubkey] },
+      ]);
+      sub.messages.length = 0;
+
+      relay.handleOpen(mockWs);
+
+      // Event from matching author
+      const event = finalizeEvent(
+        {
+          kind: 1,
+          created_at: Math.floor(Date.now() / 1000),
+          tags: [],
+          content: "match",
+        },
+        authorSk,
+      );
+      await relay.handleEvent(mockWs, event);
+      assert.equal(sub.messages.length, 1);
+      assert.equal((sub.messages[0][2] as NostrEvent).id, event.id);
+
+      // Event from different author — should NOT match
+      sub.messages.length = 0;
+      const otherSk = generateSecretKey();
+      const otherEvent = finalizeEvent(
+        {
+          kind: 1,
+          created_at: Math.floor(Date.now() / 1000),
+          tags: [],
+          content: "no match",
+        },
+        otherSk,
+      );
+      await relay.handleEvent(mockWs, otherEvent);
+      assert.equal(sub.messages.length, 0);
+    });
+
+    it("should not broadcast after CLOSE", async () => {
+      const sub = createMockWs();
+      relay.handleOpen(sub.ws);
+      mockStorage.query = async () => [];
+      await relay.handleReq(sub.ws, "sub1", [{ kinds: [1] }]);
+      sub.messages.length = 0;
+
+      // Close the subscription
+      relay.handleClose(sub.ws, "sub1");
+
+      relay.handleOpen(mockWs);
+      const sk = generateSecretKey();
+      const event = finalizeEvent(
+        {
+          kind: 1,
+          created_at: Math.floor(Date.now() / 1000),
+          tags: [],
+          content: "too late",
+        },
+        sk,
+      );
+      await relay.handleEvent(mockWs, event);
+
+      assert.equal(sub.messages.length, 0);
+    });
+
+    it("should not broadcast after connection close", async () => {
+      const sub = createMockWs();
+      relay.handleOpen(sub.ws);
+      mockStorage.query = async () => [];
+      await relay.handleReq(sub.ws, "sub1", [{ kinds: [1] }]);
+      sub.messages.length = 0;
+
+      // Close the connection
+      relay.handleCloseConnection(sub.ws);
+
+      relay.handleOpen(mockWs);
+      const sk = generateSecretKey();
+      const event = finalizeEvent(
+        {
+          kind: 1,
+          created_at: Math.floor(Date.now() / 1000),
+          tags: [],
+          content: "gone",
+        },
+        sk,
+      );
+      await relay.handleEvent(mockWs, event);
+
+      assert.equal(sub.messages.length, 0);
+    });
+
+    it("should broadcast to multiple subscriptions on the same connection", async () => {
+      const sub = createMockWs();
+      relay.handleOpen(sub.ws);
+      mockStorage.query = async () => [];
+      await relay.handleReq(sub.ws, "sub1", [{ kinds: [1] }]);
+      await relay.handleReq(sub.ws, "sub2", [{ kinds: [1] }]);
+      sub.messages.length = 0;
+
+      relay.handleOpen(mockWs);
+      const sk = generateSecretKey();
+      const event = finalizeEvent(
+        {
+          kind: 1,
+          created_at: Math.floor(Date.now() / 1000),
+          tags: [],
+          content: "multi",
+        },
+        sk,
+      );
+      await relay.handleEvent(mockWs, event);
+
+      // Both subscriptions should receive the event
+      const eventMessages = sub.messages.filter((m) => m[0] === "EVENT");
+      assert.equal(eventMessages.length, 2);
+      const subIds = eventMessages.map((m) => m[1]).sort();
+      assert.deepEqual(subIds, ["sub1", "sub2"]);
+    });
+
+    it("should deduplicate when multiple filters in one subscription match", async () => {
+      const sub = createMockWs();
+      relay.handleOpen(sub.ws);
+      mockStorage.query = async () => [];
+      // Two filters that both match kind 1
+      await relay.handleReq(sub.ws, "sub1", [
+        { kinds: [1] },
+        { kinds: [1, 7] },
+      ]);
+      sub.messages.length = 0;
+
+      relay.handleOpen(mockWs);
+      const sk = generateSecretKey();
+      const event = finalizeEvent(
+        {
+          kind: 1,
+          created_at: Math.floor(Date.now() / 1000),
+          tags: [],
+          content: "dedup",
+        },
+        sk,
+      );
+      await relay.handleEvent(mockWs, event);
+
+      // Should only receive the event ONCE
+      const eventMessages = sub.messages.filter((m) => m[0] === "EVENT");
+      assert.equal(eventMessages.length, 1);
+    });
+
+    it("should broadcast to catchAll subscription with empty filter", async () => {
+      const sub = createMockWs();
+      relay.handleOpen(sub.ws);
+      mockStorage.query = async () => [];
+      await relay.handleReq(sub.ws, "sub1", [{}]); // empty filter = match everything
+      sub.messages.length = 0;
+
+      relay.handleOpen(mockWs);
+      const sk = generateSecretKey();
+      const event = finalizeEvent(
+        {
+          kind: 42,
+          created_at: Math.floor(Date.now() / 1000),
+          tags: [],
+          content: "catch all",
+        },
+        sk,
+      );
+      await relay.handleEvent(mockWs, event);
+
+      assert.equal(sub.messages.length, 1);
+      assert.equal(sub.messages[0][0], "EVENT");
+      assert.equal((sub.messages[0][2] as NostrEvent).id, event.id);
+    });
+
+    it("should update broadcast filters when subscription is replaced", async () => {
+      const sub = createMockWs();
+      relay.handleOpen(sub.ws);
+      mockStorage.query = async () => [];
+      await relay.handleReq(sub.ws, "sub1", [{ kinds: [1] }]);
+      sub.messages.length = 0;
+
+      // Replace subscription to only want kind 7
+      await relay.handleReq(sub.ws, "sub1", [{ kinds: [7] }]);
+      sub.messages.length = 0;
+
+      relay.handleOpen(mockWs);
+      const sk = generateSecretKey();
+
+      // Kind 1 should NOT match anymore
+      const event1 = finalizeEvent(
+        {
+          kind: 1,
+          created_at: Math.floor(Date.now() / 1000),
+          tags: [],
+          content: "old",
+        },
+        sk,
+      );
+      await relay.handleEvent(mockWs, event1);
+      assert.equal(sub.messages.length, 0);
+
+      // Kind 7 should match now
+      const event7 = finalizeEvent(
+        {
+          kind: 7,
+          created_at: Math.floor(Date.now() / 1000),
+          tags: [],
+          content: "+",
+        },
+        sk,
+      );
+      await relay.handleEvent(mockWs, event7);
+      assert.equal(sub.messages.length, 1);
+      assert.equal((sub.messages[0][2] as NostrEvent).id, event7.id);
+    });
+
+    it("should also broadcast to the publisher's own matching subscriptions", async () => {
+      relay.handleOpen(mockWs);
+      mockStorage.query = async () => [];
+      await relay.handleReq(mockWs, "sub1", [{ kinds: [1] }]);
+      sentMessages.length = 0;
+
+      const sk = generateSecretKey();
+      const event = finalizeEvent(
+        {
+          kind: 1,
+          created_at: Math.floor(Date.now() / 1000),
+          tags: [],
+          content: "echo",
+        },
+        sk,
+      );
+      await relay.handleEvent(mockWs, event);
+
+      // Should have OK + EVENT (broadcast to own subscription)
+      const okMsg = sentMessages.find((m) => m[0] === "OK");
+      const eventMsg = sentMessages.find((m) => m[0] === "EVENT");
+      assert.ok(okMsg);
+      assert.ok(eventMsg);
+      assert.equal(eventMsg[1], "sub1");
+      assert.equal((eventMsg[2] as NostrEvent).id, event.id);
+    });
+
+    it("should not broadcast rejected events", async () => {
+      const sub = createMockWs();
+      relay.handleOpen(sub.ws);
+      mockStorage.query = async () => [];
+      await relay.handleReq(sub.ws, "sub1", [{ kinds: [1] }]);
+      sub.messages.length = 0;
+
+      relay.handleOpen(mockWs);
+
+      // Submit an event with a bad signature
+      const event = {
+        id: "a".repeat(64),
+        pubkey: "b".repeat(64),
+        created_at: Math.floor(Date.now() / 1000),
+        kind: 1,
+        tags: [],
+        content: "bad sig",
+        sig: "c".repeat(128),
+      } as NostrEvent;
+      await relay.handleEvent(mockWs, event);
+
+      // Subscriber should NOT receive a rejected event
+      assert.equal(sub.messages.length, 0);
+    });
+  });
 });
