@@ -13,7 +13,6 @@ export class VerifyPool {
   private workers: Worker[];
   private pending: Map<string, PendingRequest> = new Map();
   private nextWorker = 0;
-  private requestId = 0;
 
   constructor(size: number = navigator.hardwareConcurrency) {
     // Use at least 1 worker, cap at available cores
@@ -43,13 +42,12 @@ export class VerifyPool {
 
   /** Verify a Nostr event signature off the main thread. */
   verify(event: NostrEvent): Promise<boolean> {
-    const id = String(this.requestId++);
     const worker = this.workers[this.nextWorker];
     this.nextWorker = (this.nextWorker + 1) % this.workers.length;
 
     return new Promise<boolean>((resolve, reject) => {
-      this.pending.set(id, { resolve, reject });
-      worker.postMessage({ id, event });
+      this.pending.set(`${event.id}:${event.sig}`, { resolve, reject });
+      worker.postMessage(event);
     });
   }
 
