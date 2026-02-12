@@ -165,7 +165,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
    */
   private parseSortMode(
     filter: NostrFilter,
-  ): "top" | "hot" | "controversial" | "rising" | null {
+  ): "top" | "hot" | "controversial" | "rising" | "zaps" | null {
     if (!filter.search) return null;
 
     const tokens = NIP50.parseInput(filter.search);
@@ -173,7 +173,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
       (t) =>
         typeof t === "object" &&
         t.key === "sort" &&
-        ["top", "hot", "controversial", "rising"].includes(t.value),
+        ["top", "hot", "controversial", "rising", "zaps"].includes(t.value),
     );
 
     // Multiple sort tokens - invalid query, will return 0 events
@@ -184,7 +184,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     if (sortTokens.length === 1) {
       const token = sortTokens[0];
       return typeof token === "object"
-        ? (token.value as "top" | "hot" | "controversial" | "rising")
+        ? (token.value as "top" | "hot" | "controversial" | "rising" | "zaps")
         : null;
     }
 
@@ -196,7 +196,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
    */
   private async querySortedEvents(
     filter: NostrFilter,
-    sortMode: "top" | "hot" | "controversial" | "rising",
+    sortMode: "top" | "hot" | "controversial" | "rising" | "zaps",
     limit: number,
   ): Promise<NostrEvent[]> {
     const query = this.buildQuery(filter) as {
@@ -264,12 +264,10 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
       const eventIds = candidateEvents.map((e: NostrEvent) => e.id);
 
       // Build aggregation query based on sort mode
-      let scoredEvents = await this.scoreEvents(
-        eventIds,
-        sortMode,
-        now,
-        candidateEvents,
-      );
+      let scoredEvents =
+        sortMode === "zaps"
+          ? await this.scoreEventsByZaps(eventIds, candidateEvents)
+          : await this.scoreEvents(eventIds, sortMode, now, candidateEvents);
 
       // Apply distinct:author — keep only the highest-scored event per pubkey
       if (this.hasDistinctAuthor(filter)) {
@@ -460,6 +458,88 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
   }
 
   /**
+   * Score events by total zap sats received (kind 9735 zap receipts).
+   * Uses a scripted sum aggregation to parse the string `tags_map.amount`
+   * field (millisatoshis) and convert it to sats.
+   */
+  private async scoreEventsByZaps(
+    eventIds: string[],
+    events: NostrEvent[],
+  ): Promise<NostrEvent[]> {
+    const zapQuery = {
+      bool: {
+        must: [
+          { term: { deleted: false } },
+          { term: { kind: 9735 } },
+          { terms: { "tags_map.e": eventIds } },
+        ],
+      },
+    };
+
+    try {
+      const response = await this.client.search({
+        index: this.indexName,
+        body: {
+          query: zapQuery,
+          size: 0,
+          aggs: {
+            by_event: {
+              terms: {
+                field: "tags_map.e",
+                size: eventIds.length,
+              },
+              aggs: {
+                total_sats: {
+                  sum: {
+                    script: {
+                      source:
+                        "if (doc.containsKey('tags_map.amount') && doc['tags_map.amount'].size() > 0) { return Long.parseLong(doc['tags_map.amount'].value) / 1000 } return 0",
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+      });
+
+      const scoreMap = new Map<string, number>();
+
+      const buckets =
+        (
+          response.body.aggregations?.by_event as unknown as {
+            buckets?: Array<{
+              key: string;
+              doc_count: number;
+              total_sats?: { value: number };
+            }>;
+          }
+        )?.buckets || [];
+
+      for (const bucket of buckets) {
+        scoreMap.set(bucket.key, bucket.total_sats?.value ?? 0);
+      }
+
+      // Events with no zaps get score 0
+      for (const event of events) {
+        if (!scoreMap.has(event.id)) {
+          scoreMap.set(event.id, 0);
+        }
+      }
+
+      // Sort by total sats descending
+      return [...events].sort((a, b) => {
+        const scoreA = scoreMap.get(a.id) || 0;
+        const scoreB = scoreMap.get(b.id) || 0;
+        return scoreB - scoreA;
+      });
+    } catch (error) {
+      console.error("Zap scoring failed:", error);
+      return events;
+    }
+  }
+
+  /**
    * Build OpenSearch query from Nostr filter
    */
   private buildQuery(filter: NostrFilter): Record<string, unknown> {
@@ -565,7 +645,10 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
       };
 
       // Use OpenSearch field collapsing to return only 1 event per pubkey
-      if (distinctAuthor && !filter.kinds?.every((k) => NKinds.replaceable(k))) {
+      if (
+        distinctAuthor &&
+        !filter.kinds?.every((k) => NKinds.replaceable(k))
+      ) {
         searchBody.collapse = { field: "pubkey" };
       }
 
@@ -772,7 +855,10 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
       try {
         const query = this.buildQuery(filter);
 
-        if (this.hasDistinctAuthor(filter) && !filter.kinds?.every((k) => NKinds.replaceable(k))) {
+        if (
+          this.hasDistinctAuthor(filter) &&
+          !filter.kinds?.every((k) => NKinds.replaceable(k))
+        ) {
           // Use cardinality aggregation for distinct author count
           const response = await this.client.search({
             index: this.indexName,

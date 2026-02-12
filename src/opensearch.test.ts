@@ -348,10 +348,12 @@ describe("OpenSearchRelay", () => {
     const createSortMockClient = () => {
       const documents = new Map<string, unknown>();
       const references = new Map<string, unknown[]>(); // eventId -> array of references
+      const zaps = new Map<string, number>(); // eventId -> total sats
 
       return {
         documents,
         references,
+        zaps,
         client: {
           search: async ({ body }: { body: Record<string, unknown> }) => {
             // Handle aggregation queries
@@ -370,6 +372,45 @@ describe("OpenSearchRelay", () => {
                   body: {
                     aggregations: {
                       unique_authors: { value: uniquePubkeys.size },
+                    },
+                    hits: { hits: [] },
+                  },
+                };
+              }
+
+              // Detect zap aggregation queries (kind 9735 with total_sats)
+              const queryMust = (
+                (body.query as Record<string, unknown>)?.bool as Record<
+                  string,
+                  unknown
+                >
+              )?.must as Array<Record<string, unknown>> | undefined;
+              const isZapQuery = queryMust?.some(
+                (clause) =>
+                  (clause.term as Record<string, unknown>)?.kind === 9735,
+              );
+
+              if (isZapQuery) {
+                const zapBuckets: Array<{
+                  key: string;
+                  doc_count: number;
+                  total_sats: { value: number };
+                }> = [];
+
+                for (const [eventId, totalSats] of zaps.entries()) {
+                  if (totalSats > 0) {
+                    zapBuckets.push({
+                      key: eventId,
+                      doc_count: 1,
+                      total_sats: { value: totalSats },
+                    });
+                  }
+                }
+
+                return {
+                  body: {
+                    aggregations: {
+                      by_event: { buckets: zapBuckets },
                     },
                     hits: { hits: [] },
                   },
@@ -843,6 +884,158 @@ describe("OpenSearchRelay", () => {
       assert.equal(new Set(pubkeys).size, 2);
 
       // event1b should be first (highest score from author 1), event2 second
+      assert.equal(results[0].id, event1b.id);
+      assert.equal(results[1].id, event2.id);
+    });
+
+    it("should handle sort:zaps query", async () => {
+      const { client, zaps } = createSortMockClient();
+      const relay = new OpenSearchRelay(client as unknown as Client, {
+        indexName: "test-index",
+        bulkMaxSize: 1,
+      });
+
+      const sk = generateSecretKey();
+      const now = Math.floor(Date.now() / 1000);
+
+      // Create two events
+      const event1 = finalizeEvent(
+        {
+          kind: 1,
+          created_at: now - 3600,
+          tags: [],
+          content: "Lightly zapped event",
+        },
+        sk,
+      );
+
+      const event2 = finalizeEvent(
+        {
+          kind: 1,
+          created_at: now - 7200,
+          tags: [],
+          content: "Heavily zapped event",
+        },
+        sk,
+      );
+
+      await relay.event(event1);
+      await relay.event(event2);
+
+      // event1 received 1000 sats, event2 received 50000 sats
+      zaps.set(event1.id, 1000);
+      zaps.set(event2.id, 50000);
+
+      // Query with sort:zaps
+      const results = await relay.query([{ kinds: [1], search: "sort:zaps" }]);
+
+      // Event2 should be first (more sats)
+      assert.equal(results.length, 2);
+      assert.equal(results[0].id, event2.id);
+      assert.equal(results[1].id, event1.id);
+    });
+
+    it("should handle sort:zaps with no zaps", async () => {
+      const { client } = createSortMockClient();
+      const relay = new OpenSearchRelay(client as unknown as Client, {
+        indexName: "test-index",
+        bulkMaxSize: 1,
+      });
+
+      const sk = generateSecretKey();
+      const now = Math.floor(Date.now() / 1000);
+
+      const event1 = finalizeEvent(
+        {
+          kind: 1,
+          created_at: now - 100,
+          tags: [],
+          content: "No zaps here",
+        },
+        sk,
+      );
+
+      const event2 = finalizeEvent(
+        {
+          kind: 1,
+          created_at: now - 200,
+          tags: [],
+          content: "No zaps here either",
+        },
+        sk,
+      );
+
+      await relay.event(event1);
+      await relay.event(event2);
+
+      // No zaps set — both events should still be returned with score 0
+      const results = await relay.query([{ kinds: [1], search: "sort:zaps" }]);
+
+      assert.equal(results.length, 2);
+    });
+
+    it("should combine distinct:author with sort:zaps", async () => {
+      const { client, zaps } = createSortMockClient();
+      const relay = new OpenSearchRelay(client as unknown as Client, {
+        indexName: "test-index",
+        bulkMaxSize: 1,
+      });
+
+      const sk1 = generateSecretKey();
+      const sk2 = generateSecretKey();
+      const now = Math.floor(Date.now() / 1000);
+
+      // Author 1: two events, one with 100 sats and one with 5000 sats
+      const event1a = finalizeEvent(
+        {
+          kind: 1,
+          created_at: now - 100,
+          tags: [],
+          content: "Author 1 low zaps",
+        },
+        sk1,
+      );
+
+      const event1b = finalizeEvent(
+        {
+          kind: 1,
+          created_at: now - 50,
+          tags: [],
+          content: "Author 1 high zaps",
+        },
+        sk1,
+      );
+
+      // Author 2: one event with 3000 sats
+      const event2 = finalizeEvent(
+        {
+          kind: 1,
+          created_at: now - 75,
+          tags: [],
+          content: "Author 2 medium zaps",
+        },
+        sk2,
+      );
+
+      await relay.event(event1a);
+      await relay.event(event1b);
+      await relay.event(event2);
+
+      zaps.set(event1a.id, 100);
+      zaps.set(event1b.id, 5000);
+      zaps.set(event2.id, 3000);
+
+      // Query with sort:zaps and distinct:author
+      const results = await relay.query([
+        { kinds: [1], search: "sort:zaps distinct:author" },
+      ]);
+
+      // Should return 2 events (one per author)
+      assert.equal(results.length, 2);
+      const pubkeys = results.map((e) => e.pubkey);
+      assert.equal(new Set(pubkeys).size, 2);
+
+      // event1b should be first (5000 sats, highest for author 1), event2 second (3000 sats)
       assert.equal(results[0].id, event1b.id);
       assert.equal(results[1].id, event2.id);
     });
