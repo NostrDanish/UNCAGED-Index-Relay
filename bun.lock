@@ -7,6 +7,7 @@
         "@nostrify/nostrify": "^0.49.0",
         "@opensearch-project/opensearch": "^3.5.1",
         "nostr-tools": "^2.20.0",
+        "nostr-wasm": "^0.1.0",
         "zod": "^4.3.6",
       },
       "devDependencies": {
