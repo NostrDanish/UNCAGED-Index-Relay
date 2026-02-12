@@ -565,7 +565,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
       };
 
       // Use OpenSearch field collapsing to return only 1 event per pubkey
-      if (distinctAuthor) {
+      if (distinctAuthor && !filter.kinds?.every((k) => NKinds.replaceable(k))) {
         searchBody.collapse = { field: "pubkey" };
       }
 
@@ -772,7 +772,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
       try {
         const query = this.buildQuery(filter);
 
-        if (this.hasDistinctAuthor(filter)) {
+        if (this.hasDistinctAuthor(filter) && !filter.kinds?.every((k) => NKinds.replaceable(k))) {
           // Use cardinality aggregation for distinct author count
           const response = await this.client.search({
             index: this.indexName,
