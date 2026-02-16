@@ -19,6 +19,7 @@ const verifyPool = new VerifyPool();
 const opensearchRelay = OpenSearchRelay.fromConfig(config);
 const relay = new Relay(opensearchRelay, {
   verify: (event) => verifyPool.verify(event),
+  relayUrl: config.relayUrl,
 });
 
 // Initialize index on startup
@@ -42,6 +43,8 @@ const server = serve<WebSocketData>({
       const upgraded = server.upgrade(req, {
         data: {
           subscriptions: new Map(),
+          challenge: "",
+          authedPubkeys: new Set(),
         },
       });
 

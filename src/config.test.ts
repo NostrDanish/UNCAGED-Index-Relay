@@ -51,17 +51,17 @@ describe("Config", () => {
     });
   });
 
-  describe("publicUrl", () => {
-    it("should return undefined when PUBLIC_URL is not set", () => {
+  describe("relayUrl", () => {
+    it("should return undefined when RELAY_URL is not set", () => {
       const mockEnv = new Map();
       const config = new Config(mockEnv);
-      assert.equal(config.publicUrl, undefined);
+      assert.equal(config.relayUrl, undefined);
     });
 
-    it("should return the PUBLIC_URL from environment when set", () => {
-      const mockEnv = new Map([["PUBLIC_URL", "https://example.com"]]);
+    it("should return the RELAY_URL from environment when set", () => {
+      const mockEnv = new Map([["RELAY_URL", "wss://relay.example.com/"]]);
       const config = new Config(mockEnv);
-      assert.equal(config.publicUrl, "https://example.com");
+      assert.equal(config.relayUrl, "wss://relay.example.com/");
     });
   });
 });

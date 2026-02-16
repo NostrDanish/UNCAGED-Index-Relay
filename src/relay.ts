@@ -1,4 +1,5 @@
 import type { Buffer } from "node:buffer";
+import { randomBytes } from "node:crypto";
 import type { NostrRelayInfo, NRelay } from "@nostrify/nostrify";
 import type { ServerWebSocket } from "bun";
 import type { Filter, NostrEvent } from "nostr-tools";
@@ -15,6 +16,10 @@ export interface Subscription {
 
 export interface WebSocketData {
   subscriptions: Map<string, Subscription>;
+  /** The current AUTH challenge string for this connection. */
+  challenge: string;
+  /** Set of pubkeys that have been authenticated on this connection. */
+  authedPubkeys: Set<string>;
 }
 
 /** A single filter entry in the subscription index. */
@@ -28,6 +33,8 @@ export class Relay {
   public storage: NRelay;
   private relayInfo: NostrRelayInfo;
   private verify: VerifyFn;
+  /** The relay's public URL, used for NIP-42 AUTH verification. */
+  private relayUrl?: string;
 
   /** All open WebSocket connections. */
   private connections = new Set<ServerWebSocket<WebSocketData>>();
@@ -44,18 +51,23 @@ export class Relay {
 
   constructor(
     storage: NRelay,
-    opts?: { relayInfo?: Partial<NostrRelayInfo>; verify?: VerifyFn },
+    opts?: {
+      relayInfo?: Partial<NostrRelayInfo>;
+      verify?: VerifyFn;
+      relayUrl?: string;
+    },
   ) {
     this.storage = storage;
     this.verify = opts?.verify ?? verifyEvent;
+    this.relayUrl = opts?.relayUrl;
     this.relayInfo = {
       name: "Ditto Relay",
       description: "A Nostr relay backed by OpenSearch",
       pubkey: "",
       contact: "",
-      supported_nips: [1, 9, 11, 45, 50],
-      software: "ditto-relay",
-      version: "1.0.0",
+      supported_nips: [1, 9, 11, 42, 45, 50, 70],
+      software: "https://gitlab.com/soapbox-pub/ditto-relay",
+      version: "0.1.0",
       limitation: {
         max_message_length: 128000,
         max_subscriptions: 20,
@@ -68,10 +80,6 @@ export class Relay {
         auth_required: false,
         payment_required: false,
       },
-      relay_countries: [],
-      language_tags: [],
-      tags: [],
-      posting_policy: "",
       ...opts?.relayInfo,
     };
   }
@@ -203,9 +211,19 @@ export class Relay {
   }
 
   /**
+   * Check if an event is protected (NIP-70) by looking for the ["-"] tag.
+   */
+  private isProtectedEvent(event: NostrEvent): boolean {
+    return event.tags.some((tag) => tag.length === 1 && tag[0] === "-");
+  }
+
+  /**
    * Handle an EVENT message according to NIP-01
    */
-  private async handleEventMessage(event: NostrEvent): Promise<{
+  private async handleEventMessage(
+    event: NostrEvent,
+    ws: ServerWebSocket<WebSocketData>,
+  ): Promise<{
     eventId: string;
     accepted: boolean;
     message: string;
@@ -218,6 +236,18 @@ export class Relay {
         accepted: false,
         message: "invalid: signature verification failed",
       };
+    }
+
+    // NIP-70: Reject protected events unless the author is authenticated
+    if (this.isProtectedEvent(event)) {
+      if (!this.isAuthenticated(ws, event.pubkey)) {
+        return {
+          eventId: event.id,
+          accepted: false,
+          message:
+            "auth-required: this event may only be published by its author",
+        };
+      }
     }
 
     // Handle deletion events (kind 5) using NRelay's remove method
@@ -454,7 +484,7 @@ export class Relay {
   // Handle EVENT message
   async handleEvent(ws: ServerWebSocket<WebSocketData>, event: NostrEvent) {
     try {
-      const result = await this.handleEventMessage(event);
+      const result = await this.handleEventMessage(event, ws);
       this.sendMessage(ws, [
         "OK",
         result.eventId,
@@ -564,6 +594,120 @@ export class Relay {
     this.removeFromIndex(ws, subscriptionId);
   }
 
+  /** Generate a random challenge string for NIP-42 AUTH. */
+  private generateChallenge(): string {
+    return randomBytes(32).toString("hex");
+  }
+
+  /**
+   * Compare two relay URLs, tolerating a missing trailing slash
+   * when the path is the root `/`.
+   */
+  private relayUrlMatches(url: string, expected: string): boolean {
+    if (url === expected) return true;
+    // "wss://host" and "wss://host/" both represent the root path.
+    // Only tolerate this when the shorter URL has no path at all
+    // (no `/` after the authority), meaning the `/` is the root path.
+    const shorter = url.length < expected.length ? url : expected;
+    const longer = url.length < expected.length ? expected : url;
+    if (longer !== `${shorter}/`) return false;
+    // Ensure the shorter form has no path component (just scheme + authority).
+    const afterScheme = shorter.indexOf("://");
+    if (afterScheme === -1) return false;
+    return !shorter.includes("/", afterScheme + 3);
+  }
+
+  /**
+   * Check if a pubkey is authenticated on this connection.
+   */
+  isAuthenticated(ws: ServerWebSocket<WebSocketData>, pubkey: string): boolean {
+    return ws.data.authedPubkeys.has(pubkey);
+  }
+
+  /**
+   * Handle an AUTH message from a client (NIP-42).
+   * Validates the kind 22242 event and marks the pubkey as authenticated.
+   */
+  async handleAuth(
+    ws: ServerWebSocket<WebSocketData>,
+    event: NostrEvent,
+  ): Promise<void> {
+    // Verify signature
+    const isValid = await this.verify(event);
+    if (!isValid) {
+      this.sendMessage(ws, [
+        "OK",
+        event.id,
+        false,
+        "invalid: signature verification failed",
+      ]);
+      return;
+    }
+
+    // Must be kind 22242
+    if (event.kind !== 22242) {
+      this.sendMessage(ws, [
+        "OK",
+        event.id,
+        false,
+        "invalid: AUTH event must be kind 22242",
+      ]);
+      return;
+    }
+
+    // Check created_at is within ~10 minutes
+    const now = Math.floor(Date.now() / 1000);
+    const timeDiff = Math.abs(now - event.created_at);
+    if (timeDiff > 600) {
+      this.sendMessage(ws, [
+        "OK",
+        event.id,
+        false,
+        "invalid: AUTH event timestamp is too far from current time",
+      ]);
+      return;
+    }
+
+    // Check challenge tag matches
+    const challengeTag = event.tags.find((t) => t[0] === "challenge");
+    if (!challengeTag || challengeTag[1] !== ws.data.challenge) {
+      this.sendMessage(ws, [
+        "OK",
+        event.id,
+        false,
+        "invalid: AUTH challenge does not match",
+      ]);
+      return;
+    }
+
+    // Check relay tag - if we have a configured relay URL, verify it matches exactly
+    const relayTag = event.tags.find((t) => t[0] === "relay");
+    if (!relayTag || !relayTag[1]) {
+      this.sendMessage(ws, [
+        "OK",
+        event.id,
+        false,
+        "invalid: AUTH event missing relay tag",
+      ]);
+      return;
+    }
+
+    if (this.relayUrl && !this.relayUrlMatches(relayTag[1], this.relayUrl)) {
+      this.sendMessage(ws, [
+        "OK",
+        event.id,
+        false,
+        "invalid: AUTH relay URL does not match",
+      ]);
+      return;
+    }
+
+    // Authentication successful - add this pubkey to the authenticated set
+    ws.data.authedPubkeys.add(event.pubkey);
+
+    this.sendMessage(ws, ["OK", event.id, true, ""]);
+  }
+
   // Handle incoming WebSocket message
   async handleMessage(
     ws: ServerWebSocket<WebSocketData>,
@@ -624,6 +768,17 @@ export class Relay {
           break;
         }
 
+        case "AUTH":
+          if (params.length !== 1) {
+            this.sendMessage(ws, [
+              "NOTICE",
+              "invalid: AUTH message must have exactly 1 parameter",
+            ]);
+            return;
+          }
+          await this.handleAuth(ws, params[0] as NostrEvent);
+          break;
+
         case "CLOSE":
           if (params.length !== 1) {
             this.sendMessage(ws, [
@@ -650,6 +805,10 @@ export class Relay {
   // Handle WebSocket open
   handleOpen(ws: ServerWebSocket<WebSocketData>) {
     this.connections.add(ws);
+    // Generate and send NIP-42 AUTH challenge
+    const challenge = this.generateChallenge();
+    ws.data.challenge = challenge;
+    this.sendMessage(ws, ["AUTH", challenge]);
     console.log("WebSocket connection opened");
   }
 

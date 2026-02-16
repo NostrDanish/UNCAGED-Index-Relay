@@ -30,7 +30,7 @@
 Edit `.env` to configure the application:
 
 - `PORT` - Server port (default: 13131)
-- `PUBLIC_URL` - URL of the public server, eg `https://relay.example.com`
+- `RELAY_URL` - Full WebSocket URL of the relay, eg `wss://relay.example.com/`
 - `OPENSEARCH_NODE` - OpenSearch endpoint (default: http://localhost:9200)
 - `OPENSEARCH_INDEX` - Index name (default: nostr-events)
 - `OPENSEARCH_USERNAME` - OpenSearch username (optional)

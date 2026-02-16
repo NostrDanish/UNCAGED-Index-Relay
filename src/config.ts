@@ -17,8 +17,8 @@ export class Config {
     return port;
   }
 
-  get publicUrl(): string | undefined {
-    return this.env.get("PUBLIC_URL");
+  get relayUrl(): string | undefined {
+    return this.env.get("RELAY_URL");
   }
 
   get opensearchNode(): string {

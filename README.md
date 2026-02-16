@@ -69,7 +69,7 @@ Create a `.env` file based on `.env.example`:
 ```bash
 # Application
 PORT=8000
-PUBLIC_URL=https://relay.example.com
+RELAY_URL=wss://relay.example.com/
 
 # OpenSearch
 OPENSEARCH_NODE=http://localhost:9200

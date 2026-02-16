@@ -38,6 +38,8 @@ describe("Relay", () => {
       },
       data: {
         subscriptions: new Map(),
+        challenge: "",
+        authedPubkeys: new Set(),
       },
     } as unknown as ServerWebSocket<WebSocketData>;
 
@@ -56,7 +58,7 @@ describe("Relay", () => {
       assert.equal(info.name, "Ditto Relay");
       assert.equal(info.software, "ditto-relay");
       assert.equal(info.version, "1.0.0");
-      assert.deepEqual(info.supported_nips, [1, 9, 11, 45, 50]);
+      assert.deepEqual(info.supported_nips, [1, 9, 11, 42, 45, 50, 70]);
     });
 
     it("should allow customizing relay info", () => {
@@ -597,10 +599,15 @@ describe("Relay", () => {
   });
 
   describe("handleOpen", () => {
-    it("should not throw on connection open", () => {
-      assert.doesNotThrow(() => {
-        relay.handleOpen(mockWs);
-      });
+    it("should send AUTH challenge on connection open", () => {
+      relay.handleOpen(mockWs);
+
+      assert.equal(sentMessages.length, 1);
+      assert.equal(sentMessages[0][0], "AUTH");
+      assert.equal(typeof sentMessages[0][1], "string");
+      assert.ok((sentMessages[0][1] as string).length > 0);
+      // Challenge should be stored in connection data
+      assert.equal(mockWs.data.challenge, sentMessages[0][1]);
     });
   });
 
@@ -644,6 +651,8 @@ describe("Relay", () => {
         },
         data: {
           subscriptions: new Map(),
+          challenge: "",
+          authedPubkeys: new Set(),
         },
       } as unknown as ServerWebSocket<WebSocketData>;
       return { ws, messages };
@@ -976,6 +985,540 @@ describe("Relay", () => {
 
       // Subscriber should NOT receive a rejected event
       assert.equal(sub.messages.length, 0);
+    });
+  });
+
+  describe("NIP-42 AUTH", () => {
+    it("should handle AUTH message via handleMessage", async () => {
+      relay.handleOpen(mockWs);
+      const challenge = mockWs.data.challenge;
+      sentMessages.length = 0;
+
+      const sk = generateSecretKey();
+      const authEvent = finalizeEvent(
+        {
+          kind: 22242,
+          created_at: Math.floor(Date.now() / 1000),
+          tags: [
+            ["relay", "wss://relay.example.com/"],
+            ["challenge", challenge],
+          ],
+          content: "",
+        },
+        sk,
+      );
+
+      const message = JSON.stringify(["AUTH", authEvent]);
+      await relay.handleMessage(mockWs, message);
+
+      assert.equal(sentMessages.length, 1);
+      assert.equal(sentMessages[0][0], "OK");
+      assert.equal(sentMessages[0][1], authEvent.id);
+      assert.equal(sentMessages[0][2], true);
+    });
+
+    it("should accept valid AUTH event and mark pubkey as authenticated", async () => {
+      relay.handleOpen(mockWs);
+      const challenge = mockWs.data.challenge;
+      sentMessages.length = 0;
+
+      const sk = generateSecretKey();
+      const authEvent = finalizeEvent(
+        {
+          kind: 22242,
+          created_at: Math.floor(Date.now() / 1000),
+          tags: [
+            ["relay", "wss://relay.example.com/"],
+            ["challenge", challenge],
+          ],
+          content: "",
+        },
+        sk,
+      );
+
+      await relay.handleAuth(mockWs, authEvent);
+
+      assert.equal(sentMessages.length, 1);
+      assert.deepEqual(sentMessages[0], ["OK", authEvent.id, true, ""]);
+      assert.ok(relay.isAuthenticated(mockWs, authEvent.pubkey));
+    });
+
+    it("should allow multiple pubkeys to authenticate on the same connection", async () => {
+      relay.handleOpen(mockWs);
+      const challenge = mockWs.data.challenge;
+      sentMessages.length = 0;
+
+      const sk1 = generateSecretKey();
+      const sk2 = generateSecretKey();
+
+      const authEvent1 = finalizeEvent(
+        {
+          kind: 22242,
+          created_at: Math.floor(Date.now() / 1000),
+          tags: [
+            ["relay", "wss://relay.example.com/"],
+            ["challenge", challenge],
+          ],
+          content: "",
+        },
+        sk1,
+      );
+
+      const authEvent2 = finalizeEvent(
+        {
+          kind: 22242,
+          created_at: Math.floor(Date.now() / 1000),
+          tags: [
+            ["relay", "wss://relay.example.com/"],
+            ["challenge", challenge],
+          ],
+          content: "",
+        },
+        sk2,
+      );
+
+      await relay.handleAuth(mockWs, authEvent1);
+      await relay.handleAuth(mockWs, authEvent2);
+
+      assert.ok(relay.isAuthenticated(mockWs, authEvent1.pubkey));
+      assert.ok(relay.isAuthenticated(mockWs, authEvent2.pubkey));
+    });
+
+    it("should reject AUTH event with invalid signature", async () => {
+      relay.handleOpen(mockWs);
+      sentMessages.length = 0;
+
+      const event = {
+        id: "a".repeat(64),
+        pubkey: "b".repeat(64),
+        created_at: Math.floor(Date.now() / 1000),
+        kind: 22242,
+        tags: [
+          ["relay", "wss://relay.example.com/"],
+          ["challenge", mockWs.data.challenge],
+        ],
+        content: "",
+        sig: "c".repeat(128),
+      } as NostrEvent;
+
+      await relay.handleAuth(mockWs, event);
+
+      assert.equal(sentMessages.length, 1);
+      assert.equal(sentMessages[0][2], false);
+      assert.ok(
+        (sentMessages[0][3] as string).includes("signature verification"),
+      );
+      assert.ok(!relay.isAuthenticated(mockWs, event.pubkey));
+    });
+
+    it("should reject AUTH event with wrong kind", async () => {
+      relay.handleOpen(mockWs);
+      const challenge = mockWs.data.challenge;
+      sentMessages.length = 0;
+
+      const sk = generateSecretKey();
+      const authEvent = finalizeEvent(
+        {
+          kind: 1, // wrong kind
+          created_at: Math.floor(Date.now() / 1000),
+          tags: [
+            ["relay", "wss://relay.example.com/"],
+            ["challenge", challenge],
+          ],
+          content: "",
+        },
+        sk,
+      );
+
+      await relay.handleAuth(mockWs, authEvent);
+
+      assert.equal(sentMessages.length, 1);
+      assert.equal(sentMessages[0][2], false);
+      assert.ok((sentMessages[0][3] as string).includes("kind 22242"));
+      assert.ok(!relay.isAuthenticated(mockWs, authEvent.pubkey));
+    });
+
+    it("should reject AUTH event with timestamp too far in the past", async () => {
+      relay.handleOpen(mockWs);
+      const challenge = mockWs.data.challenge;
+      sentMessages.length = 0;
+
+      const sk = generateSecretKey();
+      const authEvent = finalizeEvent(
+        {
+          kind: 22242,
+          created_at: Math.floor(Date.now() / 1000) - 700, // ~11 minutes ago
+          tags: [
+            ["relay", "wss://relay.example.com/"],
+            ["challenge", challenge],
+          ],
+          content: "",
+        },
+        sk,
+      );
+
+      await relay.handleAuth(mockWs, authEvent);
+
+      assert.equal(sentMessages.length, 1);
+      assert.equal(sentMessages[0][2], false);
+      assert.ok((sentMessages[0][3] as string).includes("timestamp"));
+    });
+
+    it("should reject AUTH event with wrong challenge", async () => {
+      relay.handleOpen(mockWs);
+      sentMessages.length = 0;
+
+      const sk = generateSecretKey();
+      const authEvent = finalizeEvent(
+        {
+          kind: 22242,
+          created_at: Math.floor(Date.now() / 1000),
+          tags: [
+            ["relay", "wss://relay.example.com/"],
+            ["challenge", "wrong-challenge"],
+          ],
+          content: "",
+        },
+        sk,
+      );
+
+      await relay.handleAuth(mockWs, authEvent);
+
+      assert.equal(sentMessages.length, 1);
+      assert.equal(sentMessages[0][2], false);
+      assert.ok(
+        (sentMessages[0][3] as string).includes("challenge does not match"),
+      );
+    });
+
+    it("should reject AUTH event with missing relay tag", async () => {
+      relay.handleOpen(mockWs);
+      const challenge = mockWs.data.challenge;
+      sentMessages.length = 0;
+
+      const sk = generateSecretKey();
+      const authEvent = finalizeEvent(
+        {
+          kind: 22242,
+          created_at: Math.floor(Date.now() / 1000),
+          tags: [["challenge", challenge]], // no relay tag
+          content: "",
+        },
+        sk,
+      );
+
+      await relay.handleAuth(mockWs, authEvent);
+
+      assert.equal(sentMessages.length, 1);
+      assert.equal(sentMessages[0][2], false);
+      assert.ok((sentMessages[0][3] as string).includes("missing relay tag"));
+    });
+
+    it("should reject AUTH when relay URL does not match", async () => {
+      const relayWithUrl = new Relay(mockStorage, {
+        relayUrl: "wss://myrelay.example.com/",
+      });
+
+      relayWithUrl.handleOpen(mockWs);
+      const challenge = mockWs.data.challenge;
+      sentMessages.length = 0;
+
+      const sk = generateSecretKey();
+
+      const badAuthEvent = finalizeEvent(
+        {
+          kind: 22242,
+          created_at: Math.floor(Date.now() / 1000),
+          tags: [
+            ["relay", "wss://other-relay.example.com/"],
+            ["challenge", challenge],
+          ],
+          content: "",
+        },
+        sk,
+      );
+
+      await relayWithUrl.handleAuth(mockWs, badAuthEvent);
+      assert.equal(sentMessages[0][2], false);
+      assert.ok(
+        (sentMessages[0][3] as string).includes("relay URL does not match"),
+      );
+    });
+
+    it("should accept AUTH with exact relay URL match", async () => {
+      const relayWithUrl = new Relay(mockStorage, {
+        relayUrl: "wss://myrelay.example.com/",
+      });
+
+      relayWithUrl.handleOpen(mockWs);
+      const challenge = mockWs.data.challenge;
+      sentMessages.length = 0;
+
+      const sk = generateSecretKey();
+
+      const authEvent = finalizeEvent(
+        {
+          kind: 22242,
+          created_at: Math.floor(Date.now() / 1000),
+          tags: [
+            ["relay", "wss://myrelay.example.com/"],
+            ["challenge", challenge],
+          ],
+          content: "",
+        },
+        sk,
+      );
+
+      await relayWithUrl.handleAuth(mockWs, authEvent);
+      assert.equal(sentMessages[0][2], true);
+    });
+
+    it("should tolerate optional trailing slash for root path", async () => {
+      // Configured without trailing slash
+      const relayWithUrl = new Relay(mockStorage, {
+        relayUrl: "wss://myrelay.example.com",
+      });
+
+      relayWithUrl.handleOpen(mockWs);
+      const challenge = mockWs.data.challenge;
+      sentMessages.length = 0;
+
+      const sk = generateSecretKey();
+
+      // Client sends with trailing slash — should still match
+      const authEvent = finalizeEvent(
+        {
+          kind: 22242,
+          created_at: Math.floor(Date.now() / 1000),
+          tags: [
+            ["relay", "wss://myrelay.example.com/"],
+            ["challenge", challenge],
+          ],
+          content: "",
+        },
+        sk,
+      );
+
+      await relayWithUrl.handleAuth(mockWs, authEvent);
+      assert.equal(sentMessages[0][2], true);
+    });
+
+    it("should not tolerate trailing slash leniency for non-root paths", async () => {
+      const relayWithUrl = new Relay(mockStorage, {
+        relayUrl: "wss://myrelay.example.com/custom-path",
+      });
+
+      relayWithUrl.handleOpen(mockWs);
+      const challenge = mockWs.data.challenge;
+      sentMessages.length = 0;
+
+      const sk = generateSecretKey();
+
+      // Client sends with trailing slash on non-root path — should NOT match
+      const authEvent = finalizeEvent(
+        {
+          kind: 22242,
+          created_at: Math.floor(Date.now() / 1000),
+          tags: [
+            ["relay", "wss://myrelay.example.com/custom-path/"],
+            ["challenge", challenge],
+          ],
+          content: "",
+        },
+        sk,
+      );
+
+      await relayWithUrl.handleAuth(mockWs, authEvent);
+      assert.equal(sentMessages[0][2], false);
+      assert.ok(
+        (sentMessages[0][3] as string).includes("relay URL does not match"),
+      );
+    });
+
+    it("should reject AUTH message with wrong parameter count", async () => {
+      const message = JSON.stringify(["AUTH"]);
+      await relay.handleMessage(mockWs, message);
+
+      assert.equal(sentMessages.length, 1);
+      assert.equal(sentMessages[0][0], "NOTICE");
+      assert.ok((sentMessages[0][1] as string).includes("exactly 1 parameter"));
+    });
+  });
+
+  describe("NIP-70 protected events", () => {
+    it("should reject protected event from unauthenticated client", async () => {
+      relay.handleOpen(mockWs);
+      sentMessages.length = 0;
+
+      const sk = generateSecretKey();
+      const protectedEvent = finalizeEvent(
+        {
+          kind: 1,
+          created_at: Math.floor(Date.now() / 1000),
+          tags: [["-"]],
+          content: "secret message",
+        },
+        sk,
+      );
+
+      await relay.handleEvent(mockWs, protectedEvent);
+
+      assert.equal(sentMessages.length, 1);
+      assert.equal(sentMessages[0][0], "OK");
+      assert.equal(sentMessages[0][1], protectedEvent.id);
+      assert.equal(sentMessages[0][2], false);
+      assert.ok((sentMessages[0][3] as string).includes("auth-required"));
+    });
+
+    it("should accept protected event from authenticated author", async () => {
+      relay.handleOpen(mockWs);
+      const challenge = mockWs.data.challenge;
+      sentMessages.length = 0;
+
+      const sk = generateSecretKey();
+
+      // Authenticate first
+      const authEvent = finalizeEvent(
+        {
+          kind: 22242,
+          created_at: Math.floor(Date.now() / 1000),
+          tags: [
+            ["relay", "wss://relay.example.com/"],
+            ["challenge", challenge],
+          ],
+          content: "",
+        },
+        sk,
+      );
+      await relay.handleAuth(mockWs, authEvent);
+      sentMessages.length = 0;
+
+      // Now publish protected event
+      const protectedEvent = finalizeEvent(
+        {
+          kind: 1,
+          created_at: Math.floor(Date.now() / 1000),
+          tags: [["-"]],
+          content: "secret message",
+        },
+        sk,
+      );
+
+      await relay.handleEvent(mockWs, protectedEvent);
+
+      assert.equal(sentMessages.length, 1);
+      assert.equal(sentMessages[0][0], "OK");
+      assert.equal(sentMessages[0][1], protectedEvent.id);
+      assert.equal(sentMessages[0][2], true);
+    });
+
+    it("should reject protected event when authenticated as different pubkey", async () => {
+      relay.handleOpen(mockWs);
+      const challenge = mockWs.data.challenge;
+      sentMessages.length = 0;
+
+      const sk1 = generateSecretKey();
+      const sk2 = generateSecretKey();
+
+      // Authenticate as sk1
+      const authEvent = finalizeEvent(
+        {
+          kind: 22242,
+          created_at: Math.floor(Date.now() / 1000),
+          tags: [
+            ["relay", "wss://relay.example.com/"],
+            ["challenge", challenge],
+          ],
+          content: "",
+        },
+        sk1,
+      );
+      await relay.handleAuth(mockWs, authEvent);
+      sentMessages.length = 0;
+
+      // Try to publish protected event as sk2
+      const protectedEvent = finalizeEvent(
+        {
+          kind: 1,
+          created_at: Math.floor(Date.now() / 1000),
+          tags: [["-"]],
+          content: "not my event",
+        },
+        sk2,
+      );
+
+      await relay.handleEvent(mockWs, protectedEvent);
+
+      assert.equal(sentMessages.length, 1);
+      assert.equal(sentMessages[0][2], false);
+      assert.ok((sentMessages[0][3] as string).includes("auth-required"));
+    });
+
+    it("should accept non-protected event from unauthenticated client", async () => {
+      relay.handleOpen(mockWs);
+      sentMessages.length = 0;
+
+      const sk = generateSecretKey();
+      const normalEvent = finalizeEvent(
+        {
+          kind: 1,
+          created_at: Math.floor(Date.now() / 1000),
+          tags: [],
+          content: "public message",
+        },
+        sk,
+      );
+
+      await relay.handleEvent(mockWs, normalEvent);
+
+      assert.equal(sentMessages.length, 1);
+      assert.equal(sentMessages[0][2], true);
+    });
+
+    it("should not treat tags with extra elements as protected", async () => {
+      relay.handleOpen(mockWs);
+      sentMessages.length = 0;
+
+      const sk = generateSecretKey();
+      // ["-", "something"] is NOT a protection tag — must be exactly ["-"]
+      const event = finalizeEvent(
+        {
+          kind: 1,
+          created_at: Math.floor(Date.now() / 1000),
+          tags: [["-", "not-a-protection-tag"]],
+          content: "normal message",
+        },
+        sk,
+      );
+
+      await relay.handleEvent(mockWs, event);
+
+      assert.equal(sentMessages.length, 1);
+      assert.equal(sentMessages[0][2], true);
+    });
+
+    it("should handle protected event via handleMessage", async () => {
+      relay.handleOpen(mockWs);
+      sentMessages.length = 0;
+
+      const sk = generateSecretKey();
+      const protectedEvent = finalizeEvent(
+        {
+          kind: 1,
+          created_at: Math.floor(Date.now() / 1000),
+          tags: [["-"]],
+          content: "secret",
+        },
+        sk,
+      );
+
+      const message = JSON.stringify(["EVENT", protectedEvent]);
+      await relay.handleMessage(mockWs, message);
+
+      assert.equal(sentMessages.length, 1);
+      assert.equal(sentMessages[0][0], "OK");
+      assert.equal(sentMessages[0][2], false);
+      assert.ok((sentMessages[0][3] as string).includes("auth-required"));
     });
   });
 });
