@@ -17,8 +17,12 @@ export class Config {
     return port;
   }
 
-  get relayUrl(): string | undefined {
-    return this.env.get("RELAY_URL");
+  get relayUrl(): string {
+    const value = this.env.get("RELAY_URL");
+    if (!value) {
+      throw new Error("RELAY_URL is required.");
+    }
+    return value;
   }
 
   get relayPubkey(): string | undefined {

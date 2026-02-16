@@ -52,10 +52,10 @@ describe("Config", () => {
   });
 
   describe("relayUrl", () => {
-    it("should return undefined when RELAY_URL is not set", () => {
+    it("should throw an error when RELAY_URL is not set", () => {
       const mockEnv = new Map();
       const config = new Config(mockEnv);
-      assert.equal(config.relayUrl, undefined);
+      assert.throws(() => config.relayUrl, /RELAY_URL is required/);
     });
 
     it("should return the RELAY_URL from environment when set", () => {

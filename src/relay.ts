@@ -34,7 +34,7 @@ export class Relay {
   private relayInfo: NostrRelayInfo;
   private verify: VerifyFn;
   /** The relay's public URL, used for NIP-42 AUTH verification. */
-  private relayUrl?: string;
+  private relayUrl: string;
 
   /** All open WebSocket connections. */
   private connections = new Set<ServerWebSocket<WebSocketData>>();
@@ -51,15 +51,15 @@ export class Relay {
 
   constructor(
     storage: NRelay,
-    opts?: {
+    opts: {
       relayInfo?: Partial<NostrRelayInfo>;
       verify?: VerifyFn;
-      relayUrl?: string;
+      relayUrl: string;
     },
   ) {
     this.storage = storage;
-    this.verify = opts?.verify ?? verifyEvent;
-    this.relayUrl = opts?.relayUrl;
+    this.verify = opts.verify ?? verifyEvent;
+    this.relayUrl = opts.relayUrl;
     this.relayInfo = {
       name: "Ditto Relay",
       description: "A Nostr relay backed by OpenSearch",
@@ -690,7 +690,7 @@ export class Relay {
       return;
     }
 
-    if (this.relayUrl && !this.relayUrlMatches(relayTag[1], this.relayUrl)) {
+    if (!this.relayUrlMatches(relayTag[1], this.relayUrl)) {
       this.sendMessage(ws, [
         "OK",
         event.id,

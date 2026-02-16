@@ -43,7 +43,7 @@ describe("Relay", () => {
       },
     } as unknown as ServerWebSocket<WebSocketData>;
 
-    relay = new Relay(mockStorage);
+    relay = new Relay(mockStorage, { relayUrl: "wss://relay.test/" });
   });
 
   afterEach(() => {
@@ -63,6 +63,7 @@ describe("Relay", () => {
 
     it("should allow customizing relay info", () => {
       const customRelay = new Relay(mockStorage, {
+        relayUrl: "wss://relay.test/",
         relayInfo: {
           name: "Custom Relay",
           description: "My custom relay",
@@ -1000,7 +1001,7 @@ describe("Relay", () => {
           kind: 22242,
           created_at: Math.floor(Date.now() / 1000),
           tags: [
-            ["relay", "wss://relay.example.com/"],
+            ["relay", "wss://relay.test/"],
             ["challenge", challenge],
           ],
           content: "",
@@ -1028,7 +1029,7 @@ describe("Relay", () => {
           kind: 22242,
           created_at: Math.floor(Date.now() / 1000),
           tags: [
-            ["relay", "wss://relay.example.com/"],
+            ["relay", "wss://relay.test/"],
             ["challenge", challenge],
           ],
           content: "",
@@ -1056,7 +1057,7 @@ describe("Relay", () => {
           kind: 22242,
           created_at: Math.floor(Date.now() / 1000),
           tags: [
-            ["relay", "wss://relay.example.com/"],
+            ["relay", "wss://relay.test/"],
             ["challenge", challenge],
           ],
           content: "",
@@ -1069,7 +1070,7 @@ describe("Relay", () => {
           kind: 22242,
           created_at: Math.floor(Date.now() / 1000),
           tags: [
-            ["relay", "wss://relay.example.com/"],
+            ["relay", "wss://relay.test/"],
             ["challenge", challenge],
           ],
           content: "",
@@ -1094,7 +1095,7 @@ describe("Relay", () => {
         created_at: Math.floor(Date.now() / 1000),
         kind: 22242,
         tags: [
-          ["relay", "wss://relay.example.com/"],
+          ["relay", "wss://relay.test/"],
           ["challenge", mockWs.data.challenge],
         ],
         content: "",
@@ -1122,7 +1123,7 @@ describe("Relay", () => {
           kind: 1, // wrong kind
           created_at: Math.floor(Date.now() / 1000),
           tags: [
-            ["relay", "wss://relay.example.com/"],
+            ["relay", "wss://relay.test/"],
             ["challenge", challenge],
           ],
           content: "",
@@ -1149,7 +1150,7 @@ describe("Relay", () => {
           kind: 22242,
           created_at: Math.floor(Date.now() / 1000) - 700, // ~11 minutes ago
           tags: [
-            ["relay", "wss://relay.example.com/"],
+            ["relay", "wss://relay.test/"],
             ["challenge", challenge],
           ],
           content: "",
@@ -1174,7 +1175,7 @@ describe("Relay", () => {
           kind: 22242,
           created_at: Math.floor(Date.now() / 1000),
           tags: [
-            ["relay", "wss://relay.example.com/"],
+            ["relay", "wss://relay.test/"],
             ["challenge", "wrong-challenge"],
           ],
           content: "",
@@ -1383,7 +1384,7 @@ describe("Relay", () => {
           kind: 22242,
           created_at: Math.floor(Date.now() / 1000),
           tags: [
-            ["relay", "wss://relay.example.com/"],
+            ["relay", "wss://relay.test/"],
             ["challenge", challenge],
           ],
           content: "",
@@ -1426,7 +1427,7 @@ describe("Relay", () => {
           kind: 22242,
           created_at: Math.floor(Date.now() / 1000),
           tags: [
-            ["relay", "wss://relay.example.com/"],
+            ["relay", "wss://relay.test/"],
             ["challenge", challenge],
           ],
           content: "",
