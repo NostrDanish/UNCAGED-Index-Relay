@@ -56,8 +56,8 @@ describe("Relay", () => {
     it("should create relay with default relay info", () => {
       const info = relay.getRelayInfo();
       assert.equal(info.name, "Ditto Relay");
-      assert.equal(info.software, "ditto-relay");
-      assert.equal(info.version, "1.0.0");
+      assert.equal(info.software, "https://gitlab.com/soapbox-pub/ditto-relay");
+      assert.equal(info.version, "0.1.0");
       assert.deepEqual(info.supported_nips, [1, 9, 11, 42, 45, 50, 70]);
     });
 
@@ -74,7 +74,7 @@ describe("Relay", () => {
       assert.equal(info.name, "Custom Relay");
       assert.equal(info.description, "My custom relay");
       assert.equal(info.pubkey, "abc123");
-      assert.equal(info.software, "ditto-relay"); // defaults still work
+      assert.equal(info.software, "https://gitlab.com/soapbox-pub/ditto-relay"); // defaults still work
     });
   });
 

@@ -63,8 +63,6 @@ export class Relay {
     this.relayInfo = {
       name: "Ditto Relay",
       description: "A Nostr relay backed by OpenSearch",
-      pubkey: "",
-      contact: "",
       supported_nips: [1, 9, 11, 42, 45, 50, 70],
       software: "https://gitlab.com/soapbox-pub/ditto-relay",
       version: "0.1.0",

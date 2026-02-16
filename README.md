@@ -70,6 +70,8 @@ Create a `.env` file based on `.env.example`:
 # Application
 PORT=8000
 RELAY_URL=wss://relay.example.com/
+RELAY_PUBKEY=<hex pubkey>
+RELAY_CONTACT=admin@example.com
 
 # OpenSearch
 OPENSEARCH_NODE=http://localhost:9200

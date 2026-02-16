@@ -21,6 +21,14 @@ export class Config {
     return this.env.get("RELAY_URL");
   }
 
+  get relayPubkey(): string | undefined {
+    return this.env.get("RELAY_PUBKEY");
+  }
+
+  get relayContact(): string | undefined {
+    return this.env.get("RELAY_CONTACT");
+  }
+
   get opensearchNode(): string {
     return this.env.get("OPENSEARCH_NODE") || "http://localhost:9200";
   }

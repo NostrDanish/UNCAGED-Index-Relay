@@ -20,6 +20,10 @@ const opensearchRelay = OpenSearchRelay.fromConfig(config);
 const relay = new Relay(opensearchRelay, {
   verify: (event) => verifyPool.verify(event),
   relayUrl: config.relayUrl,
+  relayInfo: {
+    pubkey: config.relayPubkey,
+    contact: config.relayContact,
+  },
 });
 
 // Initialize index on startup
