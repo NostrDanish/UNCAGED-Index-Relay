@@ -14,15 +14,27 @@
 ```
 .
 ├── src/
-│   ├── server.ts      # WebSocket relay server (Bun-specific)
-│   ├── config.ts      # Configuration management
-│   ├── opensearch.ts  # OpenSearch client and index setup
-│   ├── storage.ts     # Event storage logic
-│   └── query.ts       # Event querying logic
+│   ├── server.ts         # WebSocket relay server (Bun-specific)
+│   ├── relay.ts          # Relay implementation (event handling, subscriptions)
+│   ├── relay.test.ts     # Relay tests
+│   ├── opensearch.ts     # OpenSearch backend (storage, querying, NIP-50)
+│   ├── opensearch.test.ts # OpenSearch tests
+│   ├── config.ts         # Configuration management
+│   ├── config.test.ts    # Configuration tests
+│   ├── verify-pool.ts    # Worker pool for signature verification
+│   ├── verify-pool.test.ts # Verification pool tests
+│   └── verify-worker.ts  # Worker thread for signature verification
+├── scripts/
+│   ├── backfill-protocol.ts      # Backfill protocol field for NIP-48 events
+│   └── delete-ephemeral-events.ts # Delete ephemeral events from storage
 ├── package.json       # Dependencies and scripts
+├── tsconfig.json      # TypeScript configuration
+├── biome.json         # Biome linter/formatter configuration
 ├── .env.example       # Example environment variables
 ├── .gitignore         # Git ignore rules
-└── README.md          # Project documentation
+├── AGENTS.md          # Project documentation for AI agents
+├── README.md          # Project documentation
+└── LICENSE            # AGPL-3.0 license
 ```
 
 ## Configuration
