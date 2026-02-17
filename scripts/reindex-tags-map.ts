@@ -3,6 +3,7 @@
  * is stored per tag, instead of all tag values.
  *
  * This is needed after the buildTagsMap fix to correct existing documents.
+ * Uses scroll + bulk update to avoid Painless mapping conflicts.
  *
  * Usage:
  *   bun run scripts/reindex-tags-map.ts
@@ -13,10 +14,35 @@ import type { ClientOptions } from "@opensearch-project/opensearch";
 import { Client as OpenSearchClient } from "@opensearch-project/opensearch";
 import { Config } from "../src/config.ts";
 
+/** Build tags_map from tags array — same logic as OpenSearchRelay.buildTagsMap. */
+function buildTagsMap(tags: string[][]): Record<string, string[]> {
+  const tagsMap: Record<string, string[]> = {};
+
+  for (const tag of tags) {
+    if (tag.length >= 2) {
+      const [tagName, value] = tag;
+      if (!tagsMap[tagName]) {
+        tagsMap[tagName] = [];
+      }
+      tagsMap[tagName].push(value);
+    }
+  }
+
+  return tagsMap;
+}
+
+interface ScrollHit {
+  _id: string;
+  _source: { tags: string[][] };
+}
+
+interface BulkItem {
+  update: { status: number };
+}
+
 async function main() {
   console.log("🚀 Starting tags_map reindex\n");
 
-  // Load configuration
   const config = new Config({
     get(key: string) {
       return process.env[key];
@@ -25,7 +51,6 @@ async function main() {
   console.log(`OpenSearch Node: ${config.opensearchNode}`);
   console.log(`Index: ${config.opensearchIndex}\n`);
 
-  // Create OpenSearch client
   const clientOptions: ClientOptions = {
     node: config.opensearchNode,
   };
@@ -39,53 +64,75 @@ async function main() {
 
   const client = new OpenSearchClient(clientOptions);
 
-  try {
-    console.log("Rebuilding tags_map for all documents...");
+  let totalUpdated = 0;
+  let totalFailed = 0;
 
-    const result = await client.updateByQuery({
+  try {
+    // Open a scroll cursor over all documents, fetching only the tags field.
+    const scrollTimeout = "5m";
+    const batchSize = 1000;
+
+    const initialResponse = await client.search({
       index: config.opensearchIndex,
+      scroll: scrollTimeout,
       body: {
-        script: {
-          source: `
-            def tagsMap = new HashMap();
-            if (ctx._source.tags != null) {
-              for (tag in ctx._source.tags) {
-                if (tag.size() >= 2) {
-                  def tagName = tag[0];
-                  def value = tag[1];
-                  if (!tagsMap.containsKey(tagName)) {
-                    tagsMap.put(tagName, new ArrayList());
-                  }
-                  tagsMap.get(tagName).add(value);
-                }
-              }
-            }
-            ctx._source.tags_map = tagsMap;
-          `,
-          lang: "painless",
-        },
-        query: {
-          match_all: {},
-        },
+        size: batchSize,
+        _source: ["tags"],
+        query: { match_all: {} },
       },
-      refresh: true,
     });
 
-    const responseBody = result.body as {
-      updated?: number;
-      failures?: Array<Record<string, unknown>>;
-    };
+    let scrollId = initialResponse.body._scroll_id as string;
+    let hits = initialResponse.body.hits.hits as unknown as ScrollHit[];
 
-    console.log(
-      `✅ Reindexed tags_map for ${responseBody.updated || 0} documents`,
-    );
-    if (responseBody.failures && responseBody.failures.length > 0) {
-      console.error(
-        `⚠️  ${responseBody.failures.length} documents failed to update`,
+    const total =
+      (initialResponse.body.hits.total as { value: number })?.value ??
+      "unknown";
+    console.log(`Found ${total} documents to process.\n`);
+
+    while (hits.length > 0) {
+      // Build bulk update body.
+      const bulkBody: Array<Record<string, unknown>> = [];
+
+      for (const hit of hits) {
+        const tagsMap = buildTagsMap(hit._source.tags ?? []);
+        bulkBody.push({ update: { _id: hit._id } });
+        bulkBody.push({ doc: { tags_map: tagsMap } });
+      }
+
+      const bulkResponse = await client.bulk({
+        index: config.opensearchIndex,
+        body: bulkBody,
+      });
+
+      const items = bulkResponse.body.items as unknown as BulkItem[];
+      const succeeded = items.filter((i) => i.update.status === 200).length;
+      const failed = items.length - succeeded;
+
+      totalUpdated += succeeded;
+      totalFailed += failed;
+
+      console.log(
+        `Updated ${totalUpdated} / ${total} documents` +
+          (totalFailed > 0 ? ` (${totalFailed} failed)` : ""),
       );
+
+      // Fetch the next batch.
+      const scrollResponse = await client.scroll({
+        scroll_id: scrollId,
+        scroll: scrollTimeout,
+      });
+
+      scrollId = scrollResponse.body._scroll_id as string;
+      hits = scrollResponse.body.hits.hits as unknown as ScrollHit[];
     }
 
-    console.log("\n✅ Reindex completed successfully");
+    // Clean up the scroll context.
+    await client.clearScroll({ scroll_id: scrollId });
+
+    console.log(
+      `\n✅ Reindex completed: ${totalUpdated} updated, ${totalFailed} failed`,
+    );
   } catch (error) {
     console.error("\n❌ Reindex failed:");
     if (error && typeof error === "object" && "meta" in error) {
