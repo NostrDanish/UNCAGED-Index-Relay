@@ -34,12 +34,16 @@ function buildTagsMap(tags: string[][]): Record<string, string[]> {
 
 interface SearchHit {
   _id: string;
-  _source: { tags: string[][] };
+  _source: {
+    tags: string[][];
+    [key: string]: unknown;
+  };
   sort?: unknown[];
 }
 
 interface BulkItem {
-  update: { status: number; error?: unknown };
+  update?: { status: number; error?: unknown };
+  index?: { status: number; error?: unknown };
 }
 
 async function main() {
@@ -112,18 +116,14 @@ async function main() {
 
       for (const hit of hits) {
         const tagsMap = buildTagsMap(hit._source.tags ?? []);
-        bulkBody.push({ update: { _id: hit._id } });
-        // Use script to force-replace tags_map, avoiding mapping conflicts
-        // Also remove the field first if it exists to handle type mismatches
-        bulkBody.push({
-          script: {
-            source: `
-              ctx._source.remove('tags_map');
-              ctx._source.tags_map = params.tags_map;
-            `,
-            params: { tags_map: tagsMap },
-          },
-        });
+        // Use index operation to completely replace the document
+        // This bypasses field-level mapping validation
+        const doc = {
+          ...hit._source,
+          tags_map: tagsMap,
+        };
+        bulkBody.push({ index: { _id: hit._id } });
+        bulkBody.push(doc);
       }
 
       // Execute bulk update
@@ -133,7 +133,12 @@ async function main() {
       });
 
       const items = bulkResponse.body.items as unknown as BulkItem[];
-      const succeeded = items.filter((i) => i.update.status === 200).length;
+      const succeeded = items.filter(
+        (i) =>
+          i.index?.status === 200 ||
+          i.index?.status === 201 ||
+          i.update?.status === 200,
+      ).length;
       const failed = items.length - succeeded;
 
       totalUpdated += succeeded;
@@ -141,7 +146,12 @@ async function main() {
 
       // Log failures only once per batch type to avoid spam
       if (failed > 0 && totalFailed <= failed) {
-        const failedItems = items.filter((i) => i.update.status !== 200);
+        const failedItems = items.filter(
+          (i) =>
+            i.index?.status !== 200 &&
+            i.index?.status !== 201 &&
+            i.update?.status !== 200,
+        );
         console.error(
           `\nNote: ${failed} documents failed due to mapping conflicts (likely malformed events)`,
         );
