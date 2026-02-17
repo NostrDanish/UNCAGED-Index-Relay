@@ -72,38 +72,78 @@ async function main() {
       return;
     }
 
-    // Delete incomplete documents.
+    // Run as a background task to avoid HTTP timeouts on large deletes.
     // conflicts=proceed skips documents modified concurrently by the relay.
-    console.log(`Deleting ${count} incomplete documents...`);
-    const deleteResult = await client.deleteByQuery({
+    console.log(`Deleting ${count} incomplete documents...\n`);
+    const taskResponse = await client.deleteByQuery({
       index: config.opensearchIndex,
       body: { query },
       conflicts: "proceed",
-      refresh: true,
+      wait_for_completion: false,
+      scroll_size: 1000,
     });
 
-    const responseBody = deleteResult.body as {
-      deleted?: number;
-      version_conflicts?: number;
+    const taskId = (taskResponse.body as unknown as { task: string }).task;
+    console.log(`Task started: ${taskId}\n`);
+
+    // Poll for task completion
+    let completed = false;
+    while (!completed) {
+      await new Promise((resolve) => setTimeout(resolve, 5000));
+
+      const statusResponse = await client.tasks.get({ task_id: taskId });
+      const task = statusResponse.body.task as {
+        status: {
+          total: number;
+          deleted: number;
+          version_conflicts: number;
+        };
+      };
+      const status = task.status;
+
+      const pct =
+        status.total > 0
+          ? ((status.deleted / status.total) * 100).toFixed(2)
+          : "0.00";
+
+      const parts = [
+        `Deleted ${status.deleted.toLocaleString()} / ${status.total.toLocaleString()} (${pct}%)`,
+      ];
+      if (status.version_conflicts > 0) {
+        parts.push(`${status.version_conflicts} conflicts`);
+      }
+      console.log(parts.join(" | "));
+
+      completed = statusResponse.body.completed as boolean;
+    }
+
+    // Get final result
+    const finalResponse = await client.tasks.get({ task_id: taskId });
+    const response = finalResponse.body.response as {
+      total: number;
+      deleted: number;
+      version_conflicts: number;
       failures?: Array<Record<string, unknown>>;
     };
 
-    console.log(`Deleted ${responseBody.deleted || 0} incomplete documents`);
+    console.log(
+      `\nDeletion completed: ${response.deleted.toLocaleString()} deleted out of ${response.total.toLocaleString()}`,
+    );
 
-    if (responseBody.version_conflicts) {
+    if (response.version_conflicts > 0) {
       console.log(
-        `${responseBody.version_conflicts} version conflicts (skipped)`,
+        `  ${response.version_conflicts} version conflicts (skipped)`,
       );
     }
 
-    if (responseBody.failures && responseBody.failures.length > 0) {
-      console.error(`${responseBody.failures.length} failures:`);
-      for (const failure of responseBody.failures.slice(0, 5)) {
+    if (response.failures && response.failures.length > 0) {
+      console.error(`  ${response.failures.length} failures:`);
+      for (const failure of response.failures.slice(0, 5)) {
         console.error(`  ${JSON.stringify(failure)}`);
       }
-      if (responseBody.failures.length > 5) {
+      if (response.failures.length > 5) {
         console.error(
-          `  ... and ${responseBody.failures.length - 5} more failures`,
+          `    ... and ${response.failures.length - 5} more failures`,
         );
       }
     }
