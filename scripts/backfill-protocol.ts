@@ -60,20 +60,7 @@ async function main() {
           bool: {
             must: [
               {
-                script: {
-                  script: {
-                    source: `
-                      if (ctx._source.tags == null) return false;
-                      for (tag in ctx._source.tags) {
-                        if (tag.size() >= 3 && tag[0] == 'proxy') {
-                          return true;
-                        }
-                      }
-                      return false;
-                    `,
-                    lang: "painless",
-                  },
-                },
+                exists: { field: "tags" },
               },
             ],
             must_not: [{ exists: { field: "protocol" } }],
@@ -99,7 +86,13 @@ async function main() {
 
     console.log("\n✅ Backfill completed successfully");
   } catch (error) {
-    console.error("\n❌ Backfill failed:", error);
+    console.error("\n❌ Backfill failed:");
+    if (error && typeof error === "object" && "meta" in error) {
+      const meta = (error as { meta?: { body?: unknown } }).meta;
+      console.error(JSON.stringify(meta?.body, null, 2));
+    } else {
+      console.error(error);
+    }
     process.exit(1);
   } finally {
     // Close connection
