@@ -114,9 +114,13 @@ async function main() {
         const tagsMap = buildTagsMap(hit._source.tags ?? []);
         bulkBody.push({ update: { _id: hit._id } });
         // Use script to force-replace tags_map, avoiding mapping conflicts
+        // Also remove the field first if it exists to handle type mismatches
         bulkBody.push({
           script: {
-            source: "ctx._source.tags_map = params.tags_map",
+            source: `
+              ctx._source.remove('tags_map');
+              ctx._source.tags_map = params.tags_map;
+            `,
             params: { tags_map: tagsMap },
           },
         });
