@@ -60,7 +60,7 @@ async function main() {
           bool: {
             must: [
               {
-                exists: { field: "tags" },
+                exists: { field: "tags_map.proxy" },
               },
             ],
             must_not: [{ exists: { field: "protocol" } }],
