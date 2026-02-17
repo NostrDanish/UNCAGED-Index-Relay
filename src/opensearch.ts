@@ -314,7 +314,6 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
               should: [
                 { terms: { "tags_map.e": eventIds } }, // e-tags
                 { terms: { "tags_map.q": eventIds } }, // q-tags
-                { terms: { "tags_map.a": eventIds } }, // a-tags (addressable)
               ],
             },
           },
