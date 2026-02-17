@@ -27,7 +27,6 @@
 ├── scripts/
 │   ├── backfill-protocol.ts      # Backfill protocol field for NIP-48 events
 │   ├── delete-ephemeral-events.ts # Delete ephemeral events from storage
-│   ├── fix-tags-map-mapping.ts   # Fix tags_map mapping using flattened field type
 │   └── reindex-tags-map.ts       # Reindex tags_map for existing documents
 ├── package.json       # Dependencies and scripts
 ├── tsconfig.json      # TypeScript configuration
