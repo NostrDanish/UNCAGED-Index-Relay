@@ -106,7 +106,7 @@ async function main() {
       }
 
       const conflictIds = (preflightBody.failures ?? [])
-        .filter((f) => f.cause?.type === "mapper_parsing_exception" && f.id)
+        .filter((f) => f.id)
         .map((f) => f.id as string);
 
       if (conflictIds.length === 0) break;
@@ -221,43 +221,34 @@ async function main() {
         );
       }
 
-      // Check for mapping failures and delete those documents to unblock the next run
-      const mappingFailures = (response.failures ?? []).filter(
-        (f) => f.cause?.type === "mapper_parsing_exception" && f.id,
-      );
+      // Any failure (status 400) aborts the scroll. Delete the offending
+      // documents and retry until a run completes with zero failures.
+      const deletableFailures = (response.failures ?? []).filter((f) => f.id);
 
-      if (mappingFailures.length > 0) {
+      if (deletableFailures.length > 0) {
+        for (const failure of deletableFailures.slice(0, 3)) {
+          console.log(`  Failed: ${failure.id} (${failure.cause?.type})`);
+        }
+        if (deletableFailures.length > 3) {
+          console.log(
+            `  ... and ${deletableFailures.length - 3} more failures`,
+          );
+        }
         console.log(
-          `  ${mappingFailures.length} mapping conflicts, deleting and retrying...`,
+          `  Deleting ${deletableFailures.length} failed documents and retrying...`,
         );
         const bulkBody: Array<Record<string, unknown>> = [];
-        for (const failure of mappingFailures) {
+        for (const failure of deletableFailures) {
           bulkBody.push({
             delete: { _index: config.opensearchIndex, _id: failure.id },
           });
         }
         await client.bulk({ body: bulkBody, refresh: true });
-        totalDeleted += mappingFailures.length;
-        continue; // Retry the update_by_query
+        totalDeleted += deletableFailures.length;
+        continue;
       }
 
-      // Report any non-mapping failures
-      const otherFailures = (response.failures ?? []).filter(
-        (f) => f.cause?.type !== "mapper_parsing_exception",
-      );
-      if (otherFailures.length > 0) {
-        console.error(`  ${otherFailures.length} other failures:`);
-        for (const failure of otherFailures.slice(0, 5)) {
-          console.error(`    ${JSON.stringify(failure)}`);
-        }
-        if (otherFailures.length > 5) {
-          console.error(
-            `    ... and ${otherFailures.length - 5} more failures`,
-          );
-        }
-      }
-
-      break; // No mapping failures, we're done
+      break; // No failures, we're done
     }
 
     if (totalDeleted > 0) {
