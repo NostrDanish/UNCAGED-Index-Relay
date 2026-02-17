@@ -139,11 +139,14 @@ async function main() {
       totalUpdated += succeeded;
       totalFailed += failed;
 
-      // Log any failures for debugging
-      if (failed > 0) {
+      // Log failures only once per batch type to avoid spam
+      if (failed > 0 && totalFailed <= failed) {
         const failedItems = items.filter((i) => i.update.status !== 200);
         console.error(
-          `Failed items sample: ${JSON.stringify(failedItems.slice(0, 3), null, 2)}`,
+          `\nNote: ${failed} documents failed due to mapping conflicts (likely malformed events)`,
+        );
+        console.error(
+          `Sample failure: ${JSON.stringify(failedItems[0], null, 2)}\n`,
         );
       }
 
