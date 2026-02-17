@@ -72,29 +72,40 @@ async function main() {
       return;
     }
 
-    // Delete incomplete documents
+    // Delete incomplete documents.
+    // conflicts=proceed skips documents modified concurrently by the relay.
     console.log(`Deleting ${count} incomplete documents...`);
     const deleteResult = await client.deleteByQuery({
       index: config.opensearchIndex,
       body: { query },
+      conflicts: "proceed",
       refresh: true,
     });
 
     const responseBody = deleteResult.body as {
       deleted?: number;
+      version_conflicts?: number;
       failures?: Array<Record<string, unknown>>;
     };
 
     console.log(`Deleted ${responseBody.deleted || 0} incomplete documents`);
 
+    if (responseBody.version_conflicts) {
+      console.log(
+        `${responseBody.version_conflicts} version conflicts (skipped)`,
+      );
+    }
+
     if (responseBody.failures && responseBody.failures.length > 0) {
-      console.error(
-        `${responseBody.failures.length} documents failed to delete`,
-      );
-      console.error(
-        "First failure:",
-        JSON.stringify(responseBody.failures[0], null, 2),
-      );
+      console.error(`${responseBody.failures.length} failures:`);
+      for (const failure of responseBody.failures.slice(0, 5)) {
+        console.error(`  ${JSON.stringify(failure)}`);
+      }
+      if (responseBody.failures.length > 5) {
+        console.error(
+          `  ... and ${responseBody.failures.length - 5} more failures`,
+        );
+      }
     }
   } catch (error) {
     console.error("\nDeletion failed:");
