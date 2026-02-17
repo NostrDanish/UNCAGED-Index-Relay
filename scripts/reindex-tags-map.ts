@@ -113,7 +113,13 @@ async function main() {
       for (const hit of hits) {
         const tagsMap = buildTagsMap(hit._source.tags ?? []);
         bulkBody.push({ update: { _id: hit._id } });
-        bulkBody.push({ doc: { tags_map: tagsMap } });
+        // Use script to force-replace tags_map, avoiding mapping conflicts
+        bulkBody.push({
+          script: {
+            source: "ctx._source.tags_map = params.tags_map",
+            params: { tags_map: tagsMap },
+          },
+        });
       }
 
       // Execute bulk update
