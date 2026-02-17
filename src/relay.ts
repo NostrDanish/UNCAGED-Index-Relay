@@ -1,6 +1,7 @@
 import type { Buffer } from "node:buffer";
 import { randomBytes } from "node:crypto";
 import type { NostrRelayInfo, NRelay } from "@nostrify/nostrify";
+import { NKinds } from "@nostrify/nostrify";
 import type { ServerWebSocket } from "bun";
 import type { Filter, NostrEvent } from "nostr-tools";
 import { matchFilter, verifyEvent } from "nostr-tools";
@@ -310,6 +311,15 @@ export class Relay {
           message: `error: ${error instanceof Error ? error.message : String(error)}`,
         };
       }
+    }
+
+    // NIP-01: Ephemeral events (kinds 20000-29999) are not stored, only broadcast
+    if (NKinds.ephemeral(event.kind)) {
+      return {
+        eventId: event.id,
+        accepted: true,
+        message: "",
+      };
     }
 
     // Store the event using NRelay's event method

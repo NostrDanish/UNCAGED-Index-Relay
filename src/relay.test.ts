@@ -241,6 +241,83 @@ describe("Relay", () => {
         "error: Storage error",
       ]);
     });
+
+    it("should not store ephemeral events (kinds 20000-29999)", async () => {
+      let storageEventCalled = false;
+      mockStorage.event = async () => {
+        storageEventCalled = true;
+      };
+
+      const sk = generateSecretKey();
+      const ephemeralEvent = finalizeEvent(
+        {
+          kind: 20000, // ephemeral event
+          created_at: Math.floor(Date.now() / 1000),
+          tags: [],
+          content: "Ephemeral event",
+        },
+        sk,
+      );
+
+      await relay.handleEvent(mockWs, ephemeralEvent);
+
+      // Should accept the event
+      assert.equal(sentMessages.length, 1);
+      assert.deepEqual(sentMessages[0], ["OK", ephemeralEvent.id, true, ""]);
+
+      // But should NOT call storage.event
+      assert.equal(storageEventCalled, false);
+    });
+
+    it("should broadcast ephemeral events to active subscribers", async () => {
+      let storageEventCalled = false;
+      mockStorage.event = async () => {
+        storageEventCalled = true;
+      };
+
+      // Create a subscriber
+      const sub = {
+        send: (message: string) => {
+          sentMessages.push(JSON.parse(message));
+        },
+        data: {
+          subscriptions: new Map(),
+          challenge: "",
+          authedPubkeys: new Set(),
+        },
+      } as unknown as ServerWebSocket<WebSocketData>;
+
+      relay.handleOpen(sub);
+      mockStorage.query = async () => [];
+      await relay.handleReq(sub, "sub1", [{ kinds: [20000] }]);
+      sentMessages.length = 0;
+
+      // Publish ephemeral event
+      relay.handleOpen(mockWs);
+      const sk = generateSecretKey();
+      const ephemeralEvent = finalizeEvent(
+        {
+          kind: 20000,
+          created_at: Math.floor(Date.now() / 1000),
+          tags: [],
+          content: "Ephemeral broadcast",
+        },
+        sk,
+      );
+
+      await relay.handleEvent(mockWs, ephemeralEvent);
+
+      // Should be accepted and broadcast
+      const okMsg = sentMessages.find((m) => m[0] === "OK");
+      const eventMsg = sentMessages.find((m) => m[0] === "EVENT");
+      assert.ok(okMsg);
+      assert.ok(eventMsg);
+      assert.equal(eventMsg[1], "sub1");
+      assert.equal((eventMsg[2] as NostrEvent).id, ephemeralEvent.id);
+
+      // But NOT stored
+      assert.equal(storageEventCalled, false);
+    });
   });
 
   describe("handleReq", () => {
