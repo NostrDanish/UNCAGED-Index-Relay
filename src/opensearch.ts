@@ -81,11 +81,11 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
 
     for (const tag of tags) {
       if (tag.length >= 2) {
-        const [tagName, ...values] = tag;
+        const [tagName, value] = tag;
         if (!tagsMap[tagName]) {
           tagsMap[tagName] = [];
         }
-        tagsMap[tagName].push(...values);
+        tagsMap[tagName].push(value);
       }
     }
 
