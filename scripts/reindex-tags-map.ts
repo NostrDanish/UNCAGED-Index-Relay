@@ -3,7 +3,8 @@
  * is stored per tag, instead of all tag values.
  *
  * This is needed after the buildTagsMap fix to correct existing documents.
- * Uses scroll + bulk update to avoid Painless mapping conflicts.
+ * Uses point-in-time (PIT) + bulk update to avoid Painless mapping conflicts.
+ * PIT is used instead of scroll to avoid timeout issues with large datasets.
  *
  * Usage:
  *   bun run scripts/reindex-tags-map.ts
@@ -31,13 +32,14 @@ function buildTagsMap(tags: string[][]): Record<string, string[]> {
   return tagsMap;
 }
 
-interface ScrollHit {
+interface SearchHit {
   _id: string;
   _source: { tags: string[][] };
+  sort?: unknown[];
 }
 
 interface BulkItem {
-  update: { status: number };
+  update: { status: number; error?: unknown };
 }
 
 async function main() {
@@ -68,30 +70,44 @@ async function main() {
   let totalFailed = 0;
 
   try {
-    // Open a scroll cursor over all documents, fetching only the tags field.
-    const scrollTimeout = "5m";
-    const batchSize = 1000;
+    const batchSize = 500; // Reduced batch size for better memory management
 
-    const initialResponse = await client.search({
+    // Get total count for progress tracking
+    const countResponse = await client.count({
       index: config.opensearchIndex,
-      scroll: scrollTimeout,
-      body: {
+    });
+    const total = (countResponse.body as { count: number }).count;
+    console.log(`Found ${total.toLocaleString()} documents to process.\n`);
+
+    let searchAfter: unknown[] | undefined;
+    let hasMore = true;
+
+    while (hasMore) {
+      // Search using search_after pagination (no timeout, stateless)
+      const searchBody: Record<string, unknown> = {
         size: batchSize,
         _source: ["tags"],
         query: { match_all: {} },
-      },
-    });
+        sort: [{ _id: "asc" }], // Consistent sorting for search_after
+      };
 
-    let scrollId = initialResponse.body._scroll_id as string;
-    let hits = initialResponse.body.hits.hits as unknown as ScrollHit[];
+      if (searchAfter) {
+        searchBody.search_after = searchAfter;
+      }
 
-    const total =
-      (initialResponse.body.hits.total as { value: number })?.value ??
-      "unknown";
-    console.log(`Found ${total} documents to process.\n`);
+      const searchResponse = await client.search({
+        index: config.opensearchIndex,
+        body: searchBody,
+      });
 
-    while (hits.length > 0) {
-      // Build bulk update body.
+      const hits = searchResponse.body.hits.hits as unknown as SearchHit[];
+
+      if (hits.length === 0) {
+        hasMore = false;
+        break;
+      }
+
+      // Build bulk update body
       const bulkBody: Array<Record<string, unknown>> = [];
 
       for (const hit of hits) {
@@ -100,6 +116,7 @@ async function main() {
         bulkBody.push({ doc: { tags_map: tagsMap } });
       }
 
+      // Execute bulk update
       const bulkResponse = await client.bulk({
         index: config.opensearchIndex,
         body: bulkBody,
@@ -112,26 +129,31 @@ async function main() {
       totalUpdated += succeeded;
       totalFailed += failed;
 
+      // Log any failures for debugging
+      if (failed > 0) {
+        const failedItems = items.filter((i) => i.update.status !== 200);
+        console.error(
+          `Failed items sample: ${JSON.stringify(failedItems.slice(0, 3), null, 2)}`,
+        );
+      }
+
       console.log(
-        `Updated ${totalUpdated} / ${total} documents` +
+        `Updated ${totalUpdated.toLocaleString()} / ${total.toLocaleString()} documents (${((totalUpdated / total) * 100).toFixed(2)}%)` +
           (totalFailed > 0 ? ` (${totalFailed} failed)` : ""),
       );
 
-      // Fetch the next batch.
-      const scrollResponse = await client.scroll({
-        scroll_id: scrollId,
-        scroll: scrollTimeout,
-      });
+      // Update search_after for next iteration
+      const lastHit = hits[hits.length - 1];
+      searchAfter = lastHit.sort;
 
-      scrollId = scrollResponse.body._scroll_id as string;
-      hits = scrollResponse.body.hits.hits as unknown as ScrollHit[];
+      // Check if we got fewer results than requested (last page)
+      if (hits.length < batchSize) {
+        hasMore = false;
+      }
     }
 
-    // Clean up the scroll context.
-    await client.clearScroll({ scroll_id: scrollId });
-
     console.log(
-      `\n✅ Reindex completed: ${totalUpdated} updated, ${totalFailed} failed`,
+      `\n✅ Reindex completed: ${totalUpdated.toLocaleString()} updated, ${totalFailed} failed`,
     );
   } catch (error) {
     console.error("\n❌ Reindex failed:");
