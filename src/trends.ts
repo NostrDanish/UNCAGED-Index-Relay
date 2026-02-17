@@ -11,8 +11,8 @@ export interface TrendingTagValue {
   uses: number;
 }
 
-/** Options for constructing a {@link DittoStats} instance. */
-export interface DittoStatsOpts {
+/** Options for constructing a {@link Trends} instance. */
+export interface TrendsOpts {
   /** OpenSearch client. */
   client: Client;
   /** OpenSearch index name. */
@@ -26,12 +26,12 @@ export interface DittoStatsOpts {
  * kind 1985 label events (matching Ditto's `pub.ditto.trends` label
  * namespace).
  */
-export class DittoStats {
+export class Trends {
   private client: Client;
   private indexName: string;
   private relay: NRelay;
 
-  constructor(opts: DittoStatsOpts) {
+  constructor(opts: TrendsOpts) {
     this.client = opts.client;
     this.indexName = opts.indexName;
     this.relay = opts.relay;

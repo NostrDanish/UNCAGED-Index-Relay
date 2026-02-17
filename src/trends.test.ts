@@ -3,7 +3,7 @@ import { describe, it } from "node:test";
 import type { NostrEvent, NostrSigner, NRelay } from "@nostrify/nostrify";
 import type { Client } from "@opensearch-project/opensearch";
 
-import { DittoStats } from "./stats.ts";
+import { Trends } from "./trends.ts";
 
 /**
  * Minimal document shape stored in the mock.
@@ -249,18 +249,18 @@ function createMockSigner(pubkey: string): NostrSigner {
   };
 }
 
-/** Helper to create a DittoStats instance with mock dependencies. */
-function createStats() {
+/** Helper to create a Trends instance with mock dependencies. */
+function createTrends() {
   const { client, documents, addEvent } = createMockClient();
   const relay = createMockRelay();
-  const stats = new DittoStats({ client, indexName: "test-index", relay });
-  return { stats, client, documents, addEvent, relay };
+  const trends = new Trends({ client, indexName: "test-index", relay });
+  return { trends, client, documents, addEvent, relay };
 }
 
-describe("DittoStats", () => {
+describe("Trends", () => {
   describe("getTrendingTagValues", () => {
     it("should return trending hashtags sorted by authors desc", async () => {
-      const { stats, addEvent } = createStats();
+      const { trends, addEvent } = createTrends();
 
       const pubkeyA = "a".repeat(64);
       const pubkeyB = "b".repeat(64);
@@ -321,7 +321,7 @@ describe("DittoStats", () => {
         }),
       );
 
-      const results = await stats.getTrendingTagValues(["t"], {
+      const results = await trends.getTrendingTagValues(["t"], {
         kinds: [1],
         since: now - 3600,
         until: now,
@@ -341,7 +341,7 @@ describe("DittoStats", () => {
     });
 
     it("should count uses separately from authors", async () => {
-      const { stats, addEvent } = createStats();
+      const { trends, addEvent } = createTrends();
 
       const pubkeyA = "a".repeat(64);
       const now = Math.floor(Date.now() / 1000);
@@ -358,7 +358,7 @@ describe("DittoStats", () => {
         );
       }
 
-      const results = await stats.getTrendingTagValues(["t"], {
+      const results = await trends.getTrendingTagValues(["t"], {
         kinds: [1],
         since: now - 3600,
         until: now,
@@ -372,7 +372,7 @@ describe("DittoStats", () => {
     });
 
     it("should respect the limit parameter", async () => {
-      const { stats, addEvent } = createStats();
+      const { trends, addEvent } = createTrends();
 
       const pubkeyA = "a".repeat(64);
       const now = Math.floor(Date.now() / 1000);
@@ -402,7 +402,7 @@ describe("DittoStats", () => {
         }),
       );
 
-      const results = await stats.getTrendingTagValues(["t"], {
+      const results = await trends.getTrendingTagValues(["t"], {
         kinds: [1],
         since: now - 3600,
         until: now,
@@ -413,7 +413,7 @@ describe("DittoStats", () => {
     });
 
     it("should default limit to 20 when not specified", async () => {
-      const { stats, addEvent } = createStats();
+      const { trends, addEvent } = createTrends();
 
       const pubkeyA = "a".repeat(64);
       const now = Math.floor(Date.now() / 1000);
@@ -430,7 +430,7 @@ describe("DittoStats", () => {
         );
       }
 
-      const results = await stats.getTrendingTagValues(["t"], {
+      const results = await trends.getTrendingTagValues(["t"], {
         kinds: [1],
         since: now - 3600,
         until: now,
@@ -440,7 +440,7 @@ describe("DittoStats", () => {
     });
 
     it("should filter by kind", async () => {
-      const { stats, addEvent } = createStats();
+      const { trends, addEvent } = createTrends();
 
       const pubkeyA = "a".repeat(64);
       const now = Math.floor(Date.now() / 1000);
@@ -464,7 +464,7 @@ describe("DittoStats", () => {
         }),
       );
 
-      const results = await stats.getTrendingTagValues(["t"], {
+      const results = await trends.getTrendingTagValues(["t"], {
         kinds: [1],
         since: now - 3600,
         until: now,
@@ -476,7 +476,7 @@ describe("DittoStats", () => {
     });
 
     it("should filter by time range", async () => {
-      const { stats, addEvent } = createStats();
+      const { trends, addEvent } = createTrends();
 
       const pubkeyA = "a".repeat(64);
       const now = Math.floor(Date.now() / 1000);
@@ -500,7 +500,7 @@ describe("DittoStats", () => {
         }),
       );
 
-      const results = await stats.getTrendingTagValues(["t"], {
+      const results = await trends.getTrendingTagValues(["t"], {
         kinds: [1],
         since: now - 3600,
         until: now,
@@ -512,7 +512,7 @@ describe("DittoStats", () => {
     });
 
     it("should filter by authors", async () => {
-      const { stats, addEvent } = createStats();
+      const { trends, addEvent } = createTrends();
 
       const pubkeyA = "a".repeat(64);
       const pubkeyB = "b".repeat(64);
@@ -535,7 +535,7 @@ describe("DittoStats", () => {
         }),
       );
 
-      const results = await stats.getTrendingTagValues(["t"], {
+      const results = await trends.getTrendingTagValues(["t"], {
         kinds: [1],
         authors: [pubkeyA],
         since: now - 3600,
@@ -548,7 +548,7 @@ describe("DittoStats", () => {
     });
 
     it("should restrict to allowed values when provided", async () => {
-      const { stats, addEvent } = createStats();
+      const { trends, addEvent } = createTrends();
 
       const pubkeyA = "a".repeat(64);
       const now = Math.floor(Date.now() / 1000);
@@ -578,7 +578,7 @@ describe("DittoStats", () => {
         }),
       );
 
-      const results = await stats.getTrendingTagValues(
+      const results = await trends.getTrendingTagValues(
         ["t"],
         { kinds: [1], since: now - 3600, until: now, limit: 10 },
         ["bitcoin", "nostr"],
@@ -592,7 +592,7 @@ describe("DittoStats", () => {
     });
 
     it("should merge results across multiple tag names", async () => {
-      const { stats, addEvent } = createStats();
+      const { trends, addEvent } = createTrends();
 
       const pubkeyA = "a".repeat(64);
       const pubkeyB = "b".repeat(64);
@@ -618,7 +618,7 @@ describe("DittoStats", () => {
         }),
       );
 
-      const results = await stats.getTrendingTagValues(["e", "q"], {
+      const results = await trends.getTrendingTagValues(["e", "q"], {
         kinds: [1],
         since: now - 3600,
         until: now,
@@ -634,7 +634,7 @@ describe("DittoStats", () => {
     });
 
     it("should lowercase tag values", async () => {
-      const { stats, addEvent } = createStats();
+      const { trends, addEvent } = createTrends();
 
       const pubkeyA = "a".repeat(64);
       const pubkeyB = "b".repeat(64);
@@ -657,7 +657,7 @@ describe("DittoStats", () => {
         }),
       );
 
-      const results = await stats.getTrendingTagValues(["t"], {
+      const results = await trends.getTrendingTagValues(["t"], {
         kinds: [1],
         since: now - 3600,
         until: now,
@@ -674,10 +674,10 @@ describe("DittoStats", () => {
     });
 
     it("should return empty results when no events match", async () => {
-      const { stats } = createStats();
+      const { trends } = createTrends();
       const now = Math.floor(Date.now() / 1000);
 
-      const results = await stats.getTrendingTagValues(["t"], {
+      const results = await trends.getTrendingTagValues(["t"], {
         kinds: [1],
         since: now - 3600,
         until: now,
@@ -688,7 +688,7 @@ describe("DittoStats", () => {
     });
 
     it("should exclude deleted events", async () => {
-      const { stats, documents } = createStats();
+      const { trends, documents } = createTrends();
 
       const pubkeyA = "a".repeat(64);
       const now = Math.floor(Date.now() / 1000);
@@ -719,7 +719,7 @@ describe("DittoStats", () => {
         deleted: false,
       });
 
-      const results = await stats.getTrendingTagValues(["t"], {
+      const results = await trends.getTrendingTagValues(["t"], {
         kinds: [1],
         since: now - 3600,
         until: now,
@@ -731,7 +731,7 @@ describe("DittoStats", () => {
     });
 
     it("should handle events with multiple tag values", async () => {
-      const { stats, addEvent } = createStats();
+      const { trends, addEvent } = createTrends();
 
       const pubkeyA = "a".repeat(64);
       const now = Math.floor(Date.now() / 1000);
@@ -750,7 +750,7 @@ describe("DittoStats", () => {
         }),
       );
 
-      const results = await stats.getTrendingTagValues(["t"], {
+      const results = await trends.getTrendingTagValues(["t"], {
         kinds: [1],
         since: now - 3600,
         until: now,
@@ -765,7 +765,7 @@ describe("DittoStats", () => {
     });
 
     it("should work with trending pubkeys (p-tag)", async () => {
-      const { stats, addEvent } = createStats();
+      const { trends, addEvent } = createTrends();
 
       const pubkeyA = "a".repeat(64);
       const pubkeyB = "b".repeat(64);
@@ -790,7 +790,7 @@ describe("DittoStats", () => {
         }),
       );
 
-      const results = await stats.getTrendingTagValues(["p"], {
+      const results = await trends.getTrendingTagValues(["p"], {
         kinds: [1, 3, 6, 7, 9735],
         since: now - 3600,
         until: now,
@@ -804,7 +804,7 @@ describe("DittoStats", () => {
     });
 
     it("should work without since/until filters", async () => {
-      const { stats, addEvent } = createStats();
+      const { trends, addEvent } = createTrends();
 
       const pubkeyA = "a".repeat(64);
       const now = Math.floor(Date.now() / 1000);
@@ -818,7 +818,7 @@ describe("DittoStats", () => {
         }),
       );
 
-      const results = await stats.getTrendingTagValues(["t"], {
+      const results = await trends.getTrendingTagValues(["t"], {
         kinds: [1],
         limit: 10,
       });
@@ -828,7 +828,7 @@ describe("DittoStats", () => {
     });
 
     it("should sort by authors first, then uses as tiebreaker", async () => {
-      const { stats, addEvent } = createStats();
+      const { trends, addEvent } = createTrends();
 
       const pubkeyA = "a".repeat(64);
       const pubkeyB = "b".repeat(64);
@@ -864,7 +864,7 @@ describe("DittoStats", () => {
         );
       }
 
-      const results = await stats.getTrendingTagValues(["t"], {
+      const results = await trends.getTrendingTagValues(["t"], {
         kinds: [1],
         since: now - 3600,
         until: now,
@@ -882,7 +882,7 @@ describe("DittoStats", () => {
 
   describe("updateTrendingTags", () => {
     it("should publish a kind 1985 label event with trending values", async () => {
-      const { stats, addEvent, relay } = createStats();
+      const { trends, addEvent, relay } = createTrends();
 
       const signerPubkey = "s".repeat(64);
       const signer = createMockSigner(signerPubkey);
@@ -915,7 +915,7 @@ describe("DittoStats", () => {
         }),
       );
 
-      await stats.updateTrendingTags(signer, "#t", "t", [1], 20);
+      await trends.updateTrendingTags(signer, "#t", "t", [1], 20);
 
       assert.equal(relay.events.length, 1);
       const label = relay.events[0];
@@ -938,17 +938,17 @@ describe("DittoStats", () => {
     });
 
     it("should not publish when no trends are found", async () => {
-      const { stats, relay } = createStats();
+      const { trends, relay } = createTrends();
 
       const signer = createMockSigner("s".repeat(64));
 
-      await stats.updateTrendingTags(signer, "#t", "t", [1], 20);
+      await trends.updateTrendingTags(signer, "#t", "t", [1], 20);
 
       assert.equal(relay.events.length, 0);
     });
 
     it("should include extra value in tag tuples", async () => {
-      const { stats, addEvent, relay } = createStats();
+      const { trends, addEvent, relay } = createTrends();
 
       const signer = createMockSigner("s".repeat(64));
       const pubkeyA = "a".repeat(64);
@@ -963,7 +963,7 @@ describe("DittoStats", () => {
         }),
       );
 
-      await stats.updateTrendingTags(
+      await trends.updateTrendingTags(
         signer,
         "#p",
         "p",
@@ -978,7 +978,7 @@ describe("DittoStats", () => {
     });
 
     it("should support aliases for tag names", async () => {
-      const { stats, addEvent, relay } = createStats();
+      const { trends, addEvent, relay } = createTrends();
 
       const signer = createMockSigner("s".repeat(64));
       const pubkeyA = "a".repeat(64);
@@ -1005,7 +1005,7 @@ describe("DittoStats", () => {
         }),
       );
 
-      await stats.updateTrendingTags(
+      await trends.updateTrendingTags(
         signer,
         "#e",
         "e",
@@ -1025,7 +1025,7 @@ describe("DittoStats", () => {
 
   describe("updateTrendingHashtags", () => {
     it("should query kind 1 events for t-tags with limit 20", async () => {
-      const { stats, addEvent, relay } = createStats();
+      const { trends, addEvent, relay } = createTrends();
 
       const signer = createMockSigner("s".repeat(64));
       const pubkeyA = "a".repeat(64);
@@ -1040,7 +1040,7 @@ describe("DittoStats", () => {
         }),
       );
 
-      await stats.updateTrendingHashtags(signer);
+      await trends.updateTrendingHashtags(signer);
 
       assert.equal(relay.events.length, 1);
       const label = relay.events[0];
@@ -1055,7 +1055,7 @@ describe("DittoStats", () => {
 
   describe("updateTrendingLinks", () => {
     it("should query kind 1 events for r-tags with limit 20", async () => {
-      const { stats, addEvent, relay } = createStats();
+      const { trends, addEvent, relay } = createTrends();
 
       const signer = createMockSigner("s".repeat(64));
       const pubkeyA = "a".repeat(64);
@@ -1070,7 +1070,7 @@ describe("DittoStats", () => {
         }),
       );
 
-      await stats.updateTrendingLinks(signer);
+      await trends.updateTrendingLinks(signer);
 
       assert.equal(relay.events.length, 1);
       const label = relay.events[0];
@@ -1083,7 +1083,7 @@ describe("DittoStats", () => {
 
   describe("updateTrendingPubkeys", () => {
     it("should query multiple kinds for p-tags with relay URL as extra", async () => {
-      const { stats, addEvent, relay } = createStats();
+      const { trends, addEvent, relay } = createTrends();
 
       const signer = createMockSigner("s".repeat(64));
       const pubkeyA = "a".repeat(64);
@@ -1107,7 +1107,7 @@ describe("DittoStats", () => {
         }),
       );
 
-      await stats.updateTrendingPubkeys(signer, "wss://relay.example.com/");
+      await trends.updateTrendingPubkeys(signer, "wss://relay.example.com/");
 
       assert.equal(relay.events.length, 1);
       const label = relay.events[0];
@@ -1121,7 +1121,7 @@ describe("DittoStats", () => {
 
   describe("updateTrendingEvents", () => {
     it("should query e and q tags with relay URL as extra", async () => {
-      const { stats, addEvent, relay } = createStats();
+      const { trends, addEvent, relay } = createTrends();
 
       const signer = createMockSigner("s".repeat(64));
       const pubkeyA = "a".repeat(64);
@@ -1145,7 +1145,7 @@ describe("DittoStats", () => {
         }),
       );
 
-      await stats.updateTrendingEvents(signer, "wss://relay.example.com/");
+      await trends.updateTrendingEvents(signer, "wss://relay.example.com/");
 
       assert.equal(relay.events.length, 1);
       const label = relay.events[0];
@@ -1159,7 +1159,7 @@ describe("DittoStats", () => {
 
   describe("updateTrendingZappedEvents", () => {
     it("should query kind 9735 for e and q tags", async () => {
-      const { stats, addEvent, relay } = createStats();
+      const { trends, addEvent, relay } = createTrends();
 
       const signer = createMockSigner("s".repeat(64));
       const pubkeyA = "a".repeat(64);
@@ -1175,7 +1175,7 @@ describe("DittoStats", () => {
         }),
       );
 
-      await stats.updateTrendingZappedEvents(
+      await trends.updateTrendingZappedEvents(
         signer,
         "wss://relay.example.com/",
       );
