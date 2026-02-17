@@ -1185,4 +1185,248 @@ describe("OpenSearchRelay", () => {
       assert.equal(result.count, 3);
     });
   });
+
+  describe("NIP-48 protocol filter (NIP-50 extension)", () => {
+    // Mock client with protocol field support
+    const createProtocolMockClient = () => {
+      const documents = new Map<string, unknown>();
+
+      return {
+        documents,
+        client: {
+          search: async ({ body }: { body: Record<string, unknown> }) => {
+            const results: unknown[] = [];
+            const queryMust = (
+              (body.query as Record<string, unknown>)?.bool as Record<
+                string,
+                unknown
+              >
+            )?.must as Array<Record<string, unknown>> | undefined;
+
+            // Extract protocol filter if present
+            let protocolFilter: string | undefined;
+            for (const clause of queryMust || []) {
+              if ((clause.term as Record<string, unknown>)?.protocol) {
+                protocolFilter = (clause.term as Record<string, unknown>)
+                  .protocol as string;
+              }
+            }
+
+            for (const [_id, doc] of documents.entries()) {
+              const docTyped = doc as NostrEvent & {
+                deleted?: boolean;
+                protocol?: string;
+              };
+
+              // Skip deleted events
+              if (docTyped.deleted) {
+                continue;
+              }
+
+              // Filter by protocol if specified
+              if (protocolFilter && docTyped.protocol !== protocolFilter) {
+                continue;
+              }
+
+              results.push({ _source: doc });
+            }
+
+            return {
+              body: {
+                hits: { hits: results },
+              },
+            };
+          },
+          bulk: async ({ body }: { body: unknown[] }) => {
+            const items: Array<Record<string, unknown>> = [];
+            for (let i = 0; i < body.length; i += 2) {
+              const action = body[i] as {
+                index?: { _id: string };
+                update?: { _id: string };
+              };
+              const payload = body[i + 1] as Record<string, unknown>;
+
+              if (action.index) {
+                documents.set(action.index._id, payload);
+                items.push({ index: {} });
+              } else if (action.update) {
+                if (payload.upsert) {
+                  if (!documents.has(action.update._id)) {
+                    documents.set(action.update._id, payload.upsert);
+                  }
+                }
+                items.push({ update: {} });
+              }
+            }
+            return {
+              body: {
+                errors: false,
+                items,
+              },
+            };
+          },
+          count: async () => {
+            const nonDeleted = Array.from(documents.values()).filter(
+              (doc) => !(doc as { deleted?: boolean }).deleted,
+            );
+            return { body: { count: nonDeleted.length } };
+          },
+          indices: {
+            exists: async () => ({ body: true }),
+            create: async () => ({ body: {} }),
+          },
+          close: async () => {},
+        },
+      };
+    };
+
+    it("should extract protocol from proxy tag", async () => {
+      const { client } = createProtocolMockClient();
+      const relay = new OpenSearchRelay(client as unknown as Client, {
+        indexName: "test-index",
+        bulkMaxSize: 1,
+      });
+
+      const sk = generateSecretKey();
+      const now = Math.floor(Date.now() / 1000);
+
+      const event = finalizeEvent(
+        {
+          kind: 1,
+          created_at: now,
+          tags: [
+            [
+              "proxy",
+              "https://gleasonator.com/objects/8f6fac53-4f66-4c6e-ac7d-92e5e78c3e79",
+              "activitypub",
+            ],
+          ],
+          content: "I'm vegan btw",
+        },
+        sk,
+      );
+
+      await relay.event(event);
+
+      // Verify the document was stored with protocol field
+      const results = await relay.query([{ kinds: [1] }]);
+      assert.equal(results.length, 1);
+    });
+
+    it("should filter by protocol using search extension", async () => {
+      const { client } = createProtocolMockClient();
+      const relay = new OpenSearchRelay(client as unknown as Client, {
+        indexName: "test-index",
+        bulkMaxSize: 1,
+      });
+
+      const sk = generateSecretKey();
+      const now = Math.floor(Date.now() / 1000);
+
+      // Event with activitypub protocol
+      const event1 = finalizeEvent(
+        {
+          kind: 1,
+          created_at: now,
+          tags: [
+            [
+              "proxy",
+              "https://gleasonator.com/objects/8f6fac53-4f66-4c6e-ac7d-92e5e78c3e79",
+              "activitypub",
+            ],
+          ],
+          content: "From ActivityPub",
+        },
+        sk,
+      );
+
+      // Event with atproto protocol
+      const event2 = finalizeEvent(
+        {
+          kind: 1,
+          created_at: now - 10,
+          tags: [
+            [
+              "proxy",
+              "at://did:plc:zhbjlbmir5dganqhueg7y4i3/app.bsky.feed.post/3jt5hlibeol2i",
+              "atproto",
+            ],
+          ],
+          content: "From ATProto",
+        },
+        sk,
+      );
+
+      // Event with no protocol
+      const event3 = finalizeEvent(
+        {
+          kind: 1,
+          created_at: now - 20,
+          tags: [],
+          content: "Native Nostr event",
+        },
+        sk,
+      );
+
+      await relay.event(event1);
+      await relay.event(event2);
+      await relay.event(event3);
+
+      // Filter by activitypub protocol
+      const results1 = await relay.query([
+        { kinds: [1], search: "protocol:activitypub" },
+      ]);
+      assert.equal(results1.length, 1);
+      assert.equal(results1[0].id, event1.id);
+
+      // Filter by atproto protocol
+      const results2 = await relay.query([
+        { kinds: [1], search: "protocol:atproto" },
+      ]);
+      assert.equal(results2.length, 1);
+      assert.equal(results2[0].id, event2.id);
+
+      // Query without protocol filter should return all events
+      const resultsAll = await relay.query([{ kinds: [1] }]);
+      assert.equal(resultsAll.length, 3);
+    });
+
+    it("should handle events with multiple proxy tags correctly", async () => {
+      const { client } = createProtocolMockClient();
+      const relay = new OpenSearchRelay(client as unknown as Client, {
+        indexName: "test-index",
+        bulkMaxSize: 1,
+      });
+
+      const sk = generateSecretKey();
+      const now = Math.floor(Date.now() / 1000);
+
+      // Event with multiple proxy tags (should use first one)
+      const event = finalizeEvent(
+        {
+          kind: 1,
+          created_at: now,
+          tags: [
+            [
+              "proxy",
+              "https://gleasonator.com/objects/8f6fac53-4f66-4c6e-ac7d-92e5e78c3e79",
+              "activitypub",
+            ],
+            ["proxy", "https://example.com/other", "web"],
+          ],
+          content: "Event with multiple proxy tags",
+        },
+        sk,
+      );
+
+      await relay.event(event);
+
+      // Should filter by the first proxy tag's protocol
+      const results = await relay.query([
+        { kinds: [1], search: "protocol:activitypub" },
+      ]);
+      assert.equal(results.length, 1);
+      assert.equal(results[0].id, event.id);
+    });
+  });
 });

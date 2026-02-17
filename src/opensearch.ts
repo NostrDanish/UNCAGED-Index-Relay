@@ -18,6 +18,7 @@ import type { Config } from "./config.ts";
 interface NostrEventDocument extends NostrEvent {
   tags_map: Record<string, string[]>;
   deleted?: boolean;
+  protocol?: string;
 }
 
 /** Pending bulk operation for an event. */
@@ -125,10 +126,18 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
   private eventToDocument(event: NostrEvent): NostrEventDocument {
     const tagsMap = this.buildTagsMap(event.tags);
 
+    // Extract protocol from proxy tag (NIP-48)
+    // Format: ["proxy", <id>, <protocol>]
+    const proxyTag = event.tags.find(
+      (tag) => tag[0] === "proxy" && tag.length >= 3,
+    );
+    const protocol = proxyTag?.[2];
+
     return {
       ...event,
       tags_map: tagsMap,
       deleted: false,
+      ...(protocol && { protocol }),
     };
   }
 
@@ -590,6 +599,16 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
           },
         });
       }
+
+      // Handle protocol: extension (NIP-48 + NIP-50)
+      const protocolToken = tokens.find(
+        (t) => typeof t === "object" && t.key === "protocol",
+      );
+      if (protocolToken && typeof protocolToken === "object") {
+        must.push({
+          term: { protocol: protocolToken.value },
+        });
+      }
     }
 
     return { bool: { must } };
@@ -1018,6 +1037,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
               },
               sig: { type: "keyword" },
               deleted: { type: "boolean" },
+              protocol: { type: "keyword" },
             },
           },
         },
