@@ -1186,6 +1186,171 @@ describe("OpenSearchRelay", () => {
     });
   });
 
+  describe("buildTagsMap validation", () => {
+    const createMockClient = () => {
+      const documents = new Map<string, unknown>();
+      return {
+        documents,
+        client: {
+          bulk: async ({ body }: { body: unknown[] }) => {
+            const items: Array<Record<string, unknown>> = [];
+            for (let i = 0; i < body.length; i += 2) {
+              const action = body[i] as { index?: { _id: string } };
+              const payload = body[i + 1] as Record<string, unknown>;
+              if (action.index) {
+                documents.set(action.index._id, payload);
+                items.push({ index: {} });
+              }
+            }
+            return { body: { errors: false, items } };
+          },
+          indices: {
+            exists: async () => ({ body: true }),
+            create: async () => ({ body: {} }),
+          },
+          close: async () => {},
+        },
+      };
+    };
+
+    /** Helper to store an event and return its tags_map from the mock. */
+    const getTagsMap = async (
+      tags: string[][],
+    ): Promise<Record<string, string[]>> => {
+      const { client, documents } = createMockClient();
+      const relay = new OpenSearchRelay(client as unknown as Client, {
+        indexName: "test-index",
+        bulkMaxSize: 1,
+      });
+
+      const sk = generateSecretKey();
+      const event = finalizeEvent(
+        {
+          kind: 1,
+          created_at: Math.floor(Date.now() / 1000),
+          tags,
+          content: "",
+        },
+        sk,
+      );
+
+      await relay.event(event);
+
+      const doc = Array.from(documents.values())[0] as {
+        tags_map: Record<string, string[]>;
+      };
+      return doc.tags_map;
+    };
+
+    it("should include valid alphanumeric tag names", async () => {
+      const tagsMap = await getTagsMap([
+        ["e", "abc123"],
+        ["p", "def456"],
+        ["t", "bitcoin"],
+      ]);
+
+      assert.deepEqual(tagsMap.e, ["abc123"]);
+      assert.deepEqual(tagsMap.p, ["def456"]);
+      assert.deepEqual(tagsMap.t, ["bitcoin"]);
+    });
+
+    it("should allow hyphens in tag names", async () => {
+      const tagsMap = await getTagsMap([["content-warning", "nsfw"]]);
+
+      assert.deepEqual(tagsMap["content-warning"], ["nsfw"]);
+    });
+
+    it("should allow underscores in tag names", async () => {
+      const tagsMap = await getTagsMap([["my_tag", "value"]]);
+
+      assert.deepEqual(tagsMap.my_tag, ["value"]);
+    });
+
+    it("should reject tag names with special characters", async () => {
+      const tagsMap = await getTagsMap([
+        ["valid", "keep"],
+        ["tag.name", "dotted"],
+        ["tag name", "spaced"],
+        ["tag/name", "slashed"],
+        ["tag@name", "at-sign"],
+      ]);
+
+      assert.deepEqual(tagsMap.valid, ["keep"]);
+      assert.equal(tagsMap["tag.name"], undefined);
+      assert.equal(tagsMap["tag name"], undefined);
+      assert.equal(tagsMap["tag/name"], undefined);
+      assert.equal(tagsMap["tag@name"], undefined);
+    });
+
+    it("should reject tag names longer than 15 characters", async () => {
+      const tagsMap = await getTagsMap([
+        ["abcdefghijklmno", "15-chars-ok"],
+        ["abcdefghijklmnop", "16-chars-rejected"],
+      ]);
+
+      assert.deepEqual(tagsMap.abcdefghijklmno, ["15-chars-ok"]);
+      assert.equal(tagsMap.abcdefghijklmnop, undefined);
+    });
+
+    it("should accept tag values up to 255 characters", async () => {
+      const value255 = "x".repeat(255);
+      const tagsMap = await getTagsMap([["t", value255]]);
+
+      assert.deepEqual(tagsMap.t, [value255]);
+    });
+
+    it("should reject tag values exceeding 255 characters", async () => {
+      const value256 = "x".repeat(256);
+      const tagsMap = await getTagsMap([["t", value256]]);
+
+      assert.deepEqual(tagsMap.t, []);
+    });
+
+    it("should keep valid values and skip invalid values for the same tag", async () => {
+      const longValue = "x".repeat(300);
+      const tagsMap = await getTagsMap([
+        ["t", "bitcoin"],
+        ["t", longValue],
+        ["t", "nostr"],
+      ]);
+
+      assert.deepEqual(tagsMap.t, ["bitcoin", "nostr"]);
+    });
+
+    it("should create the key with an empty array when all values are too long", async () => {
+      const longValue1 = "x".repeat(256);
+      const longValue2 = "y".repeat(500);
+      const tagsMap = await getTagsMap([
+        ["t", longValue1],
+        ["t", longValue2],
+      ]);
+
+      assert.ok("t" in tagsMap);
+      assert.deepEqual(tagsMap.t, []);
+    });
+
+    it("should not create a key for invalid tag names even with valid values", async () => {
+      const tagsMap = await getTagsMap([
+        ["invalid.name", "good-value"],
+        ["another bad!", "also-good"],
+      ]);
+
+      assert.equal(Object.keys(tagsMap).length, 0);
+    });
+
+    it("should handle empty tags array", async () => {
+      const tagsMap = await getTagsMap([]);
+      assert.deepEqual(tagsMap, {});
+    });
+
+    it("should skip tags with fewer than 2 elements", async () => {
+      const tagsMap = await getTagsMap([["e"], ["p", "value"]]);
+
+      assert.equal(tagsMap.e, undefined);
+      assert.deepEqual(tagsMap.p, ["value"]);
+    });
+  });
+
   describe("NIP-48 protocol filter (NIP-50 extension)", () => {
     // Mock client with protocol field support
     const createProtocolMockClient = () => {

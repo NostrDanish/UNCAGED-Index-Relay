@@ -73,8 +73,20 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     return new OpenSearchRelay(client, { indexName: config.opensearchIndex });
   }
 
+  /** Tag name must be alphanumeric (plus hyphens and underscores) and at most 15 characters. */
+  private static TAG_NAME_RE = /^[\w-]{1,15}$/;
+  /** Maximum length of a single tag value stored in tags_map. */
+  private static TAG_VALUE_MAX_LENGTH = 255;
+
   /**
-   * Build tags_map from tags array
+   * Build tags_map from tags array.
+   *
+   * Validates tag names and values:
+   * - Tag names must be alphanumeric (including hyphens) and ≤ 15 characters.
+   *   Names that don't match are omitted entirely.
+   * - Tag values must be ≤ 255 characters. Values that exceed the limit are
+   *   skipped, but the tag name key is still created (with an empty array if
+   *   no values pass).
    */
   private buildTagsMap(tags: string[][]): Record<string, string[]> {
     const tagsMap: Record<string, string[]> = {};
@@ -82,10 +94,18 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     for (const tag of tags) {
       if (tag.length >= 2) {
         const [tagName, value] = tag;
+
+        if (!OpenSearchRelay.TAG_NAME_RE.test(tagName)) {
+          continue;
+        }
+
         if (!tagsMap[tagName]) {
           tagsMap[tagName] = [];
         }
-        tagsMap[tagName].push(value);
+
+        if (value.length <= OpenSearchRelay.TAG_VALUE_MAX_LENGTH) {
+          tagsMap[tagName].push(value);
+        }
       }
     }
 
