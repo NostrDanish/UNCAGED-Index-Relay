@@ -1,3 +1,7 @@
+import type { NostrSigner } from "@nostrify/nostrify";
+import { NSecSigner } from "@nostrify/nostrify";
+import { nip19 } from "nostr-tools";
+
 export class Config {
   private env: { get(key: string): string | undefined };
 
@@ -47,5 +51,19 @@ export class Config {
 
   get opensearchPassword(): string | undefined {
     return this.env.get("OPENSEARCH_PASSWORD");
+  }
+
+  get nostrSigner(): NostrSigner {
+    const value = this.env.get("NOSTR_NSEC");
+    if (!value) {
+      throw new Error("NOSTR_NSEC is required.");
+    }
+    const decoded = nip19.decode(value);
+    if (decoded.type !== "nsec") {
+      throw new Error(
+        "NOSTR_NSEC must be a valid nsec (bech32-encoded secret key).",
+      );
+    }
+    return new NSecSigner(decoded.data);
   }
 }

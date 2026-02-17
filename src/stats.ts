@@ -1,4 +1,4 @@
-import type { NostrFilter } from "@nostrify/nostrify";
+import type { NostrFilter, NostrSigner, NRelay } from "@nostrify/nostrify";
 import type { Client } from "@opensearch-project/opensearch";
 
 /** A single trending tag value with engagement metrics. */
@@ -11,130 +11,267 @@ export interface TrendingTagValue {
   uses: number;
 }
 
+/** Options for constructing a {@link DittoStats} instance. */
+export interface DittoStatsOpts {
+  /** OpenSearch client. */
+  client: Client;
+  /** OpenSearch index name. */
+  indexName: string;
+  /** Relay instance used to publish trending label events. */
+  relay: NRelay;
+}
+
 /**
- * Get trending tag values for given tag names in the specified time frame.
- *
- * Uses OpenSearch `terms` + `cardinality` aggregations on the `tags_map`
- * field to replicate the Postgres-based trending query from Ditto:
- *
- * - Groups by lowercased tag value
- * - Counts distinct authors (`cardinality` on `pubkey`)
- * - Counts total uses (`doc_count`)
- * - Sorts by authors desc, then uses desc
+ * Computes trending tag values from OpenSearch and publishes them as
+ * kind 1985 label events (matching Ditto's `pub.ditto.trends` label
+ * namespace).
  */
-export async function getTrendingTagValues(
-  client: Client,
-  indexName: string,
-  /** Tag names to aggregate on, e.g. `["t"]` or `["e", "q"]`. */
-  tagNames: string[],
-  /** Nostr filter for eligible events (kinds, authors, since, until, limit). */
-  filter: NostrFilter,
-  /** If present, only these tag values are permitted to trend. */
-  values?: string[],
-): Promise<TrendingTagValue[]> {
-  const limit = filter.limit ?? 20;
+export class DittoStats {
+  private client: Client;
+  private indexName: string;
+  private relay: NRelay;
 
-  // Build the bool/must query clauses
-  const must: Record<string, unknown>[] = [{ term: { deleted: false } }];
-
-  if (filter.kinds && filter.kinds.length > 0) {
-    must.push({ terms: { kind: filter.kinds } });
-  }
-  if (filter.authors && filter.authors.length > 0) {
-    must.push({ terms: { pubkey: filter.authors } });
-  }
-  if (typeof filter.since === "number" || typeof filter.until === "number") {
-    const range: Record<string, number> = {};
-    if (typeof filter.since === "number") range.gte = filter.since;
-    if (typeof filter.until === "number") range.lte = filter.until;
-    must.push({ range: { created_at: range } });
+  constructor(opts: DittoStatsOpts) {
+    this.client = opts.client;
+    this.indexName = opts.indexName;
+    this.relay = opts.relay;
   }
 
-  // We need to run one aggregation per tag name (e.g. "e" and "q"), then
-  // merge the buckets client-side.  Each tag name maps to a different
-  // `tags_map.<name>` keyword field in OpenSearch.
-  const aggs: Record<string, unknown> = {};
+  /**
+   * Get trending tag values for given tag names in the specified time frame.
+   *
+   * Uses OpenSearch `terms` + `cardinality` aggregations on the `tags_map`
+   * field to replicate the Postgres-based trending query from Ditto:
+   *
+   * - Groups by lowercased tag value
+   * - Counts distinct authors (`cardinality` on `pubkey`)
+   * - Counts total uses (`doc_count`)
+   * - Sorts by authors desc, then uses desc
+   */
+  async getTrendingTagValues(
+    /** Tag names to aggregate on, e.g. `["t"]` or `["e", "q"]`. */
+    tagNames: string[],
+    /** Nostr filter for eligible events (kinds, authors, since, until, limit). */
+    filter: NostrFilter,
+    /** If present, only these tag values are permitted to trend. */
+    values?: string[],
+  ): Promise<TrendingTagValue[]> {
+    const limit = filter.limit ?? 20;
 
-  for (const tagName of tagNames) {
-    const field = `tags_map.${tagName}`;
+    // Build the bool/must query clauses
+    const must: Record<string, unknown>[] = [{ term: { deleted: false } }];
 
-    // Optionally restrict to a set of allowed values
-    const tagMust = [...must];
-    if (values && values.length > 0) {
-      tagMust.push({ terms: { [field]: values } });
+    if (filter.kinds && filter.kinds.length > 0) {
+      must.push({ terms: { kind: filter.kinds } });
+    }
+    if (filter.authors && filter.authors.length > 0) {
+      must.push({ terms: { pubkey: filter.authors } });
+    }
+    if (typeof filter.since === "number" || typeof filter.until === "number") {
+      const range: Record<string, number> = {};
+      if (typeof filter.since === "number") range.gte = filter.since;
+      if (typeof filter.until === "number") range.lte = filter.until;
+      must.push({ range: { created_at: range } });
     }
 
-    aggs[`tag_${tagName}`] = {
-      filter: { bool: { must: tagMust } },
-      aggs: {
-        values: {
-          terms: {
-            field,
-            size: limit * tagNames.length, // over-fetch to allow merging
-          },
-          aggs: {
-            unique_authors: {
-              cardinality: { field: "pubkey" },
+    // We need to run one aggregation per tag name (e.g. "e" and "q"), then
+    // merge the buckets client-side.  Each tag name maps to a different
+    // `tags_map.<name>` keyword field in OpenSearch.
+    const aggs: Record<string, unknown> = {};
+
+    for (const tagName of tagNames) {
+      const field = `tags_map.${tagName}`;
+
+      // Optionally restrict to a set of allowed values
+      const tagMust = [...must];
+      if (values && values.length > 0) {
+        tagMust.push({ terms: { [field]: values } });
+      }
+
+      aggs[`tag_${tagName}`] = {
+        filter: { bool: { must: tagMust } },
+        aggs: {
+          values: {
+            terms: {
+              field,
+              size: limit * tagNames.length, // over-fetch to allow merging
+            },
+            aggs: {
+              unique_authors: {
+                cardinality: { field: "pubkey" },
+              },
             },
           },
         },
-      },
-    };
-  }
+      };
+    }
 
-  const response = await client.search({
-    index: indexName,
-    body: {
-      size: 0,
-      query: { bool: { must } },
-      aggs,
-    } as Record<string, unknown>,
-  });
+    const response = await this.client.search({
+      index: this.indexName,
+      body: {
+        size: 0,
+        query: { bool: { must } },
+        aggs,
+      } as Record<string, unknown>,
+    });
 
-  // Merge buckets across tag names.  The same value might appear under
-  // both "e" and "q"; we sum uses and take the max authors (a rough
-  // approximation — the exact distinct-author count across multiple tag
-  // names would require a composite aggregation which is more complex).
-  const merged = new Map<string, { authors: number; uses: number }>();
+    // Merge buckets across tag names.  The same value might appear under
+    // both "e" and "q"; we sum uses and take the max authors (a rough
+    // approximation — the exact distinct-author count across multiple tag
+    // names would require a composite aggregation which is more complex).
+    const merged = new Map<string, { authors: number; uses: number }>();
 
-  for (const tagName of tagNames) {
-    const aggResult = response.body.aggregations?.[`tag_${tagName}`] as
-      | {
-          values?: {
-            buckets?: Array<{
-              key: string;
-              doc_count: number;
-              unique_authors?: { value: number };
-            }>;
-          };
+    for (const tagName of tagNames) {
+      const aggResult = response.body.aggregations?.[`tag_${tagName}`] as
+        | {
+            values?: {
+              buckets?: Array<{
+                key: string;
+                doc_count: number;
+                unique_authors?: { value: number };
+              }>;
+            };
+          }
+        | undefined;
+
+      const buckets = aggResult?.values?.buckets ?? [];
+
+      for (const bucket of buckets) {
+        const key = bucket.key.toLowerCase();
+        const existing = merged.get(key);
+        const authors = bucket.unique_authors?.value ?? 0;
+        const uses = bucket.doc_count;
+
+        if (existing) {
+          existing.authors = Math.max(existing.authors, authors);
+          existing.uses += uses;
+        } else {
+          merged.set(key, { authors, uses });
         }
-      | undefined;
-
-    const buckets = aggResult?.values?.buckets ?? [];
-
-    for (const bucket of buckets) {
-      const key = bucket.key.toLowerCase();
-      const existing = merged.get(key);
-      const authors = bucket.unique_authors?.value ?? 0;
-      const uses = bucket.doc_count;
-
-      if (existing) {
-        existing.authors = Math.max(existing.authors, authors);
-        existing.uses += uses;
-      } else {
-        merged.set(key, { authors, uses });
       }
     }
+
+    // Sort by authors desc, then uses desc (matching the Ditto query)
+    const sorted = [...merged.entries()]
+      .sort(([, a], [, b]) => b.authors - a.authors || b.uses - a.uses)
+      .slice(0, limit);
+
+    return sorted.map(([value, { authors, uses }]) => ({
+      value,
+      authors,
+      uses,
+    }));
   }
 
-  // Sort by authors desc, then uses desc (matching the Ditto query)
-  const sorted = [...merged.entries()]
-    .sort(([, a], [, b]) => b.authors - a.authors || b.uses - a.uses)
-    .slice(0, limit);
+  /**
+   * Compute trending tag values and publish a kind 1985 label event.
+   *
+   * Mirrors Ditto's `updateTrendingTags`: queries the last 24 hours,
+   * builds a label event in the `pub.ditto.trends` namespace, signs it
+   * with the provided signer, and stores it via the relay.
+   */
+  async updateTrendingTags(
+    signer: NostrSigner,
+    /** Label value for the `l` tag, e.g. `"#t"` or `"#p"`. */
+    l: string,
+    /** Primary tag name used in the label event tags, e.g. `"t"` or `"e"`. */
+    tagName: string,
+    /** Kinds of events to consider. */
+    kinds: number[],
+    /** Maximum number of trending values to include. */
+    limit: number,
+    /** Extra value appended to each tag tuple (e.g. relay URL). */
+    extra = "",
+    /** Additional tag names that alias the primary (e.g. `["q"]` for `"e"`). */
+    aliases?: string[],
+    /** If present, only these tag values are permitted to trend. */
+    values?: string[],
+  ): Promise<void> {
+    const signal = AbortSignal.timeout(1000);
 
-  return sorted.map(([value, { authors, uses }]) => ({
-    value,
-    authors,
-    uses,
-  }));
+    const yesterday = Math.floor((Date.now() - 24 * 60 * 60 * 1000) / 1000);
+    const now = Math.floor(Date.now() / 1000);
+
+    const tagNames = aliases ? [tagName, ...aliases] : [tagName];
+
+    const trends = await this.getTrendingTagValues(
+      tagNames,
+      { kinds, since: yesterday, until: now, limit },
+      values,
+    );
+
+    if (trends.length === 0) {
+      return;
+    }
+
+    const label = await signer.signEvent({
+      kind: 1985,
+      content: "",
+      tags: [
+        ["L", "pub.ditto.trends"],
+        ["l", l, "pub.ditto.trends"],
+        ...trends.map(({ value, authors, uses }) => [
+          tagName,
+          value,
+          extra,
+          authors.toString(),
+          uses.toString(),
+        ]),
+      ],
+      created_at: Math.floor(Date.now() / 1000),
+    });
+
+    await this.relay.event(label, { signal });
+  }
+
+  /** Update trending pubkeys. */
+  updateTrendingPubkeys(signer: NostrSigner, relayUrl: string): Promise<void> {
+    return this.updateTrendingTags(
+      signer,
+      "#p",
+      "p",
+      [1, 3, 6, 7, 9735],
+      40,
+      relayUrl,
+    );
+  }
+
+  /** Update trending zapped events. */
+  updateTrendingZappedEvents(
+    signer: NostrSigner,
+    relayUrl: string,
+  ): Promise<void> {
+    return this.updateTrendingTags(
+      signer,
+      "zapped",
+      "e",
+      [9735],
+      40,
+      relayUrl,
+      ["q"],
+    );
+  }
+
+  /** Update trending events (excluding language-specific trends). */
+  updateTrendingEvents(signer: NostrSigner, relayUrl: string): Promise<void> {
+    return this.updateTrendingTags(
+      signer,
+      "#e",
+      "e",
+      [1, 6, 7, 9735],
+      40,
+      relayUrl,
+      ["q"],
+    );
+  }
+
+  /** Update trending hashtags. */
+  updateTrendingHashtags(signer: NostrSigner): Promise<void> {
+    return this.updateTrendingTags(signer, "#t", "t", [1], 20);
+  }
+
+  /** Update trending links. */
+  updateTrendingLinks(signer: NostrSigner): Promise<void> {
+    return this.updateTrendingTags(signer, "#r", "r", [1], 20);
+  }
 }

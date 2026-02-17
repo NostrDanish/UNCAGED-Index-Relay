@@ -64,4 +64,37 @@ describe("Config", () => {
       assert.equal(config.relayUrl, "wss://relay.example.com/");
     });
   });
+
+  describe("nostrSigner", () => {
+    it("should throw an error when NOSTR_NSEC is not set", () => {
+      const mockEnv = new Map();
+      const config = new Config(mockEnv);
+      assert.throws(() => config.nostrSigner, /NOSTR_NSEC is required/);
+    });
+
+    it("should return a NostrSigner when a valid nsec is provided", async () => {
+      const mockEnv = new Map([
+        [
+          "NOSTR_NSEC",
+          "nsec1l2xejwnzu9sjl9ve3eryktge5u05esdez9ll3wt9gly9n7yraq4sph4kgh",
+        ],
+      ]);
+      const config = new Config(mockEnv);
+      const signer = config.nostrSigner;
+      const pubkey = await signer.getPublicKey();
+      assert.equal(typeof pubkey, "string");
+      assert.equal(pubkey.length, 64);
+    });
+
+    it("should throw an error when the value is not an nsec", () => {
+      const mockEnv = new Map([
+        [
+          "NOSTR_NSEC",
+          "npub1dpyfqvgf6cup9cx3tdnqrh0h33alsey5rtu34976sgxrag3286aqgnlshp",
+        ],
+      ]);
+      const config = new Config(mockEnv);
+      assert.throws(() => config.nostrSigner, /must be a valid nsec/);
+    });
+  });
 });
