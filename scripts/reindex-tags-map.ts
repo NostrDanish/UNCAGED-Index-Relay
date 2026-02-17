@@ -130,98 +130,140 @@ async function main() {
       console.log("No mapping conflicts found\n");
     }
 
-    console.log("Running update_by_query (this may take a while)...\n");
+    // Run update_by_query as a background task with polling.
+    // If the task finishes with mapping failures, delete the failing
+    // documents and retry — a single failure aborts the scroll, so we
+    // need to loop until a run completes with zero mapping errors.
+    let attempt = 0;
 
-    // Use update_by_query to update all documents server-side.
-    // - wait_for_completion=false makes it run as a background task
-    //   so we can poll for progress.
-    // - conflicts=proceed skips version conflicts instead of aborting.
-    // - scroll_size controls how many docs are processed per internal batch.
-    const taskResponse = await client.updateByQuery({
-      index: config.opensearchIndex,
-      body: {
-        query: { match_all: {} },
-        script: {
-          source: painlessScript,
-          lang: "painless",
+    for (;;) {
+      attempt++;
+      if (attempt > 1) {
+        console.log(`\nRetrying update_by_query (attempt ${attempt})...\n`);
+      } else {
+        console.log("Running update_by_query (this may take a while)...\n");
+      }
+
+      const taskResponse = await client.updateByQuery({
+        index: config.opensearchIndex,
+        body: {
+          query: { match_all: {} },
+          script: {
+            source: painlessScript,
+            lang: "painless",
+          },
         },
-      },
-      conflicts: "proceed",
-      scroll_size: 1000,
-      wait_for_completion: false,
-      requests_per_second: -1, // No throttling
-    });
+        conflicts: "proceed",
+        scroll_size: 1000,
+        wait_for_completion: false,
+        requests_per_second: -1, // No throttling
+      });
 
-    const taskId = (taskResponse.body as unknown as { task: string }).task;
-    console.log(`Task started: ${taskId}\n`);
+      const taskId = (taskResponse.body as unknown as { task: string }).task;
+      console.log(`Task started: ${taskId}\n`);
 
-    // Poll for task completion
-    let completed = false;
-    while (!completed) {
-      await new Promise((resolve) => setTimeout(resolve, 5000)); // Poll every 5s
+      // Poll for task completion
+      let completed = false;
+      while (!completed) {
+        await new Promise((resolve) => setTimeout(resolve, 5000));
 
-      const statusResponse = await client.tasks.get({ task_id: taskId });
-      const task = statusResponse.body.task as {
-        status: {
-          total: number;
-          updated: number;
-          created: number;
-          deleted: number;
-          version_conflicts: number;
-          noops: number;
-          failures?: unknown[];
+        const statusResponse = await client.tasks.get({ task_id: taskId });
+        const task = statusResponse.body.task as {
+          status: {
+            total: number;
+            updated: number;
+            created: number;
+            deleted: number;
+            version_conflicts: number;
+            noops: number;
+          };
         };
+        const status = task.status;
+
+        const pct =
+          status.total > 0
+            ? ((status.updated / status.total) * 100).toFixed(2)
+            : "0.00";
+
+        const parts = [
+          `Updated ${status.updated.toLocaleString()} / ${status.total.toLocaleString()} (${pct}%)`,
+        ];
+        if (status.version_conflicts > 0) {
+          parts.push(`${status.version_conflicts} conflicts`);
+        }
+        if (status.noops > 0) {
+          parts.push(`${status.noops} noops`);
+        }
+        console.log(parts.join(" | "));
+
+        completed = statusResponse.body.completed as boolean;
+      }
+
+      // Get final result
+      const finalResponse = await client.tasks.get({ task_id: taskId });
+      const response = finalResponse.body.response as {
+        total: number;
+        updated: number;
+        version_conflicts: number;
+        failures?: Array<{
+          id?: string;
+          cause?: { type?: string; reason?: string };
+        }>;
       };
-      const status = task.status;
 
-      const pct =
-        status.total > 0
-          ? ((status.updated / status.total) * 100).toFixed(2)
-          : "0.00";
-
-      const parts = [
-        `Updated ${status.updated.toLocaleString()} / ${status.total.toLocaleString()} (${pct}%)`,
-      ];
-      if (status.version_conflicts > 0) {
-        parts.push(`${status.version_conflicts} conflicts`);
-      }
-      if (status.noops > 0) {
-        parts.push(`${status.noops} noops`);
-      }
-      console.log(parts.join(" | "));
-
-      completed = statusResponse.body.completed as boolean;
-    }
-
-    // Get final result
-    const finalResponse = await client.tasks.get({ task_id: taskId });
-    const response = finalResponse.body.response as {
-      total: number;
-      updated: number;
-      version_conflicts: number;
-      failures?: Array<{ cause?: { type?: string; reason?: string } }>;
-    };
-
-    console.log(
-      `\nReindex completed: ${response.updated.toLocaleString()} updated out of ${response.total.toLocaleString()}`,
-    );
-
-    if (response.version_conflicts > 0) {
       console.log(
-        `  ${response.version_conflicts} version conflicts (skipped)`,
+        `\nReindex pass ${attempt}: ${response.updated.toLocaleString()} updated out of ${response.total.toLocaleString()}`,
       );
-    }
 
-    if (response.failures && response.failures.length > 0) {
-      console.error(`  ${response.failures.length} failures:`);
-      for (const failure of response.failures.slice(0, 5)) {
-        console.error(`    ${JSON.stringify(failure)}`);
-      }
-      if (response.failures.length > 5) {
-        console.error(
-          `    ... and ${response.failures.length - 5} more failures`,
+      if (response.version_conflicts > 0) {
+        console.log(
+          `  ${response.version_conflicts} version conflicts (skipped)`,
         );
       }
+
+      // Check for mapping failures and delete those documents to unblock the next run
+      const mappingFailures = (response.failures ?? []).filter(
+        (f) => f.cause?.type === "mapper_parsing_exception" && f.id,
+      );
+
+      if (mappingFailures.length > 0) {
+        console.log(
+          `  ${mappingFailures.length} mapping conflicts, deleting and retrying...`,
+        );
+        const bulkBody: Array<Record<string, unknown>> = [];
+        for (const failure of mappingFailures) {
+          bulkBody.push({
+            delete: { _index: config.opensearchIndex, _id: failure.id },
+          });
+        }
+        await client.bulk({ body: bulkBody, refresh: true });
+        totalDeleted += mappingFailures.length;
+        continue; // Retry the update_by_query
+      }
+
+      // Report any non-mapping failures
+      const otherFailures = (response.failures ?? []).filter(
+        (f) => f.cause?.type !== "mapper_parsing_exception",
+      );
+      if (otherFailures.length > 0) {
+        console.error(`  ${otherFailures.length} other failures:`);
+        for (const failure of otherFailures.slice(0, 5)) {
+          console.error(`    ${JSON.stringify(failure)}`);
+        }
+        if (otherFailures.length > 5) {
+          console.error(
+            `    ... and ${otherFailures.length - 5} more failures`,
+          );
+        }
+      }
+
+      break; // No mapping failures, we're done
+    }
+
+    if (totalDeleted > 0) {
+      console.log(
+        `\nTotal mapping conflicts deleted across all passes: ${totalDeleted}`,
+      );
     }
   } catch (error) {
     console.error("\nReindex failed:");
