@@ -88,7 +88,7 @@ async function main() {
         size: batchSize,
         _source: ["tags"],
         query: { match_all: {} },
-        sort: [{ _id: "asc" }], // Consistent sorting for search_after
+        sort: ["_doc"], // Use _doc for efficiency - no fielddata required
       };
 
       if (searchAfter) {
