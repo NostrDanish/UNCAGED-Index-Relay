@@ -67,44 +67,64 @@ async function main() {
     const total = (countResponse.body as { count: number }).count;
     console.log(`Found ${total.toLocaleString()} documents to process.\n`);
 
-    // Pre-flight: run a small synchronous update_by_query to discover documents
-    // that cause mapper_parsing_exception errors (e.g. tags_map field type
-    // conflicts). These documents would abort the full reindex, so we delete
-    // them first and let the relay re-ingest them with the correct mapping.
-    console.log("Running pre-flight check for mapping conflicts...");
-    const preflightResponse = await client.updateByQuery({
-      index: config.opensearchIndex,
-      body: {
-        query: { match_all: {} },
-        script: {
-          source: painlessScript,
-          lang: "painless",
-        },
-      },
-      conflicts: "proceed",
-      scroll_size: 1000,
-      // Run synchronously to inspect failures
-    });
+    // Pre-flight: discover and delete documents that cause
+    // mapper_parsing_exception errors (tags_map field type conflicts).
+    // These would abort the full reindex, so we remove them first.
+    // Uses max_docs to limit each pass to a small batch.
+    console.log("Checking for documents with mapping conflicts...");
+    let totalDeleted = 0;
 
-    const preflightBody = preflightResponse.body as {
-      failures?: Array<{ id?: string; cause?: { type?: string } }>;
-    };
+    for (;;) {
+      let preflightBody: {
+        updated?: number;
+        failures?: Array<{ id?: string; cause?: { type?: string } }>;
+      };
 
-    const conflictIds = (preflightBody.failures ?? [])
-      .filter((f) => f.cause?.type === "mapper_parsing_exception" && f.id)
-      .map((f) => f.id as string);
+      try {
+        const preflightResponse = await client.updateByQuery({
+          index: config.opensearchIndex,
+          body: {
+            query: { match_all: {} },
+            script: {
+              source: painlessScript,
+              lang: "painless",
+            },
+            max_docs: 1000,
+          },
+          conflicts: "proceed",
+        });
+        preflightBody = preflightResponse.body as typeof preflightBody;
+      } catch (error) {
+        // The client throws when the response contains failures.
+        // Extract the response body from the error metadata.
+        if (error && typeof error === "object" && "meta" in error) {
+          const meta = (error as { meta?: { body?: unknown } }).meta;
+          preflightBody = (meta?.body ?? {}) as typeof preflightBody;
+        } else {
+          throw error;
+        }
+      }
 
-    if (conflictIds.length > 0) {
-      console.log(
-        `Found ${conflictIds.length} documents with mapping conflicts, deleting them...`,
-      );
+      const conflictIds = (preflightBody.failures ?? [])
+        .filter((f) => f.cause?.type === "mapper_parsing_exception" && f.id)
+        .map((f) => f.id as string);
+
+      if (conflictIds.length === 0) break;
+
       const bulkBody: Array<Record<string, unknown>> = [];
       for (const id of conflictIds) {
         bulkBody.push({ delete: { _index: config.opensearchIndex, _id: id } });
       }
       await client.bulk({ body: bulkBody, refresh: true });
+      totalDeleted += conflictIds.length;
       console.log(
-        `Deleted ${conflictIds.length} conflicting documents (will be re-ingested by the relay)\n`,
+        `  Deleted ${conflictIds.length} conflicting documents (${totalDeleted} total)`,
+      );
+    }
+
+    if (totalDeleted > 0) {
+      console.log(
+        `Deleted ${totalDeleted} documents with mapping conflicts (will be re-ingested by the relay)\n`,
       );
     } else {
       console.log("No mapping conflicts found\n");
