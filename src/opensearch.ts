@@ -366,6 +366,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
               field: "tags_map.e",
               size: bucketCount,
               order: { _count: "desc" as const },
+              include: "[0-9a-f]{64}", // Only valid 64-char hex event IDs
             },
           },
         },
@@ -401,6 +402,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
             terms: {
               field: "tags_map.e",
               size: bucketCount,
+              include: "[0-9a-f]{64}", // Only valid 64-char hex event IDs
             },
             aggs: {
               total_sats: {
