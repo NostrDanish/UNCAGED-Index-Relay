@@ -421,6 +421,7 @@ describe("OpenSearchRelay", () => {
               const buckets: Array<{
                 key: string;
                 doc_count: number;
+                unique_authors?: { value: number };
                 by_kind?: {
                   buckets?: Array<{ key: number; doc_count: number }>;
                 };
@@ -432,6 +433,7 @@ describe("OpenSearchRelay", () => {
                   buckets.push({
                     key: eventId,
                     doc_count: refs.length,
+                    unique_authors: { value: refs.length },
                     by_kind: {
                       buckets: [{ key: 1, doc_count: refs.length }],
                     },
@@ -451,11 +453,67 @@ describe("OpenSearchRelay", () => {
 
             // Handle normal search queries
             const results: unknown[] = [];
+
+            // Extract id filter from query if present
+            const queryMustClauses = (
+              (body.query as Record<string, unknown>)?.bool as Record<
+                string,
+                unknown
+              >
+            )?.must as Array<Record<string, unknown>> | undefined;
+            const idFilter = queryMustClauses?.find(
+              (clause) =>
+                (clause.terms as Record<string, unknown>)?.id !== undefined,
+            );
+            const allowedIds = idFilter
+              ? ((clause) => (clause.terms as Record<string, string[]>).id)(
+                  idFilter,
+                )
+              : null;
+
+            // Extract kind filter from query if present
+            const kindFilter = queryMustClauses?.find(
+              (clause) =>
+                (clause.terms as Record<string, unknown>)?.kind !== undefined,
+            );
+            const allowedKinds = kindFilter
+              ? new Set(
+                  ((clause) => (clause.terms as Record<string, number[]>).kind)(
+                    kindFilter,
+                  ),
+                )
+              : null;
+
+            // Extract time range filter from query if present
+            const timeFilter = queryMustClauses?.find(
+              (clause) =>
+                (clause.range as Record<string, unknown>)?.created_at !==
+                undefined,
+            );
+            const timeRange = timeFilter
+              ? ((clause) =>
+                  (clause.range as Record<string, Record<string, number>>)
+                    .created_at)(timeFilter)
+              : null;
+
             for (const [_id, doc] of documents.entries()) {
               const docTyped = doc as NostrEvent & { deleted?: boolean };
-              if (!docTyped.deleted) {
-                results.push({ _source: doc });
+              if (docTyped.deleted) continue;
+              if (allowedIds && !allowedIds.includes(docTyped.id)) continue;
+              if (allowedKinds && !allowedKinds.has(docTyped.kind)) continue;
+              if (timeRange) {
+                if (
+                  timeRange.gte !== undefined &&
+                  docTyped.created_at < timeRange.gte
+                )
+                  continue;
+                if (
+                  timeRange.lte !== undefined &&
+                  docTyped.created_at > timeRange.lte
+                )
+                  continue;
               }
+              results.push({ _source: doc });
             }
 
             // Sort by created_at desc
@@ -619,39 +677,43 @@ describe("OpenSearchRelay", () => {
       const sk = generateSecretKey();
       const now = Math.floor(Date.now() / 1000);
 
-      // Create two events: one recent with few refs, one old with many refs
+      // Create two events within the 24h hot window: one very recent, one older
       const recentEvent = finalizeEvent(
         {
           kind: 1,
-          created_at: now - 3600, // 1 hour ago
+          created_at: now - 1800, // 30 minutes ago
           tags: [],
           content: "Recent event",
         },
         sk,
       );
 
-      const oldEvent = finalizeEvent(
+      const olderEvent = finalizeEvent(
         {
           kind: 1,
-          created_at: now - 7 * 24 * 3600, // 7 days ago
+          created_at: now - 20 * 3600, // 20 hours ago (within 24h window)
           tags: [],
-          content: "Old event",
+          content: "Older event",
         },
         sk,
       );
 
       await relay.event(recentEvent);
-      await relay.event(oldEvent);
+      await relay.event(olderEvent);
 
-      // Recent event has 2 refs, old event has 10 refs
-      // But with decay, recent should score higher
-      references.set(recentEvent.id, [{ kind: 1 }, { kind: 1 }]);
-      references.set(oldEvent.id, [
+      // Recent event has 2 refs, older event has 10 refs
+      // But with 24h half-life decay, recent should score higher:
+      //   recent: 2 * 0.5^(0.5/24) ≈ 1.97
+      //   older:  10 * 0.5^(20/24) ≈ 4.35
+      // Actually older still wins here, so give recent more refs
+      references.set(recentEvent.id, [
         { kind: 1 },
         { kind: 1 },
         { kind: 1 },
         { kind: 1 },
         { kind: 1 },
+      ]);
+      references.set(olderEvent.id, [
         { kind: 1 },
         { kind: 1 },
         { kind: 1 },
@@ -662,7 +724,9 @@ describe("OpenSearchRelay", () => {
       // Query with sort:hot
       const results = await relay.query([{ kinds: [1], search: "sort:hot" }]);
 
-      // Recent event should rank higher due to recency
+      // Both events have same ref count, but recent scores higher due to less decay
+      // recent: 5 * 0.5^(0.5/24) ≈ 4.93
+      // older:  5 * 0.5^(20/24) ≈ 2.17
       assert.equal(results.length, 2);
       assert.equal(results[0].id, recentEvent.id);
     });

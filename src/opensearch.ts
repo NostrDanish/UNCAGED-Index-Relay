@@ -30,6 +30,20 @@ interface BulkEntry {
   reject: (error: Error) => void;
 }
 
+/** Aggregation bucket data for a referenced event. */
+interface RefBucket {
+  eventId: string;
+  totalRefs: number;
+  uniqueAuthors: number;
+  kindCounts: Map<number, number>;
+}
+
+/** Aggregation bucket data for a zapped event. */
+interface ZapBucket {
+  eventId: string;
+  totalSats: number;
+}
+
 /**
  * OpenSearch-backed Nostr relay implementation
  * Handles event storage and querying with full-text search support (NIP-50)
@@ -225,13 +239,10 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
    *
    * Instead of fetching candidate events and then counting their references,
    * this starts from the referencing events (reactions, replies, reposts, zaps)
-   * and aggregates by target event ID. The top buckets *are* the winners.
-   * Then we fetch those target events and apply the original filter constraints.
-   *
-   * The aggregation requests a large number of buckets (10,000) because many
-   * top-referenced events may be filtered out by the query constraints (kinds,
-   * authors, time windows, etc.). Aggregation buckets are cheap — just event
-   * ID strings and counts.
+   * and aggregates by target event ID. The top buckets *are* the answer —
+   * they carry all the data needed for scoring (doc_count, unique authors,
+   * kind breakdown). Then we fetch matching target events and score them
+   * directly from the aggregation data. Two queries total, not three.
    */
   private async querySortedEvents(
     filter: NostrFilter,
@@ -241,19 +252,22 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     const now = Math.floor(Date.now() / 1000);
 
     try {
-      // Step 1: Aggregate referencing events to find top-referenced event IDs.
-      // Request a large bucket count since many may be filtered out by the
-      // original filter constraints (kinds, authors, etc.).
-      const topEventIds =
-        sortMode === "zaps"
-          ? await this.aggregateTopZapped()
-          : await this.aggregateTopReferenced(sortMode);
+      // Step 1: Aggregate referencing events to get scored bucket data.
+      const refBuckets =
+        sortMode === "zaps" ? null : await this.aggregateTopReferenced();
+      const zapBuckets =
+        sortMode === "zaps" ? await this.aggregateTopZapped() : null;
 
-      if (topEventIds.length === 0) {
+      const eventIds =
+        sortMode === "zaps"
+          ? zapBuckets!.map((b) => b.eventId)
+          : refBuckets!.map((b) => b.eventId);
+
+      if (eventIds.length === 0) {
         return [];
       }
 
-      // Step 2: Fetch the target events, applying the original filter constraints
+      // Step 2: Fetch the target events, applying the original filter constraints.
       const query = this.buildQuery(filter) as {
         bool: { must: Record<string, unknown>[] };
       };
@@ -268,13 +282,13 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
       }
 
       // Constrain to only the top-referenced event IDs
-      query.bool.must.push({ terms: { id: topEventIds } });
+      query.bool.must.push({ terms: { id: eventIds } });
 
       const response = await this.client.search({
         index: this.indexName,
         body: {
           query,
-          size: Math.min(topEventIds.length, 5000),
+          size: Math.min(eventIds.length, 5000),
         },
       });
 
@@ -291,13 +305,59 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
         return [];
       }
 
-      // Step 3: Score and sort the fetched events.
-      // Only pass event IDs that survived the filter to the scoring step.
-      const matchedIds = [...eventsById.keys()];
-      let scoredEvents =
-        sortMode === "zaps"
-          ? await this.scoreEventsByZaps(matchedIds, eventsById)
-          : await this.scoreEvents(matchedIds, sortMode, now, eventsById);
+      // Step 3: Score directly from the aggregation data — no third query needed.
+      const scoreMap = new Map<string, number>();
+
+      if (sortMode === "zaps") {
+        for (const bucket of zapBuckets!) {
+          if (!eventsById.has(bucket.eventId)) continue;
+          if (bucket.totalSats <= 0) continue;
+          scoreMap.set(bucket.eventId, bucket.totalSats);
+        }
+      } else {
+        for (const bucket of refBuckets!) {
+          const event = eventsById.get(bucket.eventId);
+          if (!event) continue;
+
+          const ageInHours = (now - event.created_at) / 3600;
+          let score = 0;
+
+          switch (sortMode) {
+            case "top":
+              // Unique authors who referenced the event — not raw ref count
+              score = bucket.uniqueAuthors;
+              break;
+
+            case "hot":
+              // Unique authors with exponential time decay (24h half-life)
+              score = bucket.uniqueAuthors * 0.5 ** (ageInHours / 24);
+              break;
+
+            case "controversial": {
+              // "Ratio-ed" — high replies relative to positive engagement
+              const replies = bucket.kindCounts.get(1) ?? 0;
+              const reposts = bucket.kindCounts.get(6) ?? 0;
+              const reactions = bucket.kindCounts.get(7) ?? 0;
+              const engagement = reposts + reactions;
+              const balanced = Math.min(replies, engagement);
+              score = balanced * Math.sqrt(replies + engagement);
+              break;
+            }
+
+            case "rising":
+              // Engagement velocity — unique authors per hour
+              score = bucket.uniqueAuthors / Math.max(ageInHours, 0.1);
+              break;
+          }
+
+          scoreMap.set(bucket.eventId, score);
+        }
+      }
+
+      // Sort events by score descending
+      let scoredEvents = [...eventsById.values()]
+        .filter((e) => scoreMap.has(e.id) && scoreMap.get(e.id)! > 0)
+        .sort((a, b) => (scoreMap.get(b.id) || 0) - (scoreMap.get(a.id) || 0));
 
       // Apply distinct:author — keep only the highest-scored event per pubkey
       if (this.hasDistinctAuthor(filter)) {
@@ -340,37 +400,35 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
   }
 
   /**
-   * Aggregate referencing events (replies, reposts, reactions) to find
-   * the most-referenced event IDs. Returns event IDs ordered by reference
-   * count descending.
+   * Aggregate referencing events (replies, reposts, reactions) grouped by
+   * target event ID. Returns full bucket data including doc_count, unique
+   * authors (cardinality), and per-kind breakdowns — everything needed for
+   * scoring without a second aggregation query.
    */
-  private async aggregateTopReferenced(
-    sortMode: "top" | "hot" | "controversial" | "rising",
-  ): Promise<string[]> {
-    const referencesQuery = {
-      bool: {
-        must: [{ term: { deleted: false } }] as Record<string, unknown>[],
-      },
-    };
-
-    // For controversial, only count replies and positive engagement kinds
-    if (sortMode === "controversial") {
-      referencesQuery.bool.must.push({
-        terms: { kind: [1, 6, 7] },
-      });
-    }
-
+  private async aggregateTopReferenced(): Promise<RefBucket[]> {
     const response = await this.client.search({
       index: this.indexName,
       body: {
-        query: referencesQuery,
+        query: {
+          bool: {
+            must: [{ term: { deleted: false } }],
+          },
+        },
         size: 0,
         aggs: {
           by_event: {
             terms: {
               field: "tags_map.e",
-              size: 10000, // Large bucket count — many may be filtered out by query constraints
+              size: 10000,
               order: { _count: "desc" as const },
+            },
+            aggs: {
+              unique_authors: {
+                cardinality: { field: "pubkey" },
+              },
+              by_kind: {
+                terms: { field: "kind", size: 20 },
+              },
             },
           },
         },
@@ -380,18 +438,30 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     const buckets =
       (
         response.body.aggregations?.by_event as unknown as {
-          buckets?: Array<{ key: string; doc_count: number }>;
+          buckets?: Array<{
+            key: string;
+            doc_count: number;
+            unique_authors?: { value: number };
+            by_kind?: { buckets?: Array<{ key: number; doc_count: number }> };
+          }>;
         }
       )?.buckets || [];
 
-    return buckets.map((b) => b.key);
+    return buckets.map((b) => ({
+      eventId: b.key,
+      totalRefs: b.doc_count,
+      uniqueAuthors: b.unique_authors?.value ?? 0,
+      kindCounts: new Map(
+        (b.by_kind?.buckets ?? []).map((kb) => [kb.key, kb.doc_count]),
+      ),
+    }));
   }
 
   /**
-   * Aggregate zap receipts (kind 9735) to find the most-zapped event IDs.
-   * Returns event IDs ordered by total sats descending.
+   * Aggregate zap receipts (kind 9735) grouped by target event ID.
+   * Returns event IDs with total sats received.
    */
-  private async aggregateTopZapped(): Promise<string[]> {
+  private async aggregateTopZapped(): Promise<ZapBucket[]> {
     const response = await this.client.search({
       index: this.indexName,
       body: {
@@ -433,204 +503,13 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
         }
       )?.buckets || [];
 
-    // Sort by total sats and filter out zero-sat entries
     return buckets
-      .filter((b) => (b.total_sats?.value ?? 0) > 0)
-      .sort((a, b) => (b.total_sats?.value ?? 0) - (a.total_sats?.value ?? 0))
-      .map((b) => b.key);
-  }
-
-  /**
-   * Score events based on references and reactions using aggregations.
-   * Fetches reference counts for the given event IDs and applies the
-   * sort-mode-specific scoring formula.
-   */
-  private async scoreEvents(
-    eventIds: string[],
-    sortMode: "top" | "hot" | "controversial" | "rising",
-    now: number,
-    eventsById: Map<string, NostrEvent>,
-  ): Promise<NostrEvent[]> {
-    const referencesQuery = {
-      bool: {
-        must: [
-          { term: { deleted: false } },
-          {
-            bool: {
-              should: [
-                { terms: { "tags_map.e": eventIds } },
-                { terms: { "tags_map.q": eventIds } },
-              ],
-            },
-          },
-        ],
-      },
-    };
-
-    try {
-      const refsResponse = await this.client.search({
-        index: this.indexName,
-        body: {
-          query: referencesQuery,
-          size: 0,
-          aggs: {
-            by_event: {
-              terms: {
-                field: "tags_map.e",
-                size: eventIds.length,
-              },
-              aggs: {
-                by_kind: {
-                  terms: {
-                    field: "kind",
-                    size: 20,
-                  },
-                },
-              },
-            },
-          },
-        },
-      });
-
-      const scoreMap = new Map<string, number>();
-
-      const buckets =
-        (
-          refsResponse.body.aggregations?.by_event as unknown as {
-            buckets?: Array<{
-              key: string;
-              doc_count: number;
-              by_kind?: {
-                buckets?: Array<{ key: number; doc_count: number }>;
-              };
-            }>;
-          }
-        )?.buckets || [];
-
-      for (const bucket of buckets) {
-        const eventId = bucket.key;
-        const totalRefs = bucket.doc_count;
-        const kindBuckets = bucket.by_kind?.buckets || [];
-        const event = eventsById.get(eventId);
-        if (!event) continue;
-
-        const ageInHours = (now - event.created_at) / 3600;
-        let score = 0;
-
-        switch (sortMode) {
-          case "top":
-            score = totalRefs;
-            break;
-
-          case "hot":
-            score = totalRefs * 0.5 ** (ageInHours / 24);
-            break;
-
-          case "controversial": {
-            let replies = 0;
-            let engagement = 0;
-            for (const kindBucket of kindBuckets) {
-              if (kindBucket.key === 1) {
-                replies += kindBucket.doc_count;
-              } else if (kindBucket.key === 6 || kindBucket.key === 7) {
-                engagement += kindBucket.doc_count;
-              }
-            }
-            const balanced = Math.min(replies, engagement);
-            score = balanced * Math.sqrt(replies + engagement);
-            break;
-          }
-
-          case "rising":
-            score = totalRefs / Math.max(ageInHours, 0.1);
-            break;
-        }
-
-        scoreMap.set(eventId, score);
-      }
-
-      // Collect events that were found, sorted by score descending
-      return [...eventsById.values()]
-        .filter((e) => scoreMap.has(e.id))
-        .sort((a, b) => (scoreMap.get(b.id) || 0) - (scoreMap.get(a.id) || 0));
-    } catch (error) {
-      console.error("Event scoring failed:", error);
-      return [...eventsById.values()];
-    }
-  }
-
-  /**
-   * Score events by total zap sats received (kind 9735 zap receipts).
-   * Uses a scripted sum aggregation to parse the string `tags_map.amount`
-   * field (millisatoshis) and convert it to sats.
-   */
-  private async scoreEventsByZaps(
-    eventIds: string[],
-    eventsById: Map<string, NostrEvent>,
-  ): Promise<NostrEvent[]> {
-    const zapQuery = {
-      bool: {
-        must: [
-          { term: { deleted: false } },
-          { term: { kind: 9735 } },
-          { terms: { "tags_map.e": eventIds } },
-        ],
-      },
-    };
-
-    try {
-      const response = await this.client.search({
-        index: this.indexName,
-        body: {
-          query: zapQuery,
-          size: 0,
-          aggs: {
-            by_event: {
-              terms: {
-                field: "tags_map.e",
-                size: eventIds.length,
-              },
-              aggs: {
-                total_sats: {
-                  sum: {
-                    script: {
-                      source:
-                        "if (doc.containsKey('tags_map.amount') && doc['tags_map.amount'].size() > 0) { return Long.parseLong(doc['tags_map.amount'].value) / 1000 } return 0",
-                    },
-                  },
-                },
-              },
-            },
-          },
-        },
-      });
-
-      const scoreMap = new Map<string, number>();
-
-      const buckets =
-        (
-          response.body.aggregations?.by_event as unknown as {
-            buckets?: Array<{
-              key: string;
-              doc_count: number;
-              total_sats?: { value: number };
-            }>;
-          }
-        )?.buckets || [];
-
-      for (const bucket of buckets) {
-        scoreMap.set(bucket.key, bucket.total_sats?.value ?? 0);
-      }
-
-      return [...eventsById.values()]
-        .filter(
-          (event) => scoreMap.has(event.id) && scoreMap.get(event.id)! > 0,
-        )
-        .sort((a, b) => (scoreMap.get(b.id) || 0) - (scoreMap.get(a.id) || 0));
-    } catch (error) {
-      console.error("Zap scoring failed:", error);
-      return [...eventsById.values()];
-    }
+      .map((b) => ({
+        eventId: b.key,
+        totalSats: b.total_sats?.value ?? 0,
+      }))
+      .filter((b) => b.totalSats > 0)
+      .sort((a, b) => b.totalSats - a.totalSats);
   }
 
   /**
