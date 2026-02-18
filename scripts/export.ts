@@ -101,8 +101,6 @@ async function main() {
           { created_at: { order: "desc" as const } },
           { id: { order: "desc" as const } },
         ],
-        // Disable request cache to reduce memory pressure
-        request_cache: false,
       };
 
       if (searchAfter) {
@@ -120,6 +118,7 @@ async function main() {
         try {
           const response = await client.search({
             index: config.opensearchIndex,
+            request_cache: false,
             body: searchBody,
           });
 
