@@ -6,8 +6,31 @@ import type { ServerWebSocket } from "bun";
 import type { Filter, NostrEvent } from "nostr-tools";
 import { matchFilter, verifyEvent } from "nostr-tools";
 
-/** Function that verifies a Nostr event signature. */
-export type VerifyFn = (event: NostrEvent) => boolean | Promise<boolean>;
+import type { AnalyzeResult } from "./analyze-pool.ts";
+
+/** Pre-computed analysis data that can be passed alongside an event to avoid redundant work. */
+export interface EventAnalysis {
+  language?: string;
+  sentiment?: string;
+}
+
+/** Extended NRelay that accepts pre-computed analysis data on event ingestion. */
+export interface AnalyzableRelay extends NRelay {
+  event(
+    event: NostrEvent,
+    opts?: { signal?: AbortSignal; analysis?: EventAnalysis },
+  ): Promise<void>;
+}
+
+/** Function that analyzes a Nostr event off the main thread (verify, detect language/sentiment). */
+export type AnalyzeFn = (
+  event: NostrEvent,
+) => AnalyzeResult | Promise<AnalyzeResult>;
+
+/** Default analyze function that only verifies (no language/sentiment detection). */
+const defaultAnalyze: AnalyzeFn = (event) => ({
+  verified: verifyEvent(event),
+});
 
 // Track subscriptions per connection
 export interface Subscription {
@@ -31,9 +54,9 @@ interface IndexedFilter {
 }
 
 export class Relay {
-  public storage: NRelay;
+  public storage: AnalyzableRelay;
   private relayInfo: NostrRelayInfo;
-  private verify: VerifyFn;
+  private analyze: AnalyzeFn;
   /** The relay's public URL, used for NIP-42 AUTH verification. */
   private relayUrl: string;
 
@@ -51,15 +74,15 @@ export class Relay {
   >();
 
   constructor(
-    storage: NRelay,
+    storage: AnalyzableRelay,
     opts: {
       relayInfo?: Partial<NostrRelayInfo>;
-      verify?: VerifyFn;
+      analyze?: AnalyzeFn;
       relayUrl: string;
     },
   ) {
     this.storage = storage;
-    this.verify = opts.verify ?? verifyEvent;
+    this.analyze = opts.analyze ?? defaultAnalyze;
     this.relayUrl = opts.relayUrl;
     this.relayInfo = {
       name: "Ditto Relay",
@@ -227,9 +250,9 @@ export class Relay {
     accepted: boolean;
     message: string;
   }> {
-    // Verify event signature (may be async when using worker pool)
-    const isValid = await this.verify(event);
-    if (!isValid) {
+    // Analyze event off the main thread: verify signature, detect language/sentiment
+    const analysis = await this.analyze(event);
+    if (!analysis.verified) {
       return {
         eventId: event.id,
         accepted: false,
@@ -322,9 +345,16 @@ export class Relay {
       };
     }
 
-    // Store the event using NRelay's event method
+    // Store the event, passing pre-computed analysis results to avoid
+    // redundant language/sentiment detection on the main thread.
     try {
-      await this.storage.event(event);
+      const eventOpts = {
+        analysis: {
+          language: analysis.language,
+          sentiment: analysis.sentiment,
+        },
+      };
+      await this.storage.event(event, eventOpts);
       return {
         eventId: event.id,
         accepted: true,
@@ -640,9 +670,9 @@ export class Relay {
     ws: ServerWebSocket<WebSocketData>,
     event: NostrEvent,
   ): Promise<void> {
-    // Verify signature
-    const isValid = await this.verify(event);
-    if (!isValid) {
+    // Verify signature (AUTH events don't need language/sentiment analysis)
+    const { verified } = await this.analyze(event);
+    if (!verified) {
       this.sendMessage(ws, [
         "OK",
         event.id,

@@ -1,15 +1,24 @@
 import type { NostrEvent } from "nostr-tools";
 
+/** Result of analyzing a Nostr event off the main thread. */
+export interface AnalyzeResult {
+  verified: boolean;
+  language?: string;
+  sentiment?: string;
+}
+
 interface PendingRequest {
-  resolve: (valid: boolean) => void;
+  resolve: (result: AnalyzeResult) => void;
   reject: (error: Error) => void;
 }
 
 /**
- * Pool of Web Workers for parallel Nostr event signature verification.
- * Distributes verification work across threads via round-robin.
+ * Pool of Web Workers for off-thread Nostr event analysis.
+ * Each worker verifies the event signature and, when valid,
+ * detects the language and sentiment of the content.
+ * Distributes work across threads via round-robin.
  */
-export class VerifyPool {
+export class AnalyzePool {
   private workers: Worker[];
   private pending: Map<string, PendingRequest> = new Map();
   private nextWorker = 0;
@@ -17,35 +26,39 @@ export class VerifyPool {
   constructor(size: number = navigator.hardwareConcurrency) {
     // Use at least 1 worker, cap at available cores
     const poolSize = Math.max(1, Math.min(size, navigator.hardwareConcurrency));
-    const workerUrl = new URL("verify-worker.ts", import.meta.url).href;
+    const workerUrl = new URL("analyze-worker.ts", import.meta.url).href;
 
     this.workers = Array.from({ length: poolSize }, () => {
       const worker = new Worker(workerUrl, { smol: true });
       worker.onmessage = (
-        event: MessageEvent<{ id: string; valid: boolean }>,
+        event: MessageEvent<{ id: string } & AnalyzeResult>,
       ) => {
-        const { id, valid } = event.data;
+        const { id, verified, language, sentiment } = event.data;
         const request = this.pending.get(id);
         if (request) {
           this.pending.delete(id);
-          request.resolve(valid);
+          request.resolve({
+            verified,
+            ...(language && { language }),
+            ...(sentiment && { sentiment }),
+          });
         }
       };
       worker.onerror = (error) => {
-        console.error("Verify worker error:", error);
+        console.error("Analyze worker error:", error);
       };
       return worker;
     });
 
-    console.log(`Verify pool started with ${poolSize} workers`);
+    console.log(`Analyze pool started with ${poolSize} workers`);
   }
 
-  /** Verify a Nostr event signature off the main thread. */
-  verify(event: NostrEvent): Promise<boolean> {
+  /** Analyze a Nostr event off the main thread: verify, detect language, detect sentiment. */
+  analyze(event: NostrEvent): Promise<AnalyzeResult> {
     const worker = this.workers[this.nextWorker];
     this.nextWorker = (this.nextWorker + 1) % this.workers.length;
 
-    return new Promise<boolean>((resolve, reject) => {
+    return new Promise<AnalyzeResult>((resolve, reject) => {
       this.pending.set(`${event.id}:${event.sig}`, { resolve, reject });
       worker.postMessage(event);
     });
@@ -59,7 +72,7 @@ export class VerifyPool {
     this.workers = [];
     // Reject any pending requests
     for (const [, request] of this.pending) {
-      request.reject(new Error("Verify pool disposed"));
+      request.reject(new Error("Analyze pool disposed"));
     }
     this.pending.clear();
   }

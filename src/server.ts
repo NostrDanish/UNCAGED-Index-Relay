@@ -1,10 +1,10 @@
 import process from "node:process";
 import { serve } from "bun";
 
+import { AnalyzePool } from "./analyze-pool.ts";
 import { Config } from "./config.ts";
 import { OpenSearchRelay } from "./opensearch.ts";
 import { Relay, type WebSocketData } from "./relay.ts";
-import { VerifyPool } from "./verify-pool.ts";
 
 const config = new Config({
   get(key) {
@@ -12,13 +12,13 @@ const config = new Config({
   },
 });
 
-// Initialize signature verification worker pool
-const verifyPool = new VerifyPool();
+// Initialize analysis worker pool (signature verification, language & sentiment detection)
+const analyzePool = new AnalyzePool();
 
 // Initialize OpenSearch relay
 const opensearchRelay = OpenSearchRelay.fromConfig(config);
 const relay = new Relay(opensearchRelay, {
-  verify: (event) => verifyPool.verify(event),
+  analyze: (event) => analyzePool.analyze(event),
   relayUrl: config.relayUrl,
   relayInfo: {
     pubkey: config.relayPubkey,

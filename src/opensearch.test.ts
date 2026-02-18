@@ -1718,158 +1718,6 @@ describe("OpenSearchRelay", () => {
     });
   });
 
-  describe("detectEventLanguage", () => {
-    it("should detect English text", () => {
-      const event: NostrEvent = {
-        id: "a".repeat(64),
-        pubkey: "b".repeat(64),
-        created_at: 0,
-        kind: 1,
-        tags: [],
-        content:
-          "This is a test of the English language detection feature for Nostr events",
-        sig: "c".repeat(128),
-      };
-
-      assert.equal(OpenSearchRelay.detectEventLanguage(event), "en");
-    });
-
-    it("should detect Chinese text", () => {
-      const event: NostrEvent = {
-        id: "a".repeat(64),
-        pubkey: "b".repeat(64),
-        created_at: 0,
-        kind: 1,
-        tags: [],
-        content: "这是一个中文语言检测测试",
-        sig: "c".repeat(128),
-      };
-
-      assert.equal(OpenSearchRelay.detectEventLanguage(event), "zh");
-    });
-
-    it("should detect Japanese text", () => {
-      const event: NostrEvent = {
-        id: "a".repeat(64),
-        pubkey: "b".repeat(64),
-        created_at: 0,
-        kind: 1,
-        tags: [],
-        content:
-          "これは日本語のテストです。言語検出が正しく動作するか確認します。",
-        sig: "c".repeat(128),
-      };
-
-      assert.equal(OpenSearchRelay.detectEventLanguage(event), "ja");
-    });
-
-    it("should detect Spanish text", () => {
-      const event: NostrEvent = {
-        id: "a".repeat(64),
-        pubkey: "b".repeat(64),
-        created_at: 0,
-        kind: 1,
-        tags: [],
-        content: "Esta es una prueba de detección de idioma en español",
-        sig: "c".repeat(128),
-      };
-
-      assert.equal(OpenSearchRelay.detectEventLanguage(event), "es");
-    });
-
-    it("should return undefined for very short content", () => {
-      const event: NostrEvent = {
-        id: "a".repeat(64),
-        pubkey: "b".repeat(64),
-        created_at: 0,
-        kind: 1,
-        tags: [],
-        content: "hi",
-        sig: "c".repeat(128),
-      };
-
-      assert.equal(OpenSearchRelay.detectEventLanguage(event), undefined);
-    });
-
-    it("should return undefined for empty content", () => {
-      const event: NostrEvent = {
-        id: "a".repeat(64),
-        pubkey: "b".repeat(64),
-        created_at: 0,
-        kind: 1,
-        tags: [],
-        content: "",
-        sig: "c".repeat(128),
-      };
-
-      assert.equal(OpenSearchRelay.detectEventLanguage(event), undefined);
-    });
-
-    it("should return undefined for unsupported kinds", () => {
-      const event: NostrEvent = {
-        id: "a".repeat(64),
-        pubkey: "b".repeat(64),
-        created_at: 0,
-        kind: 7, // Reaction - not a text kind
-        tags: [],
-        content:
-          "This is a long enough English string but the kind is unsupported",
-        sig: "c".repeat(128),
-      };
-
-      assert.equal(OpenSearchRelay.detectEventLanguage(event), undefined);
-    });
-
-    it("should detect language from kind 0 metadata about field", () => {
-      const event: NostrEvent = {
-        id: "a".repeat(64),
-        pubkey: "b".repeat(64),
-        created_at: 0,
-        kind: 0,
-        tags: [],
-        content: JSON.stringify({
-          name: "Satoshi",
-          about:
-            "Bitcoin developer and enthusiast sharing thoughts on decentralization",
-        }),
-        sig: "c".repeat(128),
-      };
-
-      assert.equal(OpenSearchRelay.detectEventLanguage(event), "en");
-    });
-
-    it("should detect Chinese from kind 0 metadata", () => {
-      const event: NostrEvent = {
-        id: "a".repeat(64),
-        pubkey: "b".repeat(64),
-        created_at: 0,
-        kind: 0,
-        tags: [],
-        content: JSON.stringify({
-          name: "中本聪",
-          about: "比特币开发者和爱好者，分享关于去中心化的想法",
-        }),
-        sig: "c".repeat(128),
-      };
-
-      assert.equal(OpenSearchRelay.detectEventLanguage(event), "zh");
-    });
-
-    it("should return undefined for kind 0 with invalid JSON", () => {
-      const event: NostrEvent = {
-        id: "a".repeat(64),
-        pubkey: "b".repeat(64),
-        created_at: 0,
-        kind: 0,
-        tags: [],
-        content: "not json at all",
-        sig: "c".repeat(128),
-      };
-
-      assert.equal(OpenSearchRelay.detectEventLanguage(event), undefined);
-    });
-  });
-
   describe("NIP-50 language filter", () => {
     // Mock client with language field support
     const createLanguageMockClient = () => {
@@ -1958,7 +1806,7 @@ describe("OpenSearchRelay", () => {
       };
     };
 
-    it("should store detected language on indexed documents", async () => {
+    it("should store language on indexed documents when passed via analysis", async () => {
       const { client, documents } = createLanguageMockClient();
       const relay = new OpenSearchRelay(client as unknown as Client, {
         indexName: "test-index",
@@ -1979,7 +1827,7 @@ describe("OpenSearchRelay", () => {
         sk,
       );
 
-      await relay.event(event);
+      await relay.event(event, { analysis: { language: "en" } });
 
       const doc = Array.from(documents.values())[0] as {
         language?: string;
@@ -2020,8 +1868,8 @@ describe("OpenSearchRelay", () => {
         sk,
       );
 
-      await relay.event(enEvent);
-      await relay.event(zhEvent);
+      await relay.event(enEvent, { analysis: { language: "en" } });
+      await relay.event(zhEvent, { analysis: { language: "zh" } });
 
       // Filter by English
       const enResults = await relay.query([
@@ -2074,176 +1922,6 @@ describe("OpenSearchRelay", () => {
 
       const results = await relay.query([{ kinds: [1] }]);
       assert.equal(results.length, 2);
-    });
-  });
-
-  describe("detectEventSentiment", () => {
-    it("should return 'positive' for kind 7 with '+' content", () => {
-      const event: NostrEvent = {
-        id: "a".repeat(64),
-        pubkey: "b".repeat(64),
-        created_at: 0,
-        kind: 7,
-        tags: [],
-        content: "+",
-        sig: "c".repeat(128),
-      };
-
-      assert.equal(OpenSearchRelay.detectEventSentiment(event), "positive");
-    });
-
-    it("should return 'positive' for kind 7 with empty content", () => {
-      const event: NostrEvent = {
-        id: "a".repeat(64),
-        pubkey: "b".repeat(64),
-        created_at: 0,
-        kind: 7,
-        tags: [],
-        content: "",
-        sig: "c".repeat(128),
-      };
-
-      assert.equal(OpenSearchRelay.detectEventSentiment(event), "positive");
-    });
-
-    it("should return 'negative' for kind 7 with '-' content", () => {
-      const event: NostrEvent = {
-        id: "a".repeat(64),
-        pubkey: "b".repeat(64),
-        created_at: 0,
-        kind: 7,
-        tags: [],
-        content: "-",
-        sig: "c".repeat(128),
-      };
-
-      assert.equal(OpenSearchRelay.detectEventSentiment(event), "negative");
-    });
-
-    it("should analyze emoji reactions for kind 7", () => {
-      const event: NostrEvent = {
-        id: "a".repeat(64),
-        pubkey: "b".repeat(64),
-        created_at: 0,
-        kind: 7,
-        tags: [],
-        content: "❤️",
-        sig: "c".repeat(128),
-      };
-
-      // Emoji reactions are passed through the sentiment library; the result
-      // should be one of the three valid sentiment values or undefined.
-      const result = OpenSearchRelay.detectEventSentiment(event);
-      assert.ok(
-        result === "positive" || result === "negative" || result === "neutral",
-        `expected a valid sentiment value, got: ${result}`,
-      );
-    });
-
-    it("should return undefined for kind 7 with custom emoji shortcode", () => {
-      const event: NostrEvent = {
-        id: "a".repeat(64),
-        pubkey: "b".repeat(64),
-        created_at: 0,
-        kind: 7,
-        tags: [["emoji", "soapbox", "https://example.com/soapbox.png"]],
-        content: ":soapbox:",
-        sig: "c".repeat(128),
-      };
-
-      assert.equal(OpenSearchRelay.detectEventSentiment(event), undefined);
-    });
-
-    it("should detect positive sentiment for kind 1 text", () => {
-      const event: NostrEvent = {
-        id: "a".repeat(64),
-        pubkey: "b".repeat(64),
-        created_at: 0,
-        kind: 1,
-        tags: [],
-        content:
-          "I love this amazing wonderful fantastic excellent brilliant masterpiece!",
-        sig: "c".repeat(128),
-      };
-
-      assert.equal(OpenSearchRelay.detectEventSentiment(event), "positive");
-    });
-
-    it("should detect negative sentiment for kind 1 text", () => {
-      const event: NostrEvent = {
-        id: "a".repeat(64),
-        pubkey: "b".repeat(64),
-        created_at: 0,
-        kind: 1,
-        tags: [],
-        content:
-          "This is terrible awful horrible disgusting dreadful painful ugly catastrophe",
-        sig: "c".repeat(128),
-      };
-
-      assert.equal(OpenSearchRelay.detectEventSentiment(event), "negative");
-    });
-
-    it("should detect neutral sentiment for kind 1 text", () => {
-      const event: NostrEvent = {
-        id: "a".repeat(64),
-        pubkey: "b".repeat(64),
-        created_at: 0,
-        kind: 1,
-        tags: [],
-        content:
-          "The conference will be held on Tuesday at the convention center downtown",
-        sig: "c".repeat(128),
-      };
-
-      assert.equal(OpenSearchRelay.detectEventSentiment(event), "neutral");
-    });
-
-    it("should return undefined for short content", () => {
-      const event: NostrEvent = {
-        id: "a".repeat(64),
-        pubkey: "b".repeat(64),
-        created_at: 0,
-        kind: 1,
-        tags: [],
-        content: "hi",
-        sig: "c".repeat(128),
-      };
-
-      assert.equal(OpenSearchRelay.detectEventSentiment(event), undefined);
-    });
-
-    it("should return undefined for kind 0 (metadata)", () => {
-      const event: NostrEvent = {
-        id: "a".repeat(64),
-        pubkey: "b".repeat(64),
-        created_at: 0,
-        kind: 0,
-        tags: [],
-        content: JSON.stringify({
-          name: "Happy Person",
-          about:
-            "I love everything and everyone, life is wonderful and amazing!",
-        }),
-        sig: "c".repeat(128),
-      };
-
-      assert.equal(OpenSearchRelay.detectEventSentiment(event), undefined);
-    });
-
-    it("should return undefined for unsupported kinds", () => {
-      const event: NostrEvent = {
-        id: "a".repeat(64),
-        pubkey: "b".repeat(64),
-        created_at: 0,
-        kind: 3, // Contacts - not a text kind or kind 7
-        tags: [],
-        content:
-          "This is a long enough string with wonderful amazing positive words",
-        sig: "c".repeat(128),
-      };
-
-      assert.equal(OpenSearchRelay.detectEventSentiment(event), undefined);
     });
   });
 
@@ -2335,7 +2013,7 @@ describe("OpenSearchRelay", () => {
       };
     };
 
-    it("should store detected sentiment on indexed documents", async () => {
+    it("should store sentiment on indexed documents when passed via analysis", async () => {
       const { client, documents } = createSentimentMockClient();
       const relay = new OpenSearchRelay(client as unknown as Client, {
         indexName: "test-index",
@@ -2356,7 +2034,7 @@ describe("OpenSearchRelay", () => {
         sk,
       );
 
-      await relay.event(event);
+      await relay.event(event, { analysis: { sentiment: "positive" } });
 
       const doc = Array.from(documents.values())[0] as {
         sentiment?: string;
@@ -2398,8 +2076,8 @@ describe("OpenSearchRelay", () => {
         sk,
       );
 
-      await relay.event(positiveEvent);
-      await relay.event(negativeEvent);
+      await relay.event(positiveEvent, { analysis: { sentiment: "positive" } });
+      await relay.event(negativeEvent, { analysis: { sentiment: "negative" } });
 
       // Filter by positive
       const positiveResults = await relay.query([
@@ -2436,7 +2114,7 @@ describe("OpenSearchRelay", () => {
         sk,
       );
 
-      await relay.event(likeEvent);
+      await relay.event(likeEvent, { analysis: { sentiment: "positive" } });
 
       const doc = Array.from(documents.values())[0] as {
         sentiment?: string;

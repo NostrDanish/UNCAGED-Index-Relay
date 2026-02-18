@@ -6,16 +6,11 @@ import type {
   NostrRelayEVENT,
   NRelay,
 } from "@nostrify/nostrify";
-import { NIP50, NKinds, NSchema as n } from "@nostrify/nostrify";
+import { NIP50, NKinds } from "@nostrify/nostrify";
 import type { Client, ClientOptions } from "@opensearch-project/opensearch";
 import { Client as OpenSearchClient } from "@opensearch-project/opensearch";
 import { naddrEncode, noteEncode } from "nostr-tools/nip19";
-import Sentiment from "sentiment";
-import { detect as detectLanguage } from "tinyld";
 import type { Config } from "./config.ts";
-
-/** Module-level sentiment analyzer instance (stateless, cheap to reuse). */
-const sentimentAnalyzer = new Sentiment();
 
 /**
  * OpenSearch document structure for Nostr events
@@ -180,109 +175,15 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     return Math.round(num * msatsPerUnit[multiplier]);
   }
 
-  /** Minimum content length (in characters) required to attempt language detection. */
-  static MIN_LANGUAGE_DETECT_LENGTH = 10;
-
-  /** Event kinds with plaintext content suitable for language detection. */
-  static TEXT_KINDS = new Set([
-    1, // Short Text Note (NIP-10)
-    11, // Thread (NIP-7D)
-    30023, // Long-form Content (NIP-23)
-    1111, // Comment (NIP-22)
-    9, // Chat Message (NIP-C7)
-    42, // Channel Message (NIP-28)
-    1311, // Live Chat Message (NIP-53)
-  ]);
-
   /**
-   * Detect the language of a Nostr event's content using `tinyld`.
-   *
-   * Only runs for kinds with meaningful text content. Kind 0 (metadata)
-   * is handled specially by parsing the JSON and joining the `name`,
-   * `display_name`, and `about` fields.
-   *
-   * Returns an ISO 639-1 two-letter code, or `undefined` when the language
-   * cannot be determined.
+   * Convert NostrEvent to OpenSearch document.
+   * When `analysis` is provided (from the worker pool), those pre-computed
+   * values are used directly instead of detecting on the main thread.
    */
-  static detectEventLanguage(event: NostrEvent): string | undefined {
-    let text: string;
-
-    if (event.kind === 0) {
-      // Parse JSON metadata and join relevant text fields.
-      const result = n.json().pipe(n.metadata()).safeParse(event.content);
-      if (!result.success) return undefined;
-      text = [result.data.name, result.data.display_name, result.data.about]
-        .filter(Boolean)
-        .join(" ");
-    } else if (OpenSearchRelay.TEXT_KINDS.has(event.kind)) {
-      text = event.content;
-    } else {
-      return undefined;
-    }
-
-    if (text.length < OpenSearchRelay.MIN_LANGUAGE_DETECT_LENGTH) {
-      return undefined;
-    }
-
-    const detected = detectLanguage(text);
-    return detected || undefined; // tinyld returns "" when unsure
-  }
-
-  /** Minimum absolute `comparative` score to classify as positive or negative. */
-  static SENTIMENT_THRESHOLD = 0.1;
-
-  /** NIP-30 custom emoji shortcodes like `:soapbox:`. */
-  private static CUSTOM_EMOJI_RE = /^:[\w-]+:$/;
-
-  /**
-   * Detect the sentiment of a Nostr event's content.
-   *
-   * Runs for kinds with meaningful text content (same as language detection,
-   * but excluding kind 0). Kind 7 (reactions) is handled specially per NIP-25:
-   * `"+"` or `""` maps to `"positive"`, `"-"` maps to `"negative"`, and emoji
-   * reactions are passed through the sentiment analyzer.
-   *
-   * Returns `"positive"`, `"negative"`, `"neutral"`, or `undefined` when
-   * sentiment cannot be determined.
-   */
-  static detectEventSentiment(event: NostrEvent): string | undefined {
-    // Kind 7 reactions get special handling (NIP-25).
-    if (event.kind === 7) {
-      const content = event.content;
-      // "+" or empty string = like / upvote
-      if (content === "+" || content === "") return "positive";
-      // "-" = dislike / downvote
-      if (content === "-") return "negative";
-      // Custom emoji shortcodes have no intrinsic sentiment.
-      if (OpenSearchRelay.CUSTOM_EMOJI_RE.test(content)) return undefined;
-      // Emoji reactions — let the sentiment library score them.
-      const result = sentimentAnalyzer.analyze(content);
-      if (result.comparative > OpenSearchRelay.SENTIMENT_THRESHOLD)
-        return "positive";
-      if (result.comparative < -OpenSearchRelay.SENTIMENT_THRESHOLD)
-        return "negative";
-      return "neutral";
-    }
-
-    // For text kinds, analyze full content.
-    if (!OpenSearchRelay.TEXT_KINDS.has(event.kind)) return undefined;
-
-    if (event.content.length < OpenSearchRelay.MIN_LANGUAGE_DETECT_LENGTH) {
-      return undefined;
-    }
-
-    const result = sentimentAnalyzer.analyze(event.content);
-    if (result.comparative > OpenSearchRelay.SENTIMENT_THRESHOLD)
-      return "positive";
-    if (result.comparative < -OpenSearchRelay.SENTIMENT_THRESHOLD)
-      return "negative";
-    return "neutral";
-  }
-
-  /**
-   * Convert NostrEvent to OpenSearch document
-   */
-  private eventToDocument(event: NostrEvent): NostrEventDocument {
+  private eventToDocument(
+    event: NostrEvent,
+    analysis?: { language?: string; sentiment?: string },
+  ): NostrEventDocument {
     const tagsMap = this.buildTagsMap(event.tags);
 
     // Extract protocol from proxy tag (NIP-48)
@@ -301,11 +202,8 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
       }
     }
 
-    // Detect language from content (NIP-50 language: extension)
-    const language = OpenSearchRelay.detectEventLanguage(event);
-
-    // Detect sentiment from content (NIP-50 sentiment: extension)
-    const sentiment = OpenSearchRelay.detectEventSentiment(event);
+    const language = analysis?.language;
+    const sentiment = analysis?.sentiment;
 
     return {
       ...event,
@@ -1007,12 +905,19 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
   /**
    * Enqueue an event for bulk indexing.
    * The returned promise resolves once the event has been flushed to OpenSearch.
+   *
+   * When `opts.analysis` is provided (pre-computed by the analyze worker pool),
+   * language and sentiment values are used directly instead of being detected
+   * on the main thread.
    */
   async event(
     event: NostrEvent,
-    _opts?: { signal?: AbortSignal },
+    opts?: {
+      signal?: AbortSignal;
+      analysis?: { language?: string; sentiment?: string };
+    },
   ): Promise<void> {
-    const doc = this.eventToDocument(event);
+    const doc = this.eventToDocument(event, opts?.analysis);
     const docId = this.getDocumentId(event);
 
     return new Promise<void>((resolve, reject) => {

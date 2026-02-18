@@ -18,7 +18,20 @@ import type { ClientOptions } from "@opensearch-project/opensearch";
 import { Client as OpenSearchClient } from "@opensearch-project/opensearch";
 import { detect as detectLanguage } from "tinyld";
 import { Config } from "../src/config.ts";
-import { OpenSearchRelay } from "../src/opensearch.ts";
+
+/** Minimum content length (in characters) required to attempt language detection. */
+const MIN_LANGUAGE_DETECT_LENGTH = 10;
+
+/** Event kinds with plaintext content suitable for language detection. */
+const TEXT_KINDS = new Set([
+  1, // Short Text Note (NIP-10)
+  11, // Thread (NIP-7D)
+  30023, // Long-form Content (NIP-23)
+  1111, // Comment (NIP-22)
+  9, // Chat Message (NIP-C7)
+  42, // Channel Message (NIP-28)
+  1311, // Live Chat Message (NIP-53)
+]);
 
 /** Detect language from a document's kind and content. */
 function detectDocLanguage(kind: number, content: string): string | undefined {
@@ -30,13 +43,13 @@ function detectDocLanguage(kind: number, content: string): string | undefined {
     text = [result.data.name, result.data.display_name, result.data.about]
       .filter(Boolean)
       .join(" ");
-  } else if (OpenSearchRelay.TEXT_KINDS.has(kind)) {
+  } else if (TEXT_KINDS.has(kind)) {
     text = content;
   } else {
     return undefined;
   }
 
-  if (text.length < OpenSearchRelay.MIN_LANGUAGE_DETECT_LENGTH) {
+  if (text.length < MIN_LANGUAGE_DETECT_LENGTH) {
     return undefined;
   }
 
@@ -87,7 +100,7 @@ async function main() {
     }
 
     // Only query kinds that are eligible for language detection.
-    const eligibleKinds = [0, ...OpenSearchRelay.TEXT_KINDS];
+    const eligibleKinds = [0, ...TEXT_KINDS];
 
     // Count documents missing the language field
     const countResponse = await client.count({

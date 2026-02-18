@@ -1,15 +1,14 @@
 import { strict as assert } from "node:assert";
 import { Buffer } from "node:buffer";
 import { afterEach, beforeEach, describe, it } from "node:test";
-import type { NRelay } from "@nostrify/nostrify";
 import type { ServerWebSocket } from "bun";
 import type { Filter, NostrEvent } from "nostr-tools";
 import { finalizeEvent, generateSecretKey } from "nostr-tools";
-import { Relay, type WebSocketData } from "./relay.ts";
+import { type AnalyzableRelay, Relay, type WebSocketData } from "./relay.ts";
 
 describe("Relay", () => {
   let relay: Relay;
-  let mockStorage: NRelay;
+  let mockStorage: AnalyzableRelay;
   let mockWs: ServerWebSocket<WebSocketData>;
   let sentMessages: unknown[][];
   let consoleErrorSpy: typeof console.error;
@@ -29,7 +28,7 @@ describe("Relay", () => {
       event: async (_event: NostrEvent) => {},
       query: async (_filters: Filter[]) => [],
       remove: async (_filters: Filter[]) => {},
-    } as unknown as NRelay;
+    } as unknown as AnalyzableRelay;
 
     // Create mock WebSocket
     mockWs = {

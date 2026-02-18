@@ -21,9 +21,9 @@
 │   ├── opensearch.test.ts # OpenSearch tests
 │   ├── config.ts         # Configuration management
 │   ├── config.test.ts    # Configuration tests
-│   ├── verify-pool.ts    # Worker pool for signature verification
-│   ├── verify-pool.test.ts # Verification pool tests
-│   └── verify-worker.ts  # Worker thread for signature verification
+│   ├── analyze-pool.ts    # Worker pool for event analysis (verify, language, sentiment)
+│   ├── analyze-pool.test.ts # Analysis pool tests
+│   └── analyze-worker.ts  # Worker thread for event analysis
 ├── scripts/
 │   ├── backfill-protocol.ts      # Backfill protocol field for NIP-48 events
 │   ├── delete-ephemeral-events.ts # Delete ephemeral events from storage

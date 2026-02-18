@@ -20,9 +20,25 @@ import type { ClientOptions } from "@opensearch-project/opensearch";
 import { Client as OpenSearchClient } from "@opensearch-project/opensearch";
 import Sentiment from "sentiment";
 import { Config } from "../src/config.ts";
-import { OpenSearchRelay } from "../src/opensearch.ts";
 
 const sentimentAnalyzer = new Sentiment();
+
+/** Minimum content length (in characters) required to attempt detection. */
+const MIN_DETECT_LENGTH = 10;
+
+/** Event kinds with plaintext content suitable for sentiment detection. */
+const TEXT_KINDS = new Set([
+  1, // Short Text Note (NIP-10)
+  11, // Thread (NIP-7D)
+  30023, // Long-form Content (NIP-23)
+  1111, // Comment (NIP-22)
+  9, // Chat Message (NIP-C7)
+  42, // Channel Message (NIP-28)
+  1311, // Live Chat Message (NIP-53)
+]);
+
+/** Minimum absolute `comparative` score to classify as positive or negative. */
+const SENTIMENT_THRESHOLD = 0.1;
 
 /** NIP-30 custom emoji shortcodes like `:soapbox:`. */
 const CUSTOM_EMOJI_RE = /^:[\w-]+:$/;
@@ -35,25 +51,21 @@ function detectDocSentiment(kind: number, content: string): string | undefined {
     if (content === "-") return "negative";
     if (CUSTOM_EMOJI_RE.test(content)) return undefined;
     const result = sentimentAnalyzer.analyze(content);
-    if (result.comparative > OpenSearchRelay.SENTIMENT_THRESHOLD)
-      return "positive";
-    if (result.comparative < -OpenSearchRelay.SENTIMENT_THRESHOLD)
-      return "negative";
+    if (result.comparative > SENTIMENT_THRESHOLD) return "positive";
+    if (result.comparative < -SENTIMENT_THRESHOLD) return "negative";
     return "neutral";
   }
 
   // For text kinds, analyze full content.
-  if (!OpenSearchRelay.TEXT_KINDS.has(kind)) return undefined;
+  if (!TEXT_KINDS.has(kind)) return undefined;
 
-  if (content.length < OpenSearchRelay.MIN_LANGUAGE_DETECT_LENGTH) {
+  if (content.length < MIN_DETECT_LENGTH) {
     return undefined;
   }
 
   const result = sentimentAnalyzer.analyze(content);
-  if (result.comparative > OpenSearchRelay.SENTIMENT_THRESHOLD)
-    return "positive";
-  if (result.comparative < -OpenSearchRelay.SENTIMENT_THRESHOLD)
-    return "negative";
+  if (result.comparative > SENTIMENT_THRESHOLD) return "positive";
+  if (result.comparative < -SENTIMENT_THRESHOLD) return "negative";
   return "neutral";
 }
 
@@ -99,7 +111,7 @@ async function main() {
 
     // Kind 7 (reactions) + text kinds are eligible for sentiment detection.
     // Kind 0 (metadata) is excluded.
-    const eligibleKinds = [7, ...OpenSearchRelay.TEXT_KINDS];
+    const eligibleKinds = [7, ...TEXT_KINDS];
 
     // Count documents missing the sentiment field
     const countResponse = await client.count({
