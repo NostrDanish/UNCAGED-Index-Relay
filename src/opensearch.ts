@@ -339,7 +339,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
    */
   private sortBucketCount(filter: NostrFilter, limit: number): number {
     const base = Math.max(limit * 10, 1000);
-    return this.hasTargetFilters(filter) ? Math.max(base, 10000) : base;
+    return this.hasTargetFilters(filter) ? Math.max(base, 50000) : base;
   }
 
   /**
