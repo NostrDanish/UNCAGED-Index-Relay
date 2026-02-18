@@ -2077,6 +2077,374 @@ describe("OpenSearchRelay", () => {
     });
   });
 
+  describe("detectEventSentiment", () => {
+    it("should return 'positive' for kind 7 with '+' content", () => {
+      const event: NostrEvent = {
+        id: "a".repeat(64),
+        pubkey: "b".repeat(64),
+        created_at: 0,
+        kind: 7,
+        tags: [],
+        content: "+",
+        sig: "c".repeat(128),
+      };
+
+      assert.equal(OpenSearchRelay.detectEventSentiment(event), "positive");
+    });
+
+    it("should return 'positive' for kind 7 with empty content", () => {
+      const event: NostrEvent = {
+        id: "a".repeat(64),
+        pubkey: "b".repeat(64),
+        created_at: 0,
+        kind: 7,
+        tags: [],
+        content: "",
+        sig: "c".repeat(128),
+      };
+
+      assert.equal(OpenSearchRelay.detectEventSentiment(event), "positive");
+    });
+
+    it("should return 'negative' for kind 7 with '-' content", () => {
+      const event: NostrEvent = {
+        id: "a".repeat(64),
+        pubkey: "b".repeat(64),
+        created_at: 0,
+        kind: 7,
+        tags: [],
+        content: "-",
+        sig: "c".repeat(128),
+      };
+
+      assert.equal(OpenSearchRelay.detectEventSentiment(event), "negative");
+    });
+
+    it("should analyze emoji reactions for kind 7", () => {
+      const event: NostrEvent = {
+        id: "a".repeat(64),
+        pubkey: "b".repeat(64),
+        created_at: 0,
+        kind: 7,
+        tags: [],
+        content: "❤️",
+        sig: "c".repeat(128),
+      };
+
+      // Emoji reactions are passed through the sentiment library; the result
+      // should be one of the three valid sentiment values or undefined.
+      const result = OpenSearchRelay.detectEventSentiment(event);
+      assert.ok(
+        result === "positive" || result === "negative" || result === "neutral",
+        `expected a valid sentiment value, got: ${result}`,
+      );
+    });
+
+    it("should return undefined for kind 7 with custom emoji shortcode", () => {
+      const event: NostrEvent = {
+        id: "a".repeat(64),
+        pubkey: "b".repeat(64),
+        created_at: 0,
+        kind: 7,
+        tags: [["emoji", "soapbox", "https://example.com/soapbox.png"]],
+        content: ":soapbox:",
+        sig: "c".repeat(128),
+      };
+
+      assert.equal(OpenSearchRelay.detectEventSentiment(event), undefined);
+    });
+
+    it("should detect positive sentiment for kind 1 text", () => {
+      const event: NostrEvent = {
+        id: "a".repeat(64),
+        pubkey: "b".repeat(64),
+        created_at: 0,
+        kind: 1,
+        tags: [],
+        content:
+          "I love this amazing wonderful fantastic excellent brilliant masterpiece!",
+        sig: "c".repeat(128),
+      };
+
+      assert.equal(OpenSearchRelay.detectEventSentiment(event), "positive");
+    });
+
+    it("should detect negative sentiment for kind 1 text", () => {
+      const event: NostrEvent = {
+        id: "a".repeat(64),
+        pubkey: "b".repeat(64),
+        created_at: 0,
+        kind: 1,
+        tags: [],
+        content:
+          "This is terrible awful horrible disgusting dreadful painful ugly catastrophe",
+        sig: "c".repeat(128),
+      };
+
+      assert.equal(OpenSearchRelay.detectEventSentiment(event), "negative");
+    });
+
+    it("should detect neutral sentiment for kind 1 text", () => {
+      const event: NostrEvent = {
+        id: "a".repeat(64),
+        pubkey: "b".repeat(64),
+        created_at: 0,
+        kind: 1,
+        tags: [],
+        content:
+          "The conference will be held on Tuesday at the convention center downtown",
+        sig: "c".repeat(128),
+      };
+
+      assert.equal(OpenSearchRelay.detectEventSentiment(event), "neutral");
+    });
+
+    it("should return undefined for short content", () => {
+      const event: NostrEvent = {
+        id: "a".repeat(64),
+        pubkey: "b".repeat(64),
+        created_at: 0,
+        kind: 1,
+        tags: [],
+        content: "hi",
+        sig: "c".repeat(128),
+      };
+
+      assert.equal(OpenSearchRelay.detectEventSentiment(event), undefined);
+    });
+
+    it("should return undefined for kind 0 (metadata)", () => {
+      const event: NostrEvent = {
+        id: "a".repeat(64),
+        pubkey: "b".repeat(64),
+        created_at: 0,
+        kind: 0,
+        tags: [],
+        content: JSON.stringify({
+          name: "Happy Person",
+          about:
+            "I love everything and everyone, life is wonderful and amazing!",
+        }),
+        sig: "c".repeat(128),
+      };
+
+      assert.equal(OpenSearchRelay.detectEventSentiment(event), undefined);
+    });
+
+    it("should return undefined for unsupported kinds", () => {
+      const event: NostrEvent = {
+        id: "a".repeat(64),
+        pubkey: "b".repeat(64),
+        created_at: 0,
+        kind: 3, // Contacts - not a text kind or kind 7
+        tags: [],
+        content:
+          "This is a long enough string with wonderful amazing positive words",
+        sig: "c".repeat(128),
+      };
+
+      assert.equal(OpenSearchRelay.detectEventSentiment(event), undefined);
+    });
+  });
+
+  describe("NIP-50 sentiment filter", () => {
+    // Mock client with sentiment field support
+    const createSentimentMockClient = () => {
+      const documents = new Map<string, unknown>();
+
+      return {
+        documents,
+        client: {
+          search: async ({ body }: { body: Record<string, unknown> }) => {
+            const results: unknown[] = [];
+            const queryMust = (
+              (body.query as Record<string, unknown>)?.bool as Record<
+                string,
+                unknown
+              >
+            )?.must as Array<Record<string, unknown>> | undefined;
+
+            // Extract sentiment filter if present
+            let sentimentFilter: string | undefined;
+            for (const clause of queryMust || []) {
+              if ((clause.term as Record<string, unknown>)?.sentiment) {
+                sentimentFilter = (clause.term as Record<string, unknown>)
+                  .sentiment as string;
+              }
+            }
+
+            for (const [_id, doc] of documents.entries()) {
+              const docTyped = doc as NostrEvent & {
+                deleted?: boolean;
+                sentiment?: string;
+              };
+
+              if (docTyped.deleted) continue;
+              if (sentimentFilter && docTyped.sentiment !== sentimentFilter)
+                continue;
+
+              results.push({ _source: doc });
+            }
+
+            return {
+              body: {
+                hits: { hits: results },
+              },
+            };
+          },
+          bulk: async ({ body }: { body: unknown[] }) => {
+            const items: Array<Record<string, unknown>> = [];
+            for (let i = 0; i < body.length; i += 2) {
+              const action = body[i] as {
+                index?: { _id: string };
+                update?: { _id: string };
+              };
+              const payload = body[i + 1] as Record<string, unknown>;
+
+              if (action.index) {
+                documents.set(action.index._id, payload);
+                items.push({ index: {} });
+              } else if (action.update) {
+                if (payload.upsert) {
+                  if (!documents.has(action.update._id)) {
+                    documents.set(action.update._id, payload.upsert);
+                  }
+                }
+                items.push({ update: {} });
+              }
+            }
+            return {
+              body: {
+                errors: false,
+                items,
+              },
+            };
+          },
+          count: async () => {
+            const nonDeleted = Array.from(documents.values()).filter(
+              (doc) => !(doc as { deleted?: boolean }).deleted,
+            );
+            return { body: { count: nonDeleted.length } };
+          },
+          indices: {
+            exists: async () => ({ body: true }),
+            create: async () => ({ body: {} }),
+          },
+          close: async () => {},
+        },
+      };
+    };
+
+    it("should store detected sentiment on indexed documents", async () => {
+      const { client, documents } = createSentimentMockClient();
+      const relay = new OpenSearchRelay(client as unknown as Client, {
+        indexName: "test-index",
+        bulkMaxSize: 1,
+      });
+
+      const sk = generateSecretKey();
+      const now = Math.floor(Date.now() / 1000);
+
+      const event = finalizeEvent(
+        {
+          kind: 1,
+          created_at: now,
+          tags: [],
+          content:
+            "I love this amazing wonderful fantastic excellent brilliant masterpiece!",
+        },
+        sk,
+      );
+
+      await relay.event(event);
+
+      const doc = Array.from(documents.values())[0] as {
+        sentiment?: string;
+      };
+      assert.equal(doc.sentiment, "positive");
+    });
+
+    it("should filter events by sentiment using search extension", async () => {
+      const { client } = createSentimentMockClient();
+      const relay = new OpenSearchRelay(client as unknown as Client, {
+        indexName: "test-index",
+        bulkMaxSize: 1,
+      });
+
+      const sk = generateSecretKey();
+      const now = Math.floor(Date.now() / 1000);
+
+      // Positive event
+      const positiveEvent = finalizeEvent(
+        {
+          kind: 1,
+          created_at: now,
+          tags: [],
+          content:
+            "I love this amazing wonderful fantastic excellent brilliant masterpiece!",
+        },
+        sk,
+      );
+
+      // Negative event
+      const negativeEvent = finalizeEvent(
+        {
+          kind: 1,
+          created_at: now - 10,
+          tags: [],
+          content:
+            "This is terrible awful horrible disgusting dreadful painful ugly catastrophe",
+        },
+        sk,
+      );
+
+      await relay.event(positiveEvent);
+      await relay.event(negativeEvent);
+
+      // Filter by positive
+      const positiveResults = await relay.query([
+        { kinds: [1], search: "sentiment:positive" },
+      ]);
+      assert.equal(positiveResults.length, 1);
+      assert.equal(positiveResults[0].id, positiveEvent.id);
+
+      // Filter by negative
+      const negativeResults = await relay.query([
+        { kinds: [1], search: "sentiment:negative" },
+      ]);
+      assert.equal(negativeResults.length, 1);
+      assert.equal(negativeResults[0].id, negativeEvent.id);
+    });
+
+    it("should store sentiment for kind 7 reactions", async () => {
+      const { client, documents } = createSentimentMockClient();
+      const relay = new OpenSearchRelay(client as unknown as Client, {
+        indexName: "test-index",
+        bulkMaxSize: 1,
+      });
+
+      const sk = generateSecretKey();
+      const now = Math.floor(Date.now() / 1000);
+
+      const likeEvent = finalizeEvent(
+        {
+          kind: 7,
+          created_at: now,
+          tags: [["e", "a".repeat(64)]],
+          content: "+",
+        },
+        sk,
+      );
+
+      await relay.event(likeEvent);
+
+      const doc = Array.from(documents.values())[0] as {
+        sentiment?: string;
+      };
+      assert.equal(doc.sentiment, "positive");
+    });
+  });
+
   describe("migrate", () => {
     it("should reject documents with unknown fields (dynamic: strict)", async () => {
       const KNOWN_FIELDS = new Set([
@@ -2092,6 +2460,7 @@ describe("OpenSearchRelay", () => {
         "protocol",
         "amount_msats",
         "language",
+        "sentiment",
       ]);
 
       const mockClient = {

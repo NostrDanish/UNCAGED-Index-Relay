@@ -10,8 +10,12 @@ import { NIP50, NKinds, NSchema as n } from "@nostrify/nostrify";
 import type { Client, ClientOptions } from "@opensearch-project/opensearch";
 import { Client as OpenSearchClient } from "@opensearch-project/opensearch";
 import { naddrEncode, noteEncode } from "nostr-tools/nip19";
+import Sentiment from "sentiment";
 import { detect as detectLanguage } from "tinyld";
 import type { Config } from "./config.ts";
+
+/** Module-level sentiment analyzer instance (stateless, cheap to reuse). */
+const sentimentAnalyzer = new Sentiment();
 
 /**
  * OpenSearch document structure for Nostr events
@@ -22,6 +26,7 @@ interface NostrEventDocument extends NostrEvent {
   protocol?: string;
   amount_msats?: number;
   language?: string;
+  sentiment?: string;
 }
 
 /** Pending bulk operation for an event. */
@@ -223,6 +228,57 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     return detected || undefined; // tinyld returns "" when unsure
   }
 
+  /** Minimum absolute `comparative` score to classify as positive or negative. */
+  static SENTIMENT_THRESHOLD = 0.1;
+
+  /** NIP-30 custom emoji shortcodes like `:soapbox:`. */
+  private static CUSTOM_EMOJI_RE = /^:[\w-]+:$/;
+
+  /**
+   * Detect the sentiment of a Nostr event's content.
+   *
+   * Runs for kinds with meaningful text content (same as language detection,
+   * but excluding kind 0). Kind 7 (reactions) is handled specially per NIP-25:
+   * `"+"` or `""` maps to `"positive"`, `"-"` maps to `"negative"`, and emoji
+   * reactions are passed through the sentiment analyzer.
+   *
+   * Returns `"positive"`, `"negative"`, `"neutral"`, or `undefined` when
+   * sentiment cannot be determined.
+   */
+  static detectEventSentiment(event: NostrEvent): string | undefined {
+    // Kind 7 reactions get special handling (NIP-25).
+    if (event.kind === 7) {
+      const content = event.content;
+      // "+" or empty string = like / upvote
+      if (content === "+" || content === "") return "positive";
+      // "-" = dislike / downvote
+      if (content === "-") return "negative";
+      // Custom emoji shortcodes have no intrinsic sentiment.
+      if (OpenSearchRelay.CUSTOM_EMOJI_RE.test(content)) return undefined;
+      // Emoji reactions — let the sentiment library score them.
+      const result = sentimentAnalyzer.analyze(content);
+      if (result.comparative > OpenSearchRelay.SENTIMENT_THRESHOLD)
+        return "positive";
+      if (result.comparative < -OpenSearchRelay.SENTIMENT_THRESHOLD)
+        return "negative";
+      return "neutral";
+    }
+
+    // For text kinds, analyze full content.
+    if (!OpenSearchRelay.TEXT_KINDS.has(event.kind)) return undefined;
+
+    if (event.content.length < OpenSearchRelay.MIN_LANGUAGE_DETECT_LENGTH) {
+      return undefined;
+    }
+
+    const result = sentimentAnalyzer.analyze(event.content);
+    if (result.comparative > OpenSearchRelay.SENTIMENT_THRESHOLD)
+      return "positive";
+    if (result.comparative < -OpenSearchRelay.SENTIMENT_THRESHOLD)
+      return "negative";
+    return "neutral";
+  }
+
   /**
    * Convert NostrEvent to OpenSearch document
    */
@@ -248,6 +304,9 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     // Detect language from content (NIP-50 language: extension)
     const language = OpenSearchRelay.detectEventLanguage(event);
 
+    // Detect sentiment from content (NIP-50 sentiment: extension)
+    const sentiment = OpenSearchRelay.detectEventSentiment(event);
+
     return {
       ...event,
       tags_map: tagsMap,
@@ -255,6 +314,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
       ...(protocol && { protocol }),
       ...(amount_msats !== undefined && { amount_msats }),
       ...(language && { language }),
+      ...(sentiment && { sentiment }),
     };
   }
 
@@ -860,6 +920,16 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
           term: { language: languageToken.value },
         });
       }
+
+      // Handle sentiment: extension (NIP-50)
+      const sentimentToken = tokens.find(
+        (t) => typeof t === "object" && t.key === "sentiment",
+      );
+      if (sentimentToken && typeof sentimentToken === "object") {
+        must.push({
+          term: { sentiment: sentimentToken.value },
+        });
+      }
     }
 
     return { bool: { must } };
@@ -1310,6 +1380,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
               protocol: { type: "keyword" },
               amount_msats: { type: "long" },
               language: { type: "keyword" },
+              sentiment: { type: "keyword" },
             },
           },
         },
