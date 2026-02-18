@@ -241,12 +241,14 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
 
     try {
       // Step 1: Aggregate referencing events to find top-referenced event IDs.
-      // Request a large bucket count since many may be filtered out by the
-      // original filter constraints (kinds, authors, etc.).
+      // Use a bucket count proportional to the limit — many top-referenced
+      // events may be filtered out by the query constraints (kinds, authors,
+      // time windows, etc.), so we fetch extra candidates.
+      const bucketCount = Math.max(limit * 10, 1000);
       const topEventIds =
         sortMode === "zaps"
-          ? await this.aggregateTopZapped()
-          : await this.aggregateTopReferenced();
+          ? await this.aggregateTopZapped(bucketCount)
+          : await this.aggregateTopReferenced(bucketCount);
 
       if (topEventIds.length === 0) {
         return [];
@@ -344,11 +346,11 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
    * count descending.
    *
    * This query is intentionally lightweight (no sub-aggregations) because it
-   * scans the entire index with a large bucket count. Detailed scoring data
-   * is fetched separately via {@link scoreEvents}, scoped to only the event
-   * IDs that survive the filter constraints.
+   * scans the entire index. Detailed scoring data is fetched separately via
+   * {@link scoreEvents}, scoped to only the event IDs that survive the
+   * filter constraints.
    */
-  private async aggregateTopReferenced(): Promise<string[]> {
+  private async aggregateTopReferenced(bucketCount: number): Promise<string[]> {
     const response = await this.client.search({
       index: this.indexName,
       body: {
@@ -362,7 +364,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
           by_event: {
             terms: {
               field: "tags_map.e",
-              size: 10000,
+              size: bucketCount,
               order: { _count: "desc" as const },
             },
           },
@@ -384,7 +386,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
    * Aggregate zap receipts (kind 9735) to find the most-zapped event IDs.
    * Returns event IDs ordered by total sats descending.
    */
-  private async aggregateTopZapped(): Promise<string[]> {
+  private async aggregateTopZapped(bucketCount: number): Promise<string[]> {
     const response = await this.client.search({
       index: this.indexName,
       body: {
@@ -398,7 +400,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
           by_event: {
             terms: {
               field: "tags_map.e",
-              size: 10000,
+              size: bucketCount,
             },
             aggs: {
               total_sats: {
