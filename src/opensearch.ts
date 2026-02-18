@@ -226,7 +226,12 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
    * Instead of fetching candidate events and then counting their references,
    * this starts from the referencing events (reactions, replies, reposts, zaps)
    * and aggregates by target event ID. The top buckets *are* the winners.
-   * Then we fetch those target events and apply scoring + filter constraints.
+   * Then we fetch those target events and apply the original filter constraints.
+   *
+   * The aggregation requests a large number of buckets (10,000) because many
+   * top-referenced events may be filtered out by the query constraints (kinds,
+   * authors, time windows, etc.). Aggregation buckets are cheap — just event
+   * ID strings and counts.
    */
   private async querySortedEvents(
     filter: NostrFilter,
@@ -236,11 +241,13 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     const now = Math.floor(Date.now() / 1000);
 
     try {
-      // Step 1: Aggregate referencing events to find top-referenced event IDs
+      // Step 1: Aggregate referencing events to find top-referenced event IDs.
+      // Request a large bucket count since many may be filtered out by the
+      // original filter constraints (kinds, authors, etc.).
       const topEventIds =
         sortMode === "zaps"
-          ? await this.aggregateTopZapped(limit)
-          : await this.aggregateTopReferenced(sortMode, limit, now);
+          ? await this.aggregateTopZapped()
+          : await this.aggregateTopReferenced(sortMode);
 
       if (topEventIds.length === 0) {
         return [];
@@ -267,7 +274,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
         index: this.indexName,
         body: {
           query,
-          size: topEventIds.length,
+          size: Math.min(topEventIds.length, 5000),
         },
       });
 
@@ -280,11 +287,17 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
         }
       }
 
-      // Step 3: Score and sort the fetched events
+      if (eventsById.size === 0) {
+        return [];
+      }
+
+      // Step 3: Score and sort the fetched events.
+      // Only pass event IDs that survived the filter to the scoring step.
+      const matchedIds = [...eventsById.keys()];
       let scoredEvents =
         sortMode === "zaps"
-          ? await this.scoreEventsByZaps(topEventIds, eventsById)
-          : await this.scoreEvents(topEventIds, sortMode, now, eventsById);
+          ? await this.scoreEventsByZaps(matchedIds, eventsById)
+          : await this.scoreEvents(matchedIds, sortMode, now, eventsById);
 
       // Apply distinct:author — keep only the highest-scored event per pubkey
       if (this.hasDistinctAuthor(filter)) {
@@ -333,8 +346,6 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
    */
   private async aggregateTopReferenced(
     sortMode: "top" | "hot" | "controversial" | "rising",
-    limit: number,
-    _now: number,
   ): Promise<string[]> {
     const referencesQuery = {
       bool: {
@@ -358,7 +369,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
           by_event: {
             terms: {
               field: "tags_map.e",
-              size: limit * 5, // Fetch extra since some may be filtered out
+              size: 10000, // Large bucket count — many may be filtered out by query constraints
               order: { _count: "desc" as const },
             },
           },
@@ -380,7 +391,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
    * Aggregate zap receipts (kind 9735) to find the most-zapped event IDs.
    * Returns event IDs ordered by total sats descending.
    */
-  private async aggregateTopZapped(limit: number): Promise<string[]> {
+  private async aggregateTopZapped(): Promise<string[]> {
     const response = await this.client.search({
       index: this.indexName,
       body: {
@@ -394,7 +405,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
           by_event: {
             terms: {
               field: "tags_map.e",
-              size: limit * 5,
+              size: 10000,
             },
             aggs: {
               total_sats: {
