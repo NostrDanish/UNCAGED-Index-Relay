@@ -12,8 +12,13 @@ scalability and full-text search capabilities.
   replaceable events
 - **NIP-09 Support**: Event deletion with proper authorization
 - **NIP-11 Support**: Relay information document
-- **NIP-50 Full-Text Search**: Search event content using OpenSearch's powerful
-  text analysis
+- **NIP-42 Support**: Client authentication
+- **NIP-45 Support**: Event counting (COUNT)
+- **NIP-50 Full-Text Search**: Search event content with extensions for
+  language, sentiment, media, protocol, sort, and distinct filtering
+- **NIP-70 Support**: Protected events
+- **Off-Thread Analysis**: Worker pool for signature verification, language
+  detection, sentiment analysis, and media detection
 - **Bun Runtime**: Fast WebSocket handling with Bun's native WebSocket support
 - **Portable Code**: Core logic uses Node.js builtins for maximum compatibility
 - **Efficient Tag Indexing**: All tags are indexed for fast queries while
@@ -28,9 +33,13 @@ Events are stored in OpenSearch with the following enhancements:
 
 - **tags_map**: A map of tag names to arrays of values for efficient querying
 - **Original tags**: Preserved as-is for proper event reconstruction
-- **d_tag**: Extracted and indexed separately for parameterized replaceable
-  events
 - **deleted**: Boolean flag for soft-deletion (NIP-09)
+- **protocol**: Extracted from proxy tags (NIP-48)
+- **language**: Detected language (ISO 639-1)
+- **sentiment**: Detected sentiment (positive/negative/neutral)
+- **media**: Whether the event has media attachments (images, video, audio)
+- **video**: Whether all media attachments are video
+- **amount_msats**: Zap amount in millisatoshis (kind 9735)
 
 ### Replaceable Events (NIP-01)
 
@@ -59,6 +68,27 @@ Use the `search` filter parameter to perform full-text search on event content:
 ```json
 {
   "search": "bitcoin lightning"
+}
+```
+
+#### Search Extensions
+
+The following NIP-50 search extensions are supported:
+
+- `language:<code>` — Filter by detected language (ISO 639-1), e.g. `language:en`
+- `sentiment:<value>` — Filter by sentiment: `positive`, `negative`, `neutral`
+- `media:true` / `media:false` — Filter by presence of media attachments
+- `video:true` / `video:false` — Filter by whether all attachments are video
+- `protocol:<value>` — Filter by protocol (NIP-48), e.g. `protocol:activitypub`
+- `sort:<mode>` — Sort results: `top`, `hot`, `controversial`, `rising`, `zaps`
+- `distinct:author` — Return at most one event per author
+
+Extensions can be combined with each other and with free-text search:
+
+```json
+{
+  "kinds": [1],
+  "search": "bitcoin media:true language:en"
 }
 ```
 
@@ -111,6 +141,8 @@ This relay implements NIP-01 (Basic protocol flow) via WebSocket at `/`.
 - `["EVENT", <event>]` - Submit an event for storage
 - `["REQ", <subscription_id>, <filter>, ...]` - Request events and subscribe
 - `["CLOSE", <subscription_id>]` - Close a subscription
+- `["COUNT", <subscription_id>, <filter>, ...]` - Count matching events (NIP-45)
+- `["AUTH", <event>]` - Authenticate with the relay (NIP-42)
 
 ### Relay-to-Client Messages
 
@@ -119,6 +151,8 @@ This relay implements NIP-01 (Basic protocol flow) via WebSocket at `/`.
 - `["EOSE", <subscription_id>]` - End of stored events
 - `["CLOSED", <subscription_id>, <message>]` - Subscription closed
 - `["NOTICE", <message>]` - Human-readable notice
+- `["COUNT", <subscription_id>, <count>]` - Event count response (NIP-45)
+- `["AUTH", <challenge>]` - Authentication challenge (NIP-42)
 
 ### NIP-11 Relay Information
 
@@ -134,7 +168,7 @@ the relay information document.
 - `until`: Unix timestamp (inclusive)
 - `limit`: Maximum number of events to return (max 5000)
 - `#<tag>`: Tag queries (e.g., `#p`, `#e`, `#t`)
-- `search`: Full-text search on content (NIP-50)
+- `search`: Full-text search on content with extensions (NIP-50)
 
 ## Development
 
@@ -176,7 +210,10 @@ The relay is designed to scale horizontally:
 - [x] NIP-01: Basic protocol flow
 - [x] NIP-09: Event deletion
 - [x] NIP-11: Relay information document
-- [x] NIP-50: Full-text search
+- [x] NIP-42: Authentication of clients to relays
+- [x] NIP-45: Event counting
+- [x] NIP-50: Full-text search (with extensions)
+- [x] NIP-70: Protected events
 
 ## License
 

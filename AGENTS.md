@@ -14,20 +14,31 @@
 ```
 .
 ├── src/
-│   ├── server.ts         # WebSocket relay server (Bun-specific)
-│   ├── relay.ts          # Relay implementation (event handling, subscriptions)
-│   ├── relay.test.ts     # Relay tests
-│   ├── opensearch.ts     # OpenSearch backend (storage, querying, NIP-50)
-│   ├── opensearch.test.ts # OpenSearch tests
-│   ├── config.ts         # Configuration management
-│   ├── config.test.ts    # Configuration tests
-│   ├── analyze-pool.ts    # Worker pool for event analysis (verify, language, sentiment)
+│   ├── server.ts           # WebSocket relay server (Bun-specific)
+│   ├── relay.ts            # Relay implementation (event handling, subscriptions)
+│   ├── relay.test.ts       # Relay tests
+│   ├── opensearch.ts       # OpenSearch backend (storage, querying, NIP-50)
+│   ├── opensearch.test.ts  # OpenSearch tests
+│   ├── config.ts           # Configuration management
+│   ├── config.test.ts      # Configuration tests
+│   ├── analyze-pool.ts     # Worker pool for event analysis (verify, language, sentiment, media)
 │   ├── analyze-pool.test.ts # Analysis pool tests
-│   └── analyze-worker.ts  # Worker thread for event analysis
+│   ├── analyze-worker.ts   # Worker thread for event analysis
+│   ├── media.ts            # Media/video detection from imeta tags and URLs
+│   ├── trends.ts           # Trending tag computation and publishing
+│   └── trends.test.ts      # Trends tests
 ├── scripts/
-│   ├── backfill-protocol.ts      # Backfill protocol field for NIP-48 events
+│   ├── backfill-language.ts       # Backfill language field for existing events
+│   ├── backfill-media.ts          # Backfill media/video fields for existing events
+│   ├── backfill-protocol.ts       # Backfill protocol field for NIP-48 events
+│   ├── backfill-sentiment.ts      # Backfill sentiment field for existing events
+│   ├── backfill-zap-amounts.ts    # Backfill zap amount fields for kind 9735
 │   ├── delete-ephemeral-events.ts # Delete ephemeral events from storage
-│   └── reindex-tags-map.ts       # Reindex tags_map for existing documents
+│   ├── delete-incomplete-events.ts # Delete events with missing fields
+│   ├── export.ts                  # Export events from the index
+│   ├── reindex-tags-map.ts        # Reindex tags_map for existing documents
+│   ├── reindex-to-clean-index.ts  # Reindex into a fresh index
+│   └── update-trends.ts          # Compute and publish trending tags
 ├── package.json       # Dependencies and scripts
 ├── tsconfig.json      # TypeScript configuration
 ├── biome.json         # Biome linter/formatter configuration
@@ -57,9 +68,7 @@ Edit `.env` to configure the application:
 
 Consider implementing:
 
-- NIP-42: Authentication of clients to relays
 - NIP-40: Expiration timestamp
-- NIP-33: Parameterized replaceable events (already supported)
 
 ### Performance Optimizations
 
