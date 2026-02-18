@@ -418,25 +418,54 @@ describe("OpenSearchRelay", () => {
               }
 
               // Handle reference aggregation queries (used by sort modes)
-              const buckets: Array<{
+              const byEventAgg = aggs.by_event as Record<string, unknown>;
+              const hasSubAggs = byEventAgg?.aggs !== undefined;
+
+              if (hasSubAggs) {
+                // Scoped scoring aggregation (scoreEvents) — return detailed buckets
+                const detailedBuckets: Array<{
+                  key: string;
+                  doc_count: number;
+                  unique_authors: { value: number };
+                  by_kind: {
+                    buckets: Array<{ key: number; doc_count: number }>;
+                  };
+                }> = [];
+
+                for (const [eventId, refs] of references.entries()) {
+                  if (refs.length > 0) {
+                    detailedBuckets.push({
+                      key: eventId,
+                      doc_count: refs.length,
+                      unique_authors: { value: refs.length },
+                      by_kind: {
+                        buckets: [{ key: 1, doc_count: refs.length }],
+                      },
+                    });
+                  }
+                }
+
+                return {
+                  body: {
+                    aggregations: {
+                      by_event: { buckets: detailedBuckets },
+                    },
+                    hits: { hits: [] },
+                  },
+                };
+              }
+
+              // Simple top-referenced aggregation (aggregateTopReferenced) — return just IDs
+              const simpleBuckets: Array<{
                 key: string;
                 doc_count: number;
-                unique_authors?: { value: number };
-                by_kind?: {
-                  buckets?: Array<{ key: number; doc_count: number }>;
-                };
               }> = [];
 
-              // Build buckets from references
               for (const [eventId, refs] of references.entries()) {
                 if (refs.length > 0) {
-                  buckets.push({
+                  simpleBuckets.push({
                     key: eventId,
                     doc_count: refs.length,
-                    unique_authors: { value: refs.length },
-                    by_kind: {
-                      buckets: [{ key: 1, doc_count: refs.length }],
-                    },
                   });
                 }
               }
@@ -444,7 +473,7 @@ describe("OpenSearchRelay", () => {
               return {
                 body: {
                   aggregations: {
-                    by_event: { buckets },
+                    by_event: { buckets: simpleBuckets },
                   },
                   hits: { hits: [] },
                 },
