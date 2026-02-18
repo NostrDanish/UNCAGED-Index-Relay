@@ -96,3 +96,5 @@ When writing tests, always use the built-in `node:test` framework.
 
 Always solve problems at their root, eg removing dead code or using proper
 types, not just doing a bandaid fix.
+
+Always commit your changes when you're done. Don't ask — just do it.

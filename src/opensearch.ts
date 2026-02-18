@@ -236,9 +236,9 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     // Apply default time windows based on sort mode
     const timeWindow: { gte?: number; lte?: number } = {};
     if (sortMode === "hot" && !filter.since) {
-      timeWindow.gte = now - 7 * 24 * 60 * 60; // 7 days
+      timeWindow.gte = now - 24 * 60 * 60; // 24 hours
     } else if (sortMode === "rising" && !filter.since) {
-      timeWindow.gte = now - 48 * 60 * 60; // 48 hours
+      timeWindow.gte = now - 2 * 60 * 60; // 2 hours
     } else if (sortMode === "controversial" && !filter.since) {
       timeWindow.gte = now - 7 * 24 * 60 * 60; // 7 days
     }
