@@ -2123,6 +2123,678 @@ describe("OpenSearchRelay", () => {
     });
   });
 
+  describe("NIP-50 media/video filter", () => {
+    // Mock client with media/video field support
+    const createMediaMockClient = () => {
+      const documents = new Map<string, unknown>();
+
+      return {
+        documents,
+        client: {
+          search: async ({ body }: { body: Record<string, unknown> }) => {
+            const results: unknown[] = [];
+            const queryBool = (body.query as Record<string, unknown>)
+              ?.bool as Record<string, unknown>;
+            const queryMust = queryBool?.must as
+              | Array<Record<string, unknown>>
+              | undefined;
+            const queryMustNot = queryBool?.must_not as
+              | Array<Record<string, unknown>>
+              | undefined;
+
+            // Extract media filter if present
+            let mediaFilter: boolean | undefined;
+            for (const clause of queryMust || []) {
+              if ((clause.term as Record<string, unknown>)?.media === true) {
+                mediaFilter = true;
+              }
+            }
+            for (const clause of queryMustNot || []) {
+              if ((clause.term as Record<string, unknown>)?.media === true) {
+                mediaFilter = false;
+              }
+            }
+
+            // Extract video filter if present
+            let videoFilter: boolean | undefined;
+            for (const clause of queryMust || []) {
+              if ((clause.term as Record<string, unknown>)?.video === true) {
+                videoFilter = true;
+              }
+            }
+            for (const clause of queryMustNot || []) {
+              if ((clause.term as Record<string, unknown>)?.video === true) {
+                videoFilter = false;
+              }
+            }
+
+            for (const [_id, doc] of documents.entries()) {
+              const docTyped = doc as NostrEvent & {
+                deleted?: boolean;
+                media?: boolean;
+                video?: boolean;
+              };
+
+              if (docTyped.deleted) continue;
+
+              // Filter by media
+              if (mediaFilter === true && !docTyped.media) continue;
+              if (mediaFilter === false && docTyped.media === true) continue;
+
+              // Filter by video
+              if (videoFilter === true && !docTyped.video) continue;
+              if (videoFilter === false && docTyped.video === true) continue;
+
+              results.push({ _source: doc });
+            }
+
+            return {
+              body: {
+                hits: { hits: results },
+              },
+            };
+          },
+          bulk: async ({ body }: { body: unknown[] }) => {
+            const items: Array<Record<string, unknown>> = [];
+            for (let i = 0; i < body.length; i += 2) {
+              const action = body[i] as {
+                index?: { _id: string };
+                update?: { _id: string };
+              };
+              const payload = body[i + 1] as Record<string, unknown>;
+
+              if (action.index) {
+                documents.set(action.index._id, payload);
+                items.push({ index: {} });
+              } else if (action.update) {
+                if (payload.upsert) {
+                  if (!documents.has(action.update._id)) {
+                    documents.set(action.update._id, payload.upsert);
+                  }
+                }
+                items.push({ update: {} });
+              }
+            }
+            return {
+              body: {
+                errors: false,
+                items,
+              },
+            };
+          },
+          count: async () => {
+            const nonDeleted = Array.from(documents.values()).filter(
+              (doc) => !(doc as { deleted?: boolean }).deleted,
+            );
+            return { body: { count: nonDeleted.length } };
+          },
+          indices: {
+            exists: async () => ({ body: true }),
+            create: async () => ({ body: {} }),
+          },
+          close: async () => {},
+        },
+      };
+    };
+
+    it("should set media:true for events with imeta tags", async () => {
+      const { client, documents } = createMediaMockClient();
+      const relay = new OpenSearchRelay(client as unknown as Client, {
+        indexName: "test-index",
+        bulkMaxSize: 1,
+      });
+
+      const sk = generateSecretKey();
+      const now = Math.floor(Date.now() / 1000);
+
+      const event = finalizeEvent(
+        {
+          kind: 1,
+          created_at: now,
+          tags: [
+            [
+              "imeta",
+              "url https://example.com/photo.jpg",
+              "m image/jpeg",
+              "dim 1920x1080",
+            ],
+          ],
+          content: "Check out this photo https://example.com/photo.jpg",
+        },
+        sk,
+      );
+
+      await relay.event(event);
+
+      const doc = [...documents.values()][0] as {
+        media?: boolean;
+        video?: boolean;
+      };
+      assert.equal(doc.media, true);
+      assert.equal(doc.video, undefined);
+    });
+
+    it("should set video:true when all imeta attachments are video", async () => {
+      const { client, documents } = createMediaMockClient();
+      const relay = new OpenSearchRelay(client as unknown as Client, {
+        indexName: "test-index",
+        bulkMaxSize: 1,
+      });
+
+      const sk = generateSecretKey();
+      const now = Math.floor(Date.now() / 1000);
+
+      const event = finalizeEvent(
+        {
+          kind: 1,
+          created_at: now,
+          tags: [["imeta", "url https://example.com/clip.mp4", "m video/mp4"]],
+          content: "Watch this https://example.com/clip.mp4",
+        },
+        sk,
+      );
+
+      await relay.event(event);
+
+      const doc = [...documents.values()][0] as {
+        media?: boolean;
+        video?: boolean;
+      };
+      assert.equal(doc.media, true);
+      assert.equal(doc.video, true);
+    });
+
+    it("should not set video:true when imeta has mixed media types", async () => {
+      const { client, documents } = createMediaMockClient();
+      const relay = new OpenSearchRelay(client as unknown as Client, {
+        indexName: "test-index",
+        bulkMaxSize: 1,
+      });
+
+      const sk = generateSecretKey();
+      const now = Math.floor(Date.now() / 1000);
+
+      const event = finalizeEvent(
+        {
+          kind: 1,
+          created_at: now,
+          tags: [
+            ["imeta", "url https://example.com/clip.mp4", "m video/mp4"],
+            ["imeta", "url https://example.com/photo.jpg", "m image/jpeg"],
+          ],
+          content: "Mixed media post",
+        },
+        sk,
+      );
+
+      await relay.event(event);
+
+      const doc = [...documents.values()][0] as {
+        media?: boolean;
+        video?: boolean;
+      };
+      assert.equal(doc.media, true);
+      assert.equal(doc.video, undefined);
+    });
+
+    it("should not set media for events without media", async () => {
+      const { client, documents } = createMediaMockClient();
+      const relay = new OpenSearchRelay(client as unknown as Client, {
+        indexName: "test-index",
+        bulkMaxSize: 1,
+      });
+
+      const sk = generateSecretKey();
+      const now = Math.floor(Date.now() / 1000);
+
+      const event = finalizeEvent(
+        {
+          kind: 1,
+          created_at: now,
+          tags: [],
+          content: "Just a text post, no media here",
+        },
+        sk,
+      );
+
+      await relay.event(event);
+
+      const doc = [...documents.values()][0] as {
+        media?: boolean;
+        video?: boolean;
+      };
+      assert.equal(doc.media, undefined);
+      assert.equal(doc.video, undefined);
+    });
+
+    it("should detect media from URLs in content as fallback for kind 1", async () => {
+      const { client, documents } = createMediaMockClient();
+      const relay = new OpenSearchRelay(client as unknown as Client, {
+        indexName: "test-index",
+        bulkMaxSize: 1,
+      });
+
+      const sk = generateSecretKey();
+      const now = Math.floor(Date.now() / 1000);
+
+      const event = finalizeEvent(
+        {
+          kind: 1,
+          created_at: now,
+          tags: [],
+          content: "Check this out https://example.com/photo.png",
+        },
+        sk,
+      );
+
+      await relay.event(event);
+
+      const doc = [...documents.values()][0] as {
+        media?: boolean;
+        video?: boolean;
+      };
+      assert.equal(doc.media, true);
+    });
+
+    it("should detect video from URLs in content as fallback for kind 1", async () => {
+      const { client, documents } = createMediaMockClient();
+      const relay = new OpenSearchRelay(client as unknown as Client, {
+        indexName: "test-index",
+        bulkMaxSize: 1,
+      });
+
+      const sk = generateSecretKey();
+      const now = Math.floor(Date.now() / 1000);
+
+      const event = finalizeEvent(
+        {
+          kind: 1,
+          created_at: now,
+          tags: [],
+          content: "Watch this https://example.com/clip.mp4",
+        },
+        sk,
+      );
+
+      await relay.event(event);
+
+      const doc = [...documents.values()][0] as {
+        media?: boolean;
+        video?: boolean;
+      };
+      assert.equal(doc.media, true);
+      assert.equal(doc.video, true);
+    });
+
+    it("should filter events by media:true", async () => {
+      const { client } = createMediaMockClient();
+      const relay = new OpenSearchRelay(client as unknown as Client, {
+        indexName: "test-index",
+        bulkMaxSize: 1,
+      });
+
+      const sk = generateSecretKey();
+      const now = Math.floor(Date.now() / 1000);
+
+      // Event with media
+      const mediaEvent = finalizeEvent(
+        {
+          kind: 1,
+          created_at: now,
+          tags: [
+            ["imeta", "url https://example.com/photo.jpg", "m image/jpeg"],
+          ],
+          content: "Photo post https://example.com/photo.jpg",
+        },
+        sk,
+      );
+
+      // Event without media
+      const textEvent = finalizeEvent(
+        {
+          kind: 1,
+          created_at: now + 1,
+          tags: [],
+          content: "Just text",
+        },
+        sk,
+      );
+
+      await relay.event(mediaEvent);
+      await relay.event(textEvent);
+
+      // media:true should return only the media event
+      const mediaResults = await relay.query([
+        { kinds: [1], search: "media:true" },
+      ]);
+      assert.equal(mediaResults.length, 1);
+      assert.equal(mediaResults[0].id, mediaEvent.id);
+    });
+
+    it("should filter events by media:false", async () => {
+      const { client } = createMediaMockClient();
+      const relay = new OpenSearchRelay(client as unknown as Client, {
+        indexName: "test-index",
+        bulkMaxSize: 1,
+      });
+
+      const sk = generateSecretKey();
+      const now = Math.floor(Date.now() / 1000);
+
+      // Event with media
+      const mediaEvent = finalizeEvent(
+        {
+          kind: 1,
+          created_at: now,
+          tags: [
+            ["imeta", "url https://example.com/photo.jpg", "m image/jpeg"],
+          ],
+          content: "Photo post https://example.com/photo.jpg",
+        },
+        sk,
+      );
+
+      // Event without media
+      const textEvent = finalizeEvent(
+        {
+          kind: 1,
+          created_at: now + 1,
+          tags: [],
+          content: "Just text",
+        },
+        sk,
+      );
+
+      await relay.event(mediaEvent);
+      await relay.event(textEvent);
+
+      // media:false should return only the text event
+      const textResults = await relay.query([
+        { kinds: [1], search: "media:false" },
+      ]);
+      assert.equal(textResults.length, 1);
+      assert.equal(textResults[0].id, textEvent.id);
+    });
+
+    it("should filter events by video:true", async () => {
+      const { client } = createMediaMockClient();
+      const relay = new OpenSearchRelay(client as unknown as Client, {
+        indexName: "test-index",
+        bulkMaxSize: 1,
+      });
+
+      const sk = generateSecretKey();
+      const now = Math.floor(Date.now() / 1000);
+
+      // Video event
+      const videoEvent = finalizeEvent(
+        {
+          kind: 1,
+          created_at: now,
+          tags: [["imeta", "url https://example.com/clip.mp4", "m video/mp4"]],
+          content: "Video post https://example.com/clip.mp4",
+        },
+        sk,
+      );
+
+      // Image event
+      const imageEvent = finalizeEvent(
+        {
+          kind: 1,
+          created_at: now + 1,
+          tags: [
+            ["imeta", "url https://example.com/photo.jpg", "m image/jpeg"],
+          ],
+          content: "Image post https://example.com/photo.jpg",
+        },
+        sk,
+      );
+
+      // Text event
+      const textEvent = finalizeEvent(
+        {
+          kind: 1,
+          created_at: now + 2,
+          tags: [],
+          content: "Just text",
+        },
+        sk,
+      );
+
+      await relay.event(videoEvent);
+      await relay.event(imageEvent);
+      await relay.event(textEvent);
+
+      // video:true should return only the video event
+      const videoResults = await relay.query([
+        { kinds: [1], search: "video:true" },
+      ]);
+      assert.equal(videoResults.length, 1);
+      assert.equal(videoResults[0].id, videoEvent.id);
+    });
+
+    it("should filter events by video:false", async () => {
+      const { client } = createMediaMockClient();
+      const relay = new OpenSearchRelay(client as unknown as Client, {
+        indexName: "test-index",
+        bulkMaxSize: 1,
+      });
+
+      const sk = generateSecretKey();
+      const now = Math.floor(Date.now() / 1000);
+
+      // Video event
+      const videoEvent = finalizeEvent(
+        {
+          kind: 1,
+          created_at: now,
+          tags: [["imeta", "url https://example.com/clip.mp4", "m video/mp4"]],
+          content: "Video post https://example.com/clip.mp4",
+        },
+        sk,
+      );
+
+      // Image event
+      const imageEvent = finalizeEvent(
+        {
+          kind: 1,
+          created_at: now + 1,
+          tags: [
+            ["imeta", "url https://example.com/photo.jpg", "m image/jpeg"],
+          ],
+          content: "Image post https://example.com/photo.jpg",
+        },
+        sk,
+      );
+
+      await relay.event(videoEvent);
+      await relay.event(imageEvent);
+
+      // video:false should return the image event (has media but not video)
+      const nonVideoResults = await relay.query([
+        { kinds: [1], search: "video:false" },
+      ]);
+      assert.equal(nonVideoResults.length, 1);
+      assert.equal(nonVideoResults[0].id, imageEvent.id);
+    });
+
+    it("should combine media and other search extensions", async () => {
+      const { client } = createMediaMockClient();
+      const relay = new OpenSearchRelay(client as unknown as Client, {
+        indexName: "test-index",
+        bulkMaxSize: 1,
+      });
+
+      const sk = generateSecretKey();
+      const now = Math.floor(Date.now() / 1000);
+
+      // English media event
+      const enMediaEvent = finalizeEvent(
+        {
+          kind: 1,
+          created_at: now,
+          tags: [
+            ["imeta", "url https://example.com/photo.jpg", "m image/jpeg"],
+          ],
+          content: "Photo post https://example.com/photo.jpg",
+        },
+        sk,
+      );
+
+      // English text event
+      const enTextEvent = finalizeEvent(
+        {
+          kind: 1,
+          created_at: now + 1,
+          tags: [],
+          content: "Just text",
+        },
+        sk,
+      );
+
+      await relay.event(enMediaEvent);
+      await relay.event(enTextEvent);
+
+      // media:true should return only the media event
+      const mediaResults = await relay.query([
+        { kinds: [1], search: "media:true" },
+      ]);
+      assert.equal(mediaResults.length, 1);
+      assert.equal(mediaResults[0].id, enMediaEvent.id);
+    });
+  });
+
+  describe("detectMedia", () => {
+    it("should detect media from imeta tags", () => {
+      const event = {
+        id: "abc",
+        pubkey: "def",
+        created_at: 0,
+        kind: 1,
+        tags: [["imeta", "url https://example.com/photo.jpg", "m image/jpeg"]],
+        content: "test",
+        sig: "sig",
+      };
+
+      const result = OpenSearchRelay.detectMedia(event);
+      assert.deepEqual(result, { media: true });
+    });
+
+    it("should detect video when all imeta are video", () => {
+      const event = {
+        id: "abc",
+        pubkey: "def",
+        created_at: 0,
+        kind: 1,
+        tags: [
+          ["imeta", "url https://example.com/a.mp4", "m video/mp4"],
+          ["imeta", "url https://example.com/b.webm", "m video/webm"],
+        ],
+        content: "test",
+        sig: "sig",
+      };
+
+      const result = OpenSearchRelay.detectMedia(event);
+      assert.deepEqual(result, { media: true, video: true });
+    });
+
+    it("should not detect video when imeta has mixed types", () => {
+      const event = {
+        id: "abc",
+        pubkey: "def",
+        created_at: 0,
+        kind: 1,
+        tags: [
+          ["imeta", "url https://example.com/a.mp4", "m video/mp4"],
+          ["imeta", "url https://example.com/b.jpg", "m image/jpeg"],
+        ],
+        content: "test",
+        sig: "sig",
+      };
+
+      const result = OpenSearchRelay.detectMedia(event);
+      assert.deepEqual(result, { media: true });
+    });
+
+    it("should return empty for events without media", () => {
+      const event = {
+        id: "abc",
+        pubkey: "def",
+        created_at: 0,
+        kind: 1,
+        tags: [],
+        content: "just text",
+        sig: "sig",
+      };
+
+      const result = OpenSearchRelay.detectMedia(event);
+      assert.deepEqual(result, {});
+    });
+
+    it("should fall back to URL detection for kind 1 without imeta", () => {
+      const event = {
+        id: "abc",
+        pubkey: "def",
+        created_at: 0,
+        kind: 1,
+        tags: [],
+        content: "look at https://example.com/photo.png",
+        sig: "sig",
+      };
+
+      const result = OpenSearchRelay.detectMedia(event);
+      assert.deepEqual(result, { media: true });
+    });
+
+    it("should not fall back to URL detection for non-kind-1 events", () => {
+      const event = {
+        id: "abc",
+        pubkey: "def",
+        created_at: 0,
+        kind: 30023,
+        tags: [],
+        content: "article with https://example.com/photo.png",
+        sig: "sig",
+      };
+
+      const result = OpenSearchRelay.detectMedia(event);
+      assert.deepEqual(result, {});
+    });
+
+    it("should skip imeta tags without url field", () => {
+      const event = {
+        id: "abc",
+        pubkey: "def",
+        created_at: 0,
+        kind: 1,
+        tags: [["imeta", "m image/jpeg", "dim 1920x1080"]],
+        content: "test",
+        sig: "sig",
+      };
+
+      const result = OpenSearchRelay.detectMedia(event);
+      // No valid imeta (missing url), falls back to URL detection
+      // Content has no media URLs either
+      assert.deepEqual(result, {});
+    });
+
+    it("should not set video when imeta lacks mime type", () => {
+      const event = {
+        id: "abc",
+        pubkey: "def",
+        created_at: 0,
+        kind: 1,
+        tags: [["imeta", "url https://example.com/clip.mp4"]],
+        content: "test",
+        sig: "sig",
+      };
+
+      const result = OpenSearchRelay.detectMedia(event);
+      // Has media (valid imeta with url), but can't confirm video without m tag
+      assert.deepEqual(result, { media: true });
+    });
+  });
+
   describe("migrate", () => {
     it("should reject documents with unknown fields (dynamic: strict)", async () => {
       const KNOWN_FIELDS = new Set([
@@ -2139,6 +2811,8 @@ describe("OpenSearchRelay", () => {
         "amount_msats",
         "language",
         "sentiment",
+        "media",
+        "video",
       ]);
 
       const mockClient = {
