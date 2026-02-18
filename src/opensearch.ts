@@ -1250,13 +1250,22 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
    */
   async migrate(): Promise<void> {
     try {
-      // Check if index exists
+      // Check if index or alias already exists
       const indexExists = await this.client.indices.exists({
         index: this.indexName,
       });
 
       if (indexExists.body) {
         console.log(`Index ${this.indexName} already exists`);
+        return;
+      }
+
+      const aliasExists = await this.client.indices.existsAlias({
+        name: this.indexName,
+      });
+
+      if (aliasExists.body) {
+        console.log(`Alias ${this.indexName} already exists`);
         return;
       }
 
