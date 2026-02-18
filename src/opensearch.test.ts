@@ -1718,6 +1718,358 @@ describe("OpenSearchRelay", () => {
     });
   });
 
+  describe("detectEventLanguage", () => {
+    it("should detect English text", () => {
+      const event: NostrEvent = {
+        id: "a".repeat(64),
+        pubkey: "b".repeat(64),
+        created_at: 0,
+        kind: 1,
+        tags: [],
+        content:
+          "This is a test of the English language detection feature for Nostr events",
+        sig: "c".repeat(128),
+      };
+
+      assert.equal(OpenSearchRelay.detectEventLanguage(event), "en");
+    });
+
+    it("should detect Chinese text", () => {
+      const event: NostrEvent = {
+        id: "a".repeat(64),
+        pubkey: "b".repeat(64),
+        created_at: 0,
+        kind: 1,
+        tags: [],
+        content: "这是一个中文语言检测测试",
+        sig: "c".repeat(128),
+      };
+
+      assert.equal(OpenSearchRelay.detectEventLanguage(event), "zh");
+    });
+
+    it("should detect Japanese text", () => {
+      const event: NostrEvent = {
+        id: "a".repeat(64),
+        pubkey: "b".repeat(64),
+        created_at: 0,
+        kind: 1,
+        tags: [],
+        content:
+          "これは日本語のテストです。言語検出が正しく動作するか確認します。",
+        sig: "c".repeat(128),
+      };
+
+      assert.equal(OpenSearchRelay.detectEventLanguage(event), "ja");
+    });
+
+    it("should detect Spanish text", () => {
+      const event: NostrEvent = {
+        id: "a".repeat(64),
+        pubkey: "b".repeat(64),
+        created_at: 0,
+        kind: 1,
+        tags: [],
+        content: "Esta es una prueba de detección de idioma en español",
+        sig: "c".repeat(128),
+      };
+
+      assert.equal(OpenSearchRelay.detectEventLanguage(event), "es");
+    });
+
+    it("should honour author-declared language tag over auto-detection", () => {
+      const event: NostrEvent = {
+        id: "a".repeat(64),
+        pubkey: "b".repeat(64),
+        created_at: 0,
+        kind: 1,
+        tags: [["l", "pt", "ISO-639-1"]],
+        content: "This is actually English but the author says Portuguese",
+        sig: "c".repeat(128),
+      };
+
+      assert.equal(OpenSearchRelay.detectEventLanguage(event), "pt");
+    });
+
+    it("should return undefined for very short content", () => {
+      const event: NostrEvent = {
+        id: "a".repeat(64),
+        pubkey: "b".repeat(64),
+        created_at: 0,
+        kind: 1,
+        tags: [],
+        content: "hi",
+        sig: "c".repeat(128),
+      };
+
+      assert.equal(OpenSearchRelay.detectEventLanguage(event), undefined);
+    });
+
+    it("should return undefined for empty content", () => {
+      const event: NostrEvent = {
+        id: "a".repeat(64),
+        pubkey: "b".repeat(64),
+        created_at: 0,
+        kind: 1,
+        tags: [],
+        content: "",
+        sig: "c".repeat(128),
+      };
+
+      assert.equal(OpenSearchRelay.detectEventLanguage(event), undefined);
+    });
+
+    it("should lowercase the author-declared language tag", () => {
+      const event: NostrEvent = {
+        id: "a".repeat(64),
+        pubkey: "b".repeat(64),
+        created_at: 0,
+        kind: 1,
+        tags: [["l", "EN", "ISO-639-1"]],
+        content: "This is English",
+        sig: "c".repeat(128),
+      };
+
+      assert.equal(OpenSearchRelay.detectEventLanguage(event), "en");
+    });
+  });
+
+  describe("NIP-50 language filter", () => {
+    // Mock client with language field support
+    const createLanguageMockClient = () => {
+      const documents = new Map<string, unknown>();
+
+      return {
+        documents,
+        client: {
+          search: async ({ body }: { body: Record<string, unknown> }) => {
+            const results: unknown[] = [];
+            const queryMust = (
+              (body.query as Record<string, unknown>)?.bool as Record<
+                string,
+                unknown
+              >
+            )?.must as Array<Record<string, unknown>> | undefined;
+
+            // Extract language filter if present
+            let languageFilter: string | undefined;
+            for (const clause of queryMust || []) {
+              if ((clause.term as Record<string, unknown>)?.language) {
+                languageFilter = (clause.term as Record<string, unknown>)
+                  .language as string;
+              }
+            }
+
+            for (const [_id, doc] of documents.entries()) {
+              const docTyped = doc as NostrEvent & {
+                deleted?: boolean;
+                language?: string;
+              };
+
+              if (docTyped.deleted) continue;
+              if (languageFilter && docTyped.language !== languageFilter)
+                continue;
+
+              results.push({ _source: doc });
+            }
+
+            return {
+              body: {
+                hits: { hits: results },
+              },
+            };
+          },
+          bulk: async ({ body }: { body: unknown[] }) => {
+            const items: Array<Record<string, unknown>> = [];
+            for (let i = 0; i < body.length; i += 2) {
+              const action = body[i] as {
+                index?: { _id: string };
+                update?: { _id: string };
+              };
+              const payload = body[i + 1] as Record<string, unknown>;
+
+              if (action.index) {
+                documents.set(action.index._id, payload);
+                items.push({ index: {} });
+              } else if (action.update) {
+                if (payload.upsert) {
+                  if (!documents.has(action.update._id)) {
+                    documents.set(action.update._id, payload.upsert);
+                  }
+                }
+                items.push({ update: {} });
+              }
+            }
+            return {
+              body: {
+                errors: false,
+                items,
+              },
+            };
+          },
+          count: async () => {
+            const nonDeleted = Array.from(documents.values()).filter(
+              (doc) => !(doc as { deleted?: boolean }).deleted,
+            );
+            return { body: { count: nonDeleted.length } };
+          },
+          indices: {
+            exists: async () => ({ body: true }),
+            create: async () => ({ body: {} }),
+          },
+          close: async () => {},
+        },
+      };
+    };
+
+    it("should store detected language on indexed documents", async () => {
+      const { client, documents } = createLanguageMockClient();
+      const relay = new OpenSearchRelay(client as unknown as Client, {
+        indexName: "test-index",
+        bulkMaxSize: 1,
+      });
+
+      const sk = generateSecretKey();
+      const now = Math.floor(Date.now() / 1000);
+
+      const event = finalizeEvent(
+        {
+          kind: 1,
+          created_at: now,
+          tags: [],
+          content:
+            "This is a long enough English sentence for language detection to work properly",
+        },
+        sk,
+      );
+
+      await relay.event(event);
+
+      const doc = Array.from(documents.values())[0] as {
+        language?: string;
+      };
+      assert.equal(doc.language, "en");
+    });
+
+    it("should filter events by language using search extension", async () => {
+      const { client } = createLanguageMockClient();
+      const relay = new OpenSearchRelay(client as unknown as Client, {
+        indexName: "test-index",
+        bulkMaxSize: 1,
+      });
+
+      const sk = generateSecretKey();
+      const now = Math.floor(Date.now() / 1000);
+
+      // English event
+      const enEvent = finalizeEvent(
+        {
+          kind: 1,
+          created_at: now,
+          tags: [],
+          content:
+            "This is a perfectly normal English language post about Nostr",
+        },
+        sk,
+      );
+
+      // Chinese event
+      const zhEvent = finalizeEvent(
+        {
+          kind: 1,
+          created_at: now - 10,
+          tags: [],
+          content: "这是一个关于比特币和闪电网络的中文帖子",
+        },
+        sk,
+      );
+
+      await relay.event(enEvent);
+      await relay.event(zhEvent);
+
+      // Filter by English
+      const enResults = await relay.query([
+        { kinds: [1], search: "language:en" },
+      ]);
+      assert.equal(enResults.length, 1);
+      assert.equal(enResults[0].id, enEvent.id);
+
+      // Filter by Chinese
+      const zhResults = await relay.query([
+        { kinds: [1], search: "language:zh" },
+      ]);
+      assert.equal(zhResults.length, 1);
+      assert.equal(zhResults[0].id, zhEvent.id);
+    });
+
+    it("should return all events when no language filter is applied", async () => {
+      const { client } = createLanguageMockClient();
+      const relay = new OpenSearchRelay(client as unknown as Client, {
+        indexName: "test-index",
+        bulkMaxSize: 1,
+      });
+
+      const sk = generateSecretKey();
+      const now = Math.floor(Date.now() / 1000);
+
+      await relay.event(
+        finalizeEvent(
+          {
+            kind: 1,
+            created_at: now,
+            tags: [],
+            content: "An English post about the state of the world today",
+          },
+          sk,
+        ),
+      );
+
+      await relay.event(
+        finalizeEvent(
+          {
+            kind: 1,
+            created_at: now - 10,
+            tags: [],
+            content: "これは日本語の投稿です。言語フィルタのテストです。",
+          },
+          sk,
+        ),
+      );
+
+      const results = await relay.query([{ kinds: [1] }]);
+      assert.equal(results.length, 2);
+    });
+
+    it("should respect author-declared language tag in indexed document", async () => {
+      const { client, documents } = createLanguageMockClient();
+      const relay = new OpenSearchRelay(client as unknown as Client, {
+        indexName: "test-index",
+        bulkMaxSize: 1,
+      });
+
+      const sk = generateSecretKey();
+      const now = Math.floor(Date.now() / 1000);
+
+      const event = finalizeEvent(
+        {
+          kind: 1,
+          created_at: now,
+          tags: [["l", "fr", "ISO-639-1"]],
+          content:
+            "This is English text but the author tagged it as French for some reason",
+        },
+        sk,
+      );
+
+      await relay.event(event);
+
+      const doc = Array.from(documents.values())[0] as {
+        language?: string;
+      };
+      assert.equal(doc.language, "fr");
+    });
+  });
+
   describe("parseBolt11Amount", () => {
     it("should parse nano-BTC amounts", () => {
       // 210n = 210 nano-BTC = 21 sats = 21,000 msats

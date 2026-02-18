@@ -10,6 +10,7 @@ import { NIP50, NKinds } from "@nostrify/nostrify";
 import type { Client, ClientOptions } from "@opensearch-project/opensearch";
 import { Client as OpenSearchClient } from "@opensearch-project/opensearch";
 import { naddrEncode, noteEncode } from "nostr-tools/nip19";
+import { detect as detectLanguage } from "tinyld";
 import type { Config } from "./config.ts";
 
 /**
@@ -20,6 +21,7 @@ interface NostrEventDocument extends NostrEvent {
   deleted?: boolean;
   protocol?: string;
   amount_msats?: number;
+  language?: string;
 }
 
 /** Pending bulk operation for an event. */
@@ -173,6 +175,37 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     return Math.round(num * msatsPerUnit[multiplier]);
   }
 
+  /** Minimum content length (in characters) required to attempt language detection. */
+  static MIN_LANGUAGE_DETECT_LENGTH = 10;
+
+  /**
+   * Detect the language of a Nostr event.
+   *
+   * If the event has an `["l", "<code>", "ISO-639-1"]` tag, that value is
+   * used directly (author-declared language).  Otherwise `tinyld` is used to
+   * auto-detect the language from `content`.
+   *
+   * Returns an ISO 639-1 two-letter code, or `undefined` when the language
+   * cannot be determined.
+   */
+  static detectEventLanguage(event: NostrEvent): string | undefined {
+    // 1. Honour author-declared language tag (NIP-32 label)
+    const langTag = event.tags.find(
+      (t) => t[0] === "l" && t[2] === "ISO-639-1" && t[1],
+    );
+    if (langTag) {
+      return langTag[1].toLowerCase();
+    }
+
+    // 2. Auto-detect from content
+    if (event.content.length < OpenSearchRelay.MIN_LANGUAGE_DETECT_LENGTH) {
+      return undefined;
+    }
+
+    const detected = detectLanguage(event.content);
+    return detected || undefined; // tinyld returns "" when unsure
+  }
+
   /**
    * Convert NostrEvent to OpenSearch document
    */
@@ -195,12 +228,16 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
       }
     }
 
+    // Detect language from content (NIP-50 language: extension)
+    const language = OpenSearchRelay.detectEventLanguage(event);
+
     return {
       ...event,
       tags_map: tagsMap,
       deleted: false,
       ...(protocol && { protocol }),
       ...(amount_msats !== undefined && { amount_msats }),
+      ...(language && { language }),
     };
   }
 
@@ -796,6 +833,16 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
           term: { protocol: protocolToken.value },
         });
       }
+
+      // Handle language: extension (NIP-50)
+      const languageToken = tokens.find(
+        (t) => typeof t === "object" && t.key === "language",
+      );
+      if (languageToken && typeof languageToken === "object") {
+        must.push({
+          term: { language: languageToken.value },
+        });
+      }
     }
 
     return { bool: { must } };
@@ -1234,6 +1281,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
               deleted: { type: "boolean" },
               protocol: { type: "keyword" },
               amount_msats: { type: "long" },
+              language: { type: "keyword" },
             },
           },
         },
