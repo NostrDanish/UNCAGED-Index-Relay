@@ -122,6 +122,12 @@ async function main() {
     // Step 2: Reindex with the Painless validation script
     // Mirrors buildTagsMap: validate tag names and values
     const painlessScript = `
+      // Strip fields that don't belong in the new strict mapping
+      ctx._source.remove('language');
+      ctx._source.remove('metadata');
+      ctx._source.remove('relays');
+      ctx._source.remove('_relays');
+
       Pattern tagNamePattern = /^[\\w-]{1,15}$/;
       Map tagsMap = new HashMap();
       if (ctx._source.tags != null) {
@@ -142,12 +148,6 @@ async function main() {
         }
       }
       ctx._source.tags_map = tagsMap;
-
-      // Strip fields that don't belong in the new strict mapping
-      ctx._source.remove('language');
-      ctx._source.remove('metadata');
-      ctx._source.remove('relays');
-      ctx._source.remove('_relays');
 
       // Extract protocol from proxy tag (NIP-48)
       if (ctx._source.tags != null) {
