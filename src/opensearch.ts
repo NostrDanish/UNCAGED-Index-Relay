@@ -381,7 +381,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
       const scoreMap = new Map<string, number>();
       const reactionMap = new Map<
         string,
-        { positive: number; negative: number; total: number }
+        { replies: number; engagement: number; total: number }
       >();
 
       // Process aggregation results
@@ -401,26 +401,25 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
         const totalRefs = bucket.doc_count;
         const kindBuckets = bucket.by_kind?.buckets || [];
 
-        // Count reactions for controversial
-        let positive = 0;
-        let negative = 0;
+        // Count replies vs positive engagement (reactions + reposts) for controversial
+        let replies = 0;
+        let engagement = 0;
 
         for (const kindBucket of kindBuckets) {
           const kind = kindBucket.key;
           const count = kindBucket.doc_count;
 
-          if (kind === 7) {
-            // Kind 7 reactions - need to check content for sentiment
-            // For now, approximate: assume 70% positive, 30% negative
-            positive += Math.floor(count * 0.7);
-            negative += Math.floor(count * 0.3);
+          if (kind === 1) {
+            replies += count; // Replies
+          } else if (kind === 6 || kind === 7) {
+            engagement += count; // Reposts + reactions
           }
         }
 
         reactionMap.set(eventId, {
-          positive,
-          negative,
-          total: positive + negative,
+          replies,
+          engagement,
+          total: replies + engagement,
         });
 
         // Calculate score based on mode
@@ -442,14 +441,14 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
             break;
 
           case "controversial": {
-            // Balanced positive/negative reactions
+            // "Ratio-ed" — high replies relative to positive engagement (reactions + reposts)
             const reactions = reactionMap.get(eventId);
             if (reactions) {
-              const minReactions = Math.min(
-                reactions.positive,
-                reactions.negative,
+              const balanced = Math.min(
+                reactions.replies,
+                reactions.engagement,
               );
-              score = minReactions * Math.sqrt(reactions.total);
+              score = balanced * Math.sqrt(reactions.total);
             }
             break;
           }
