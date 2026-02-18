@@ -356,7 +356,11 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
       body: {
         query: {
           bool: {
-            must: [{ term: { deleted: false } }],
+            must: [
+              { term: { deleted: false } },
+              // Only count actual referencing event kinds (replies, reposts, reactions)
+              { terms: { kind: [1, 6, 7, 16, 1111] } },
+            ],
           },
         },
         size: 0,
@@ -366,7 +370,6 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
               field: "tags_map.e",
               size: bucketCount,
               order: { _count: "desc" as const },
-              include: "[0-9a-f]{64}", // Only valid 64-char hex event IDs
             },
           },
         },
@@ -402,7 +405,6 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
             terms: {
               field: "tags_map.e",
               size: bucketCount,
-              include: "[0-9a-f]{64}", // Only valid 64-char hex event IDs
             },
             aggs: {
               total_sats: {
