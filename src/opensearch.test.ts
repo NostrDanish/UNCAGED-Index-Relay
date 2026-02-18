@@ -348,7 +348,7 @@ describe("OpenSearchRelay", () => {
     const createSortMockClient = () => {
       const documents = new Map<string, unknown>();
       const references = new Map<string, unknown[]>(); // eventId -> array of references
-      const zaps = new Map<string, number>(); // eventId -> total sats
+      const zaps = new Map<string, number>(); // eventId -> zap receipt count
 
       return {
         documents,
@@ -378,7 +378,7 @@ describe("OpenSearchRelay", () => {
                 };
               }
 
-              // Detect zap aggregation queries (kind 9735 with total_sats)
+              // Detect zap aggregation queries (kind 9735)
               const queryMust = (
                 (body.query as Record<string, unknown>)?.bool as Record<
                   string,
@@ -391,21 +391,23 @@ describe("OpenSearchRelay", () => {
               );
 
               if (isZapQuery) {
+                // Zap aggregation: return buckets with doc_count based on zap count
                 const zapBuckets: Array<{
                   key: string;
                   doc_count: number;
-                  total_sats: { value: number };
                 }> = [];
 
-                for (const [eventId, totalSats] of zaps.entries()) {
-                  if (totalSats > 0) {
+                for (const [eventId, zapCount] of zaps.entries()) {
+                  if (zapCount > 0) {
                     zapBuckets.push({
                       key: eventId,
-                      doc_count: 1,
-                      total_sats: { value: totalSats },
+                      doc_count: zapCount,
                     });
                   }
                 }
+
+                // Sort by doc_count descending (most zaps first)
+                zapBuckets.sort((a, b) => b.doc_count - a.doc_count);
 
                 return {
                   body: {
@@ -422,11 +424,10 @@ describe("OpenSearchRelay", () => {
               const hasSubAggs = byEventAgg?.aggs !== undefined;
 
               if (hasSubAggs) {
-                // Scoped scoring aggregation (scoreEvents) — return detailed buckets
+                // Aggregation with sub-aggs (used by sort:controversial for by_kind)
                 const detailedBuckets: Array<{
                   key: string;
                   doc_count: number;
-                  unique_authors: { value: number };
                   by_kind: {
                     buckets: Array<{ key: number; doc_count: number }>;
                   };
@@ -437,7 +438,6 @@ describe("OpenSearchRelay", () => {
                     detailedBuckets.push({
                       key: eventId,
                       doc_count: refs.length,
-                      unique_authors: { value: refs.length },
                       by_kind: {
                         buckets: [{ key: 1, doc_count: refs.length }],
                       },
@@ -455,7 +455,7 @@ describe("OpenSearchRelay", () => {
                 };
               }
 
-              // Simple top-referenced aggregation (aggregateTopReferenced) — return just IDs
+              // Simple aggregation (used by sort:top, sort:hot, sort:rising)
               const simpleBuckets: Array<{
                 key: string;
                 doc_count: number;
@@ -1015,14 +1015,14 @@ describe("OpenSearchRelay", () => {
       await relay.event(event1);
       await relay.event(event2);
 
-      // event1 received 1000 sats, event2 received 50000 sats
-      zaps.set(event1.id, 1000);
-      zaps.set(event2.id, 50000);
+      // event1 received 2 zaps, event2 received 10 zaps
+      zaps.set(event1.id, 2);
+      zaps.set(event2.id, 10);
 
       // Query with sort:zaps
       const results = await relay.query([{ kinds: [1], search: "sort:zaps" }]);
 
-      // Event2 should be first (more sats)
+      // Event2 should be first (more zaps)
       assert.equal(results.length, 2);
       assert.equal(results[0].id, event2.id);
       assert.equal(results[1].id, event1.id);
@@ -1062,7 +1062,7 @@ describe("OpenSearchRelay", () => {
       await relay.event(unzappedEvent);
 
       // Only one event has zaps
-      zaps.set(zappedEvent.id, 5000);
+      zaps.set(zappedEvent.id, 3);
 
       const results = await relay.query([{ kinds: [1], search: "sort:zaps" }]);
 
@@ -1104,7 +1104,7 @@ describe("OpenSearchRelay", () => {
       const sk2 = generateSecretKey();
       const now = Math.floor(Date.now() / 1000);
 
-      // Author 1: two events, one with 100 sats and one with 5000 sats
+      // Author 1: two events, one with 1 zap and one with 5 zaps
       const event1a = finalizeEvent(
         {
           kind: 1,
@@ -1125,7 +1125,7 @@ describe("OpenSearchRelay", () => {
         sk1,
       );
 
-      // Author 2: one event with 3000 sats
+      // Author 2: one event with 3 zaps
       const event2 = finalizeEvent(
         {
           kind: 1,
@@ -1140,9 +1140,9 @@ describe("OpenSearchRelay", () => {
       await relay.event(event1b);
       await relay.event(event2);
 
-      zaps.set(event1a.id, 100);
-      zaps.set(event1b.id, 5000);
-      zaps.set(event2.id, 3000);
+      zaps.set(event1a.id, 1);
+      zaps.set(event1b.id, 5);
+      zaps.set(event2.id, 3);
 
       // Query with sort:zaps and distinct:author
       const results = await relay.query([
@@ -1154,7 +1154,7 @@ describe("OpenSearchRelay", () => {
       const pubkeys = results.map((e) => e.pubkey);
       assert.equal(new Set(pubkeys).size, 2);
 
-      // event1b should be first (5000 sats, highest for author 1), event2 second (3000 sats)
+      // event1b should be first (5 zaps, highest for author 1), event2 second (3 zaps)
       assert.equal(results[0].id, event1b.id);
       assert.equal(results[1].id, event2.id);
     });
