@@ -1103,6 +1103,14 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
             "index.max_result_window": 100000,
           },
           mappings: {
+            dynamic_templates: [
+              {
+                tags_map_keyword: {
+                  path_match: "tags_map.*",
+                  mapping: { type: "keyword" },
+                },
+              },
+            ],
             properties: {
               id: { type: "keyword" },
               pubkey: { type: "keyword" },
