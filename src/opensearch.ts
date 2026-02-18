@@ -221,82 +221,70 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
   }
 
   /**
-   * Query events with NIP-50 sort algorithms using aggregations
+   * Query events with NIP-50 sort algorithms using aggregation-first approach.
+   *
+   * Instead of fetching candidate events and then counting their references,
+   * this starts from the referencing events (reactions, replies, reposts, zaps)
+   * and aggregates by target event ID. The top buckets *are* the winners.
+   * Then we fetch those target events and apply scoring + filter constraints.
    */
   private async querySortedEvents(
     filter: NostrFilter,
     sortMode: "top" | "hot" | "controversial" | "rising" | "zaps",
     limit: number,
   ): Promise<NostrEvent[]> {
-    const query = this.buildQuery(filter) as {
-      bool: { must: Record<string, unknown>[] };
-    };
     const now = Math.floor(Date.now() / 1000);
 
-    // Apply default time windows based on sort mode
-    const timeWindow: { gte?: number; lte?: number } = {};
-    if (sortMode === "hot" && !filter.since) {
-      timeWindow.gte = now - 24 * 60 * 60; // 24 hours
-    } else if (sortMode === "rising" && !filter.since) {
-      timeWindow.gte = now - 2 * 60 * 60; // 2 hours
-    } else if (sortMode === "controversial" && !filter.since) {
-      timeWindow.gte = now - 7 * 24 * 60 * 60; // 7 days
-    }
-
-    // Merge with existing time filters
-    if (filter.since || filter.until || Object.keys(timeWindow).length > 0) {
-      const existingTimeFilter = query.bool.must.find(
-        (clause) =>
-          clause.range && (clause.range as Record<string, unknown>).created_at,
-      );
-      if (existingTimeFilter) {
-        // Update existing time filter
-        const rangeClause = existingTimeFilter.range as Record<
-          string,
-          Record<string, number>
-        >;
-        rangeClause.created_at = { ...timeWindow, ...rangeClause.created_at };
-      } else if (Object.keys(timeWindow).length > 0) {
-        // Add new time filter
-        query.bool.must.push({
-          range: { created_at: timeWindow },
-        });
-      }
-    }
-
     try {
-      // First, get candidate events
-      const candidatesResponse = await this.client.search({
-        index: this.indexName,
-        body: {
-          query,
-          size: Math.min(limit * 10, 10000), // Get more candidates for scoring
-          sort: [{ created_at: { order: "desc" as const } }],
-        },
-      });
+      // Step 1: Aggregate referencing events to find top-referenced event IDs
+      const topEventIds =
+        sortMode === "zaps"
+          ? await this.aggregateTopZapped(limit)
+          : await this.aggregateTopReferenced(sortMode, limit, now);
 
-      const candidateEvents = candidatesResponse.body.hits.hits
-        .filter((hit: unknown) => {
-          const h = hit as { _source?: NostrEventDocument };
-          return h._source !== undefined;
-        })
-        .map((hit: unknown) => {
-          const h = hit as { _source: NostrEventDocument };
-          return this.documentToEvent(h._source);
-        });
-
-      if (candidateEvents.length === 0) {
+      if (topEventIds.length === 0) {
         return [];
       }
 
-      // Get event IDs for aggregation
-      const eventIds = candidateEvents.map((e: NostrEvent) => e.id);
+      // Step 2: Fetch the target events, applying the original filter constraints
+      const query = this.buildQuery(filter) as {
+        bool: { must: Record<string, unknown>[] };
+      };
 
-      // Build aggregation query based on sort mode
+      // Apply default time windows for the target events
+      if (sortMode === "hot" && !filter.since) {
+        this.applyTimeWindow(query, { gte: now - 24 * 60 * 60 }); // 24 hours
+      } else if (sortMode === "rising" && !filter.since) {
+        this.applyTimeWindow(query, { gte: now - 2 * 60 * 60 }); // 2 hours
+      } else if (sortMode === "controversial" && !filter.since) {
+        this.applyTimeWindow(query, { gte: now - 7 * 24 * 60 * 60 }); // 7 days
+      }
+
+      // Constrain to only the top-referenced event IDs
+      query.bool.must.push({ terms: { id: topEventIds } });
+
+      const response = await this.client.search({
+        index: this.indexName,
+        body: {
+          query,
+          size: topEventIds.length,
+        },
+      });
+
+      const eventsById = new Map<string, NostrEvent>();
+      for (const hit of response.body.hits.hits) {
+        const h = hit as { _source?: NostrEventDocument };
+        if (h._source) {
+          const event = this.documentToEvent(h._source);
+          eventsById.set(event.id, event);
+        }
+      }
+
+      // Step 3: Score and sort the fetched events
       let scoredEvents =
         sortMode === "zaps"
-          ? await this.scoreEventsByZaps(eventIds, candidateEvents)
-          : await this.scoreEvents(eventIds, sortMode, now, candidateEvents);
+          ? await this.scoreEventsByZaps(topEventIds, eventsById)
+          : await this.scoreEvents(topEventIds, sortMode, now, eventsById);
 
       // Apply distinct:author — keep only the highest-scored event per pubkey
       if (this.hasDistinctAuthor(filter)) {
@@ -316,15 +304,142 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
   }
 
   /**
-   * Score events based on references and reactions using aggregations
+   * Merge a time window into an existing query's created_at range filter,
+   * or add a new one if none exists.
+   */
+  private applyTimeWindow(
+    query: { bool: { must: Record<string, unknown>[] } },
+    timeWindow: { gte?: number; lte?: number },
+  ): void {
+    const existingTimeFilter = query.bool.must.find(
+      (clause) =>
+        clause.range && (clause.range as Record<string, unknown>).created_at,
+    );
+    if (existingTimeFilter) {
+      const rangeClause = existingTimeFilter.range as Record<
+        string,
+        Record<string, number>
+      >;
+      rangeClause.created_at = { ...timeWindow, ...rangeClause.created_at };
+    } else {
+      query.bool.must.push({ range: { created_at: timeWindow } });
+    }
+  }
+
+  /**
+   * Aggregate referencing events (replies, reposts, reactions) to find
+   * the most-referenced event IDs. Returns event IDs ordered by reference
+   * count descending.
+   */
+  private async aggregateTopReferenced(
+    sortMode: "top" | "hot" | "controversial" | "rising",
+    limit: number,
+    _now: number,
+  ): Promise<string[]> {
+    const referencesQuery = {
+      bool: {
+        must: [{ term: { deleted: false } }] as Record<string, unknown>[],
+      },
+    };
+
+    // For controversial, only count replies and positive engagement kinds
+    if (sortMode === "controversial") {
+      referencesQuery.bool.must.push({
+        terms: { kind: [1, 6, 7] },
+      });
+    }
+
+    const response = await this.client.search({
+      index: this.indexName,
+      body: {
+        query: referencesQuery,
+        size: 0,
+        aggs: {
+          by_event: {
+            terms: {
+              field: "tags_map.e",
+              size: limit * 5, // Fetch extra since some may be filtered out
+              order: { _count: "desc" as const },
+            },
+          },
+        },
+      },
+    });
+
+    const buckets =
+      (
+        response.body.aggregations?.by_event as unknown as {
+          buckets?: Array<{ key: string; doc_count: number }>;
+        }
+      )?.buckets || [];
+
+    return buckets.map((b) => b.key);
+  }
+
+  /**
+   * Aggregate zap receipts (kind 9735) to find the most-zapped event IDs.
+   * Returns event IDs ordered by total sats descending.
+   */
+  private async aggregateTopZapped(limit: number): Promise<string[]> {
+    const response = await this.client.search({
+      index: this.indexName,
+      body: {
+        query: {
+          bool: {
+            must: [{ term: { deleted: false } }, { term: { kind: 9735 } }],
+          },
+        },
+        size: 0,
+        aggs: {
+          by_event: {
+            terms: {
+              field: "tags_map.e",
+              size: limit * 5,
+            },
+            aggs: {
+              total_sats: {
+                sum: {
+                  script: {
+                    source:
+                      "if (doc.containsKey('tags_map.amount') && doc['tags_map.amount'].size() > 0) { return Long.parseLong(doc['tags_map.amount'].value) / 1000 } return 0",
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    });
+
+    const buckets =
+      (
+        response.body.aggregations?.by_event as unknown as {
+          buckets?: Array<{
+            key: string;
+            doc_count: number;
+            total_sats?: { value: number };
+          }>;
+        }
+      )?.buckets || [];
+
+    // Sort by total sats and filter out zero-sat entries
+    return buckets
+      .filter((b) => (b.total_sats?.value ?? 0) > 0)
+      .sort((a, b) => (b.total_sats?.value ?? 0) - (a.total_sats?.value ?? 0))
+      .map((b) => b.key);
+  }
+
+  /**
+   * Score events based on references and reactions using aggregations.
+   * Fetches reference counts for the given event IDs and applies the
+   * sort-mode-specific scoring formula.
    */
   private async scoreEvents(
     eventIds: string[],
     sortMode: "top" | "hot" | "controversial" | "rising",
     now: number,
-    events: NostrEvent[],
+    eventsById: Map<string, NostrEvent>,
   ): Promise<NostrEvent[]> {
-    // Query for references (kind 1, 6, 7, etc. that reference these events)
     const referencesQuery = {
       bool: {
         must: [
@@ -332,8 +447,8 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
           {
             bool: {
               should: [
-                { terms: { "tags_map.e": eventIds } }, // e-tags
-                { terms: { "tags_map.q": eventIds } }, // q-tags
+                { terms: { "tags_map.e": eventIds } },
+                { terms: { "tags_map.q": eventIds } },
               ],
             },
           },
@@ -342,12 +457,11 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     };
 
     try {
-      // Aggregate references by target event
       const refsResponse = await this.client.search({
         index: this.indexName,
         body: {
           query: referencesQuery,
-          size: 0, // We only need aggregations
+          size: 0,
           aggs: {
             by_event: {
               terms: {
@@ -361,37 +475,23 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
                     size: 20,
                   },
                 },
-                avg_created_at: {
-                  avg: {
-                    field: "created_at",
-                  },
-                },
-                min_created_at: {
-                  min: {
-                    field: "created_at",
-                  },
-                },
               },
             },
           },
         },
       });
 
-      // Build score map
       const scoreMap = new Map<string, number>();
-      const reactionMap = new Map<
-        string,
-        { replies: number; engagement: number; total: number }
-      >();
 
-      // Process aggregation results
       const buckets =
         (
           refsResponse.body.aggregations?.by_event as unknown as {
             buckets?: Array<{
               key: string;
               doc_count: number;
-              by_kind?: { buckets?: Array<{ key: number; doc_count: number }> };
+              by_kind?: {
+                buckets?: Array<{ key: number; doc_count: number }>;
+              };
             }>;
           }
         )?.buckets || [];
@@ -400,61 +500,37 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
         const eventId = bucket.key;
         const totalRefs = bucket.doc_count;
         const kindBuckets = bucket.by_kind?.buckets || [];
-
-        // Count replies vs positive engagement (reactions + reposts) for controversial
-        let replies = 0;
-        let engagement = 0;
-
-        for (const kindBucket of kindBuckets) {
-          const kind = kindBucket.key;
-          const count = kindBucket.doc_count;
-
-          if (kind === 1) {
-            replies += count; // Replies
-          } else if (kind === 6 || kind === 7) {
-            engagement += count; // Reposts + reactions
-          }
-        }
-
-        reactionMap.set(eventId, {
-          replies,
-          engagement,
-          total: replies + engagement,
-        });
-
-        // Calculate score based on mode
-        let score = 0;
-        const event = events.find((e) => e.id === eventId);
+        const event = eventsById.get(eventId);
         if (!event) continue;
 
         const ageInHours = (now - event.created_at) / 3600;
+        let score = 0;
 
         switch (sortMode) {
           case "top":
-            // Total reference count
             score = totalRefs;
             break;
 
           case "hot":
-            // Recent popularity with exponential decay (24h half-life)
             score = totalRefs * 0.5 ** (ageInHours / 24);
             break;
 
           case "controversial": {
-            // "Ratio-ed" — high replies relative to positive engagement (reactions + reposts)
-            const reactions = reactionMap.get(eventId);
-            if (reactions) {
-              const balanced = Math.min(
-                reactions.replies,
-                reactions.engagement,
-              );
-              score = balanced * Math.sqrt(reactions.total);
+            let replies = 0;
+            let engagement = 0;
+            for (const kindBucket of kindBuckets) {
+              if (kindBucket.key === 1) {
+                replies += kindBucket.doc_count;
+              } else if (kindBucket.key === 6 || kindBucket.key === 7) {
+                engagement += kindBucket.doc_count;
+              }
             }
+            const balanced = Math.min(replies, engagement);
+            score = balanced * Math.sqrt(replies + engagement);
             break;
           }
 
           case "rising":
-            // Engagement velocity (refs per hour)
             score = totalRefs / Math.max(ageInHours, 0.1);
             break;
         }
@@ -462,25 +538,13 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
         scoreMap.set(eventId, score);
       }
 
-      // Score events that had no references as 0
-      for (const event of events) {
-        if (!scoreMap.has(event.id)) {
-          scoreMap.set(event.id, 0);
-        }
-      }
-
-      // Sort events by score (descending)
-      const sortedEvents = [...events].sort((a, b) => {
-        const scoreA = scoreMap.get(a.id) || 0;
-        const scoreB = scoreMap.get(b.id) || 0;
-        return scoreB - scoreA;
-      });
-
-      return sortedEvents;
+      // Collect events that were found, sorted by score descending
+      return [...eventsById.values()]
+        .filter((e) => scoreMap.has(e.id))
+        .sort((a, b) => (scoreMap.get(b.id) || 0) - (scoreMap.get(a.id) || 0));
     } catch (error) {
       console.error("Event scoring failed:", error);
-      // Return events in original order if scoring fails
-      return events;
+      return [...eventsById.values()];
     }
   }
 
@@ -491,7 +555,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
    */
   private async scoreEventsByZaps(
     eventIds: string[],
-    events: NostrEvent[],
+    eventsById: Map<string, NostrEvent>,
   ): Promise<NostrEvent[]> {
     const zapQuery = {
       bool: {
@@ -547,19 +611,14 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
         scoreMap.set(bucket.key, bucket.total_sats?.value ?? 0);
       }
 
-      // Only include events that have actually been zapped, sorted by total sats descending
-      return events
+      return [...eventsById.values()]
         .filter(
           (event) => scoreMap.has(event.id) && scoreMap.get(event.id)! > 0,
         )
-        .sort((a, b) => {
-          const scoreA = scoreMap.get(a.id) || 0;
-          const scoreB = scoreMap.get(b.id) || 0;
-          return scoreB - scoreA;
-        });
+        .sort((a, b) => (scoreMap.get(b.id) || 0) - (scoreMap.get(a.id) || 0));
     } catch (error) {
       console.error("Zap scoring failed:", error);
-      return events;
+      return [...eventsById.values()];
     }
   }
 
