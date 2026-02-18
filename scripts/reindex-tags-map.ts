@@ -1,10 +1,19 @@
 /**
- * Reindex tags_map for all documents so that only tag[1] (the first value)
- * is stored per tag, instead of all tag values.
+ * Reindex tags_map for all documents, applying the same validation as
+ * buildTagsMap in opensearch.ts:
  *
- * This is needed after the buildTagsMap fix to correct existing documents.
+ * - Only tag[1] (the first value) is stored per tag.
+ * - Tag names must be alphanumeric (plus hyphens/underscores) and ≤ 15 chars.
+ * - Tag values must be ≤ 255 characters.
+ *
+ * This corrects existing documents that may have been indexed with
+ * invalid tag names (hex pubkeys, timestamps, etc.) or oversized values.
  * Uses update_by_query with a Painless script to recompute tags_map
  * server-side without fetching any documents.
+ *
+ * Note: This cleans up document data but does NOT remove stale fields
+ * from the index mapping. To fully clean up garbage fields, reindex
+ * into a fresh index.
  *
  * Usage:
  *   bun run scripts/reindex-tags-map.ts
@@ -39,20 +48,27 @@ async function main() {
 
   const client = new OpenSearchClient(clientOptions);
 
-  // Painless script that rebuilds tags_map from ctx._source.tags
-  // This mirrors the buildTagsMap logic: for each tag with >= 2 elements,
-  // collect tag[1] values grouped by tag[0].
+  // Painless script that rebuilds tags_map from ctx._source.tags.
+  // Mirrors the buildTagsMap validation logic:
+  // - Tag names must be alphanumeric (plus hyphens/underscores) and ≤ 15 chars.
+  // - Tag values must be ≤ 255 characters.
   const painlessScript = `
+    Pattern tagNamePattern = /^[\\w-]{1,15}$/;
     Map tagsMap = new HashMap();
     if (ctx._source.tags != null) {
       for (def tag : ctx._source.tags) {
         if (tag != null && tag.size() >= 2) {
           String tagName = tag[0].toString();
+          if (!tagNamePattern.matcher(tagName).matches()) {
+            continue;
+          }
           String value = tag[1].toString();
           if (!tagsMap.containsKey(tagName)) {
             tagsMap.put(tagName, new ArrayList());
           }
-          tagsMap.get(tagName).add(value);
+          if (value.length() <= 255) {
+            tagsMap.get(tagName).add(value);
+          }
         }
       }
     }
