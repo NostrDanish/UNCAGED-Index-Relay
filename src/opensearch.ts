@@ -1315,31 +1315,62 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     }
   }
 
+  /** Mapping properties for the Nostr events index. */
+  // biome-ignore lint/suspicious/noExplicitAny: OpenSearch client types are overly strict for dynamic mappings
+  private static MAPPING_PROPERTIES: Record<string, any> = {
+    id: { type: "keyword" },
+    pubkey: { type: "keyword" },
+    created_at: { type: "long" },
+    kind: { type: "integer" },
+    tags: {
+      type: "object",
+      enabled: false,
+    },
+    tags_map: {
+      type: "object",
+      dynamic: "true",
+    },
+    content: {
+      type: "text",
+      analyzer: "standard",
+    },
+    sig: { type: "keyword" },
+    deleted: { type: "boolean" },
+    protocol: { type: "keyword" },
+    amount_msats: { type: "long" },
+    language: { type: "keyword" },
+    sentiment: { type: "keyword" },
+  };
+
   /**
-   * Initialize OpenSearch index with simple mappings
+   * Initialize OpenSearch index with mappings, or update mappings on an
+   * existing index.
+   *
+   * OpenSearch's `putMapping` is additive — it only introduces new fields
+   * and never removes or alters existing ones — so it is safe to call on
+   * every startup. This ensures that newly added fields (e.g. `sentiment`)
+   * are available on indices that were created before the field existed.
    */
   async migrate(): Promise<void> {
     try {
       // Check if index or alias already exists
-      const indexExists = await this.client.indices.exists({
-        index: this.indexName,
-      });
+      const exists =
+        (await this.client.indices.exists({ index: this.indexName })).body ||
+        (await this.client.indices.existsAlias({ name: this.indexName })).body;
 
-      if (indexExists.body) {
-        console.log(`Index ${this.indexName} already exists`);
+      if (exists) {
+        // Update mappings so any new fields are added to the existing index.
+        await this.client.indices.putMapping({
+          index: this.indexName,
+          body: {
+            properties: OpenSearchRelay.MAPPING_PROPERTIES,
+          },
+        });
+        console.log(`Updated mappings for index ${this.indexName}`);
         return;
       }
 
-      const aliasExists = await this.client.indices.existsAlias({
-        name: this.indexName,
-      });
-
-      if (aliasExists.body) {
-        console.log(`Alias ${this.indexName} already exists`);
-        return;
-      }
-
-      // Create index with simple mappings
+      // Create index with full settings and mappings.
       await this.client.indices.create({
         index: this.indexName,
         body: {
@@ -1358,30 +1389,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
                 },
               },
             ],
-            properties: {
-              id: { type: "keyword" },
-              pubkey: { type: "keyword" },
-              created_at: { type: "long" },
-              kind: { type: "integer" },
-              tags: {
-                type: "object",
-                enabled: false,
-              },
-              tags_map: {
-                type: "object",
-                dynamic: "true",
-              },
-              content: {
-                type: "text",
-                analyzer: "standard",
-              },
-              sig: { type: "keyword" },
-              deleted: { type: "boolean" },
-              protocol: { type: "keyword" },
-              amount_msats: { type: "long" },
-              language: { type: "keyword" },
-              sentiment: { type: "keyword" },
-            },
+            properties: OpenSearchRelay.MAPPING_PROPERTIES,
           },
         },
       });
