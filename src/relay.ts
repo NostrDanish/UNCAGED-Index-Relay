@@ -12,6 +12,8 @@ import type { AnalyzeResult } from "./analyze-pool.ts";
 export interface EventAnalysis {
   language?: string;
   sentiment?: string;
+  media?: boolean;
+  video?: boolean;
 }
 
 /** Extended NRelay that accepts pre-computed analysis data on event ingestion. */
@@ -346,12 +348,14 @@ export class Relay {
     }
 
     // Store the event, passing pre-computed analysis results to avoid
-    // redundant language/sentiment detection on the main thread.
+    // redundant detection on the main thread.
     try {
       const eventOpts = {
         analysis: {
           language: analysis.language,
           sentiment: analysis.sentiment,
+          media: analysis.media,
+          video: analysis.video,
         },
       };
       await this.storage.event(event, eventOpts);

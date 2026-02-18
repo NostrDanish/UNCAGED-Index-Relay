@@ -2267,11 +2267,11 @@ describe("OpenSearchRelay", () => {
       await relay.event(event);
 
       const doc = [...documents.values()][0] as {
-        media?: boolean;
-        video?: boolean;
+        media: boolean;
+        video: boolean;
       };
       assert.equal(doc.media, true);
-      assert.equal(doc.video, undefined);
+      assert.equal(doc.video, false);
     });
 
     it("should set video:true when all imeta attachments are video", async () => {
@@ -2297,8 +2297,8 @@ describe("OpenSearchRelay", () => {
       await relay.event(event);
 
       const doc = [...documents.values()][0] as {
-        media?: boolean;
-        video?: boolean;
+        media: boolean;
+        video: boolean;
       };
       assert.equal(doc.media, true);
       assert.equal(doc.video, true);
@@ -2330,11 +2330,11 @@ describe("OpenSearchRelay", () => {
       await relay.event(event);
 
       const doc = [...documents.values()][0] as {
-        media?: boolean;
-        video?: boolean;
+        media: boolean;
+        video: boolean;
       };
       assert.equal(doc.media, true);
-      assert.equal(doc.video, undefined);
+      assert.equal(doc.video, false);
     });
 
     it("should not set media for events without media", async () => {
@@ -2360,11 +2360,11 @@ describe("OpenSearchRelay", () => {
       await relay.event(event);
 
       const doc = [...documents.values()][0] as {
-        media?: boolean;
-        video?: boolean;
+        media: boolean;
+        video: boolean;
       };
-      assert.equal(doc.media, undefined);
-      assert.equal(doc.video, undefined);
+      assert.equal(doc.media, false);
+      assert.equal(doc.video, false);
     });
 
     it("should detect media from URLs in content as fallback for kind 1", async () => {
@@ -2390,8 +2390,8 @@ describe("OpenSearchRelay", () => {
       await relay.event(event);
 
       const doc = [...documents.values()][0] as {
-        media?: boolean;
-        video?: boolean;
+        media: boolean;
+        video: boolean;
       };
       assert.equal(doc.media, true);
     });
@@ -2419,8 +2419,8 @@ describe("OpenSearchRelay", () => {
       await relay.event(event);
 
       const doc = [...documents.values()][0] as {
-        media?: boolean;
-        video?: boolean;
+        media: boolean;
+        video: boolean;
       };
       assert.equal(doc.media, true);
       assert.equal(doc.video, true);

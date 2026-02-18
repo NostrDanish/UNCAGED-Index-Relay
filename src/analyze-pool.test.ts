@@ -33,6 +33,24 @@ describe("AnalyzePool", () => {
     );
   }
 
+  /** Create a valid signed event with tags. */
+  function createValidEventWithTags(
+    content: string,
+    tags: string[][],
+    kind = 1,
+  ): NostrEvent {
+    const sk = generateSecretKey();
+    return finalizeEvent(
+      {
+        kind,
+        created_at: Math.floor(Date.now() / 1000),
+        tags,
+        content,
+      },
+      sk,
+    );
+  }
+
   /** Create an event with an invalid signature. */
   function createInvalidEvent(): NostrEvent {
     const event = createValidEvent("invalid");
@@ -230,5 +248,45 @@ describe("AnalyzePool", () => {
 
     const results = await Promise.all(events.map((e) => pool.analyze(e)));
     assert.ok(results.every((r) => r.verified === true));
+  });
+
+  it("should detect media and video from events", async () => {
+    console.log = () => {};
+    pool = new AnalyzePool(1);
+
+    // imeta with image -> media:true, no video
+    const imageEvent = createValidEventWithTags(
+      "Check this out https://example.com/photo.jpg",
+      [["imeta", "url https://example.com/photo.jpg", "m image/jpeg"]],
+    );
+    const imageResult = await pool.analyze(imageEvent);
+    assert.equal(imageResult.verified, true);
+    assert.equal(imageResult.media, true);
+    assert.equal(imageResult.video, undefined);
+
+    // imeta with video -> media:true, video:true
+    const videoEvent = createValidEventWithTags(
+      "Watch this https://example.com/clip.mp4",
+      [["imeta", "url https://example.com/clip.mp4", "m video/mp4"]],
+    );
+    const videoResult = await pool.analyze(videoEvent);
+    assert.equal(videoResult.verified, true);
+    assert.equal(videoResult.media, true);
+    assert.equal(videoResult.video, true);
+
+    // No media at all
+    const textEvent = createValidEvent("Just a text post, no media here");
+    const textResult = await pool.analyze(textEvent);
+    assert.equal(textResult.verified, true);
+    assert.equal(textResult.media, undefined);
+    assert.equal(textResult.video, undefined);
+
+    // URL fallback detection for kind 1 without imeta
+    const urlEvent = createValidEvent(
+      "Look at this https://example.com/photo.png",
+    );
+    const urlResult = await pool.analyze(urlEvent);
+    assert.equal(urlResult.verified, true);
+    assert.equal(urlResult.media, true);
   });
 });

@@ -35,6 +35,8 @@ const SENTIMENT_THRESHOLD = 0.1;
 /** NIP-30 custom emoji shortcodes like `:soapbox:`. */
 const CUSTOM_EMOJI_RE = /^:[\w-]+:$/;
 
+import { detectMedia } from "./media.ts";
+
 /**
  * Detect the language of a Nostr event's content using `tinyld`.
  *
@@ -129,14 +131,17 @@ self.onmessage = (event: MessageEvent<NostrEvent>) => {
     return;
   }
 
-  // Step 2: Detect language and sentiment (only for verified events)
+  // Step 2: Detect language, sentiment, and media (only for verified events)
   const language = detectEventLanguage(nostrEvent);
   const sentiment = detectEventSentiment(nostrEvent);
+  const { media, video } = detectMedia(nostrEvent);
 
   postMessage({
     id,
     verified,
     ...(language && { language }),
     ...(sentiment && { sentiment }),
+    ...(media !== undefined && { media }),
+    ...(video !== undefined && { video }),
   } satisfies { id: string } & AnalyzeResult);
 };

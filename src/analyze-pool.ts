@@ -5,6 +5,8 @@ export interface AnalyzeResult {
   verified: boolean;
   language?: string;
   sentiment?: string;
+  media?: boolean;
+  video?: boolean;
 }
 
 interface PendingRequest {
@@ -33,7 +35,7 @@ export class AnalyzePool {
       worker.onmessage = (
         event: MessageEvent<{ id: string } & AnalyzeResult>,
       ) => {
-        const { id, verified, language, sentiment } = event.data;
+        const { id, verified, language, sentiment, media, video } = event.data;
         const request = this.pending.get(id);
         if (request) {
           this.pending.delete(id);
@@ -41,6 +43,8 @@ export class AnalyzePool {
             verified,
             ...(language && { language }),
             ...(sentiment && { sentiment }),
+            ...(media !== undefined && { media }),
+            ...(video !== undefined && { video }),
           });
         }
       };

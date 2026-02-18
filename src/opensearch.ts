@@ -11,6 +11,7 @@ import type { Client, ClientOptions } from "@opensearch-project/opensearch";
 import { Client as OpenSearchClient } from "@opensearch-project/opensearch";
 import { naddrEncode, noteEncode } from "nostr-tools/nip19";
 import type { Config } from "./config.ts";
+import { detectMedia } from "./media.ts";
 
 /**
  * OpenSearch document structure for Nostr events
@@ -22,8 +23,8 @@ interface NostrEventDocument extends NostrEvent {
   amount_msats?: number;
   language?: string;
   sentiment?: string;
-  media?: boolean;
-  video?: boolean;
+  media: boolean;
+  video: boolean;
 }
 
 /** Pending bulk operation for an event. */
@@ -177,107 +178,11 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     return Math.round(num * msatsPerUnit[multiplier]);
   }
 
-  /** Known media file extensions mapped to their base MIME type. */
-  private static MEDIA_EXTENSIONS: Record<string, string> = {
-    // Images
-    jpg: "image",
-    jpeg: "image",
-    png: "image",
-    gif: "image",
-    webp: "image",
-    svg: "image",
-    avif: "image",
-    bmp: "image",
-    ico: "image",
-    tiff: "image",
-    // Video
-    mp4: "video",
-    webm: "video",
-    mov: "video",
-    avi: "video",
-    mkv: "video",
-    ogv: "video",
-    m4v: "video",
-    // Audio
-    mp3: "audio",
-    ogg: "audio",
-    wav: "audio",
-    flac: "audio",
-    aac: "audio",
-    m4a: "audio",
-    opus: "audio",
-  };
-
-  /** Regex to extract file extension from a URL path. */
-  private static MEDIA_URL_RE =
-    /https?:\/\/\S+\.(\w+)(?:\?\S*)?(?:#\S*)?(?=\s|$)/gi;
-
-  /**
-   * Parse imeta tags from an event into structured metadata entries.
-   * Each imeta tag has the format: ["imeta", "key value", "key value", ...]
-   */
-  private static parseImeta(event: NostrEvent): Array<Map<string, string>> {
-    return event.tags
-      .filter(([name]) => name === "imeta")
-      .map(([, ...entries]) => {
-        const map = new Map<string, string>();
-        for (const entry of entries) {
-          const spaceIdx = entry.indexOf(" ");
-          if (spaceIdx > 0) {
-            map.set(entry.slice(0, spaceIdx), entry.slice(spaceIdx + 1));
-          }
-        }
-        return map;
-      })
-      .filter((map) => map.has("url"));
-  }
-
   /**
    * Detect media attachments for an event.
-   *
-   * Returns `{ media: true }` if the event has any media attachments, and
-   * additionally `{ video: true }` if **all** media attachments are video.
-   *
-   * Detection uses two strategies:
-   * 1. **Primary** — NIP-92 `imeta` tags with MIME type (`m`) metadata.
-   * 2. **Fallback** — For kind 1 events without `imeta` tags, scan content
-   *    for URLs with known media file extensions.
+   * Delegates to the shared `detectMedia()` function in `media.ts`.
    */
-  static detectMedia(event: NostrEvent): { media?: boolean; video?: boolean } {
-    const imeta = OpenSearchRelay.parseImeta(event);
-
-    // Fallback: for kind 1 events without imeta tags, detect media URLs in content
-    if (imeta.length === 0 && event.kind === 1) {
-      const urlMatches = event.content.matchAll(OpenSearchRelay.MEDIA_URL_RE);
-      for (const match of urlMatches) {
-        const ext = match[1].toLowerCase();
-        const baseType = OpenSearchRelay.MEDIA_EXTENSIONS[ext];
-        if (baseType) {
-          const map = new Map<string, string>();
-          map.set("url", match[0]);
-          map.set("m", `${baseType}/${ext}`);
-          imeta.push(map);
-        }
-      }
-    }
-
-    if (imeta.length === 0) {
-      return {};
-    }
-
-    const result: { media?: boolean; video?: boolean } = { media: true };
-
-    if (
-      imeta.every((tags) => {
-        const m = tags.get("m");
-        return m?.startsWith("video/");
-      })
-    ) {
-      result.video = true;
-    }
-
-    return result;
-  }
+  static detectMedia = detectMedia;
 
   /**
    * Convert NostrEvent to OpenSearch document.
@@ -286,7 +191,12 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
    */
   private eventToDocument(
     event: NostrEvent,
-    analysis?: { language?: string; sentiment?: string },
+    analysis?: {
+      language?: string;
+      sentiment?: string;
+      media?: boolean;
+      video?: boolean;
+    },
   ): NostrEventDocument {
     const tagsMap = this.buildTagsMap(event.tags);
 
@@ -309,8 +219,12 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     const language = analysis?.language;
     const sentiment = analysis?.sentiment;
 
-    // Detect media attachments from imeta tags (NIP-92)
-    const { media, video } = OpenSearchRelay.detectMedia(event);
+    // Use pre-computed media detection from the analyze worker when available,
+    // otherwise detect on the main thread (direct event() calls, eg tests).
+    const mediaResult =
+      analysis?.media !== undefined
+        ? { media: analysis.media, video: analysis.video }
+        : OpenSearchRelay.detectMedia(event);
 
     return {
       ...event,
@@ -320,8 +234,8 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
       ...(amount_msats !== undefined && { amount_msats }),
       ...(language && { language }),
       ...(sentiment && { sentiment }),
-      ...(media !== undefined && { media }),
-      ...(video !== undefined && { video }),
+      media: mediaResult.media ?? false,
+      video: mediaResult.video ?? false,
     };
   }
 
@@ -1052,7 +966,12 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     event: NostrEvent,
     opts?: {
       signal?: AbortSignal;
-      analysis?: { language?: string; sentiment?: string };
+      analysis?: {
+        language?: string;
+        sentiment?: string;
+        media?: boolean;
+        video?: boolean;
+      };
     },
   ): Promise<void> {
     const doc = this.eventToDocument(event, opts?.analysis);
