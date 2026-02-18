@@ -88,6 +88,8 @@ async function main() {
     // Use search_after for cursor-based pagination (no server-side state, runs indefinitely)
     console.error("Exporting events...");
     const batchSize = 1000;
+    const maxRetries = 10;
+    const retryBaseDelay = 5000; // 5 seconds base delay for retries
     let exportedCount = 0;
     let searchAfter: [number, string] | undefined;
 
@@ -99,21 +101,45 @@ async function main() {
           { created_at: { order: "desc" as const } },
           { id: { order: "desc" as const } },
         ],
+        // Disable request cache to reduce memory pressure
+        request_cache: false,
       };
 
       if (searchAfter) {
         searchBody.search_after = searchAfter;
       }
 
-      const response = await client.search({
-        index: config.opensearchIndex,
-        body: searchBody,
-      });
-
-      const hits = response.body.hits.hits as unknown as Array<{
+      // Retry loop for transient errors (circuit breaker, 429, etc.)
+      let hits: Array<{
         _source: NostrEventDocument;
         sort: [number, string];
       }>;
+
+      let retries = 0;
+      while (true) {
+        try {
+          const response = await client.search({
+            index: config.opensearchIndex,
+            body: searchBody,
+          });
+
+          hits = response.body.hits.hits as unknown as typeof hits;
+          break;
+        } catch (error) {
+          const status = (error as { meta?: { statusCode?: number } }).meta
+            ?.statusCode;
+          if (status === 429 && retries < maxRetries) {
+            retries++;
+            const delay = retryBaseDelay * retries;
+            console.error(
+              `⚠️  Circuit breaker hit (attempt ${retries}/${maxRetries}), waiting ${delay / 1000}s...`,
+            );
+            await new Promise((resolve) => setTimeout(resolve, delay));
+            continue;
+          }
+          throw error;
+        }
+      }
 
       if (hits.length === 0) {
         break;
@@ -127,9 +153,11 @@ async function main() {
       }
 
       // Progress update to stderr (so it doesn't interfere with JSONL output)
-      console.error(
-        `Progress: ${exportedCount}/${totalEvents} (${Math.round((exportedCount / totalEvents) * 100)}%)`,
-      );
+      if (exportedCount % 10000 === 0 || hits.length < batchSize) {
+        console.error(
+          `Progress: ${exportedCount}/${totalEvents} (${Math.round((exportedCount / totalEvents) * 100)}%)`,
+        );
+      }
 
       // Set cursor for next page
       searchAfter = hits[hits.length - 1].sort;
