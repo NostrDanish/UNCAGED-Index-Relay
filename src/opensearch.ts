@@ -318,6 +318,31 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
   }
 
   /**
+   * Check if a filter has search extension tokens that constrain target events
+   * (e.g. `language:`, `protocol:`). Tokens like `sort:` and `distinct:` are
+   * excluded because they control query behaviour, not target filtering.
+   */
+  private hasTargetFilters(filter: NostrFilter): boolean {
+    if (!filter.search) return false;
+
+    const tokens = NIP50.parseInput(filter.search);
+    return tokens.some(
+      (t) => typeof t === "object" && t.key !== "sort" && t.key !== "distinct",
+    );
+  }
+
+  /**
+   * Compute the aggregation bucket count for sort queries.
+   * When the filter includes target-constraining extensions (language, protocol,
+   * etc.), we need many more candidate buckets because the target fetch will
+   * filter most of them out.
+   */
+  private sortBucketCount(filter: NostrFilter, limit: number): number {
+    const base = Math.max(limit * 10, 1000);
+    return this.hasTargetFilters(filter) ? Math.max(base, 50000) : base;
+  }
+
+  /**
    * Query events with NIP-50 sort algorithms using aggregation-first approach.
    *
    * Each sort mode aggregates referencing events (with the appropriate time
@@ -409,7 +434,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     filter: NostrFilter,
     limit: number,
   ): Promise<NostrEvent[]> {
-    const bucketCount = Math.max(limit * 10, 1000);
+    const bucketCount = this.sortBucketCount(filter, limit);
 
     // Aggregate referencing events (no time window — all time)
     const aggMust: Record<string, unknown>[] = [
@@ -483,7 +508,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     limit: number,
   ): Promise<NostrEvent[]> {
     const now = Math.floor(Date.now() / 1000);
-    const bucketCount = Math.max(limit * 10, 1000);
+    const bucketCount = this.sortBucketCount(filter, limit);
     const timeWindow = 7 * 24 * 60 * 60; // 7 days
 
     const since = filter.since || now - timeWindow;
@@ -562,7 +587,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     limit: number,
   ): Promise<NostrEvent[]> {
     const now = Math.floor(Date.now() / 1000);
-    const bucketCount = Math.max(limit * 10, 1000);
+    const bucketCount = this.sortBucketCount(filter, limit);
     const timeWindow = 7 * 24 * 60 * 60; // 7 days
 
     const since = filter.since || now - timeWindow;
@@ -648,7 +673,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     limit: number,
   ): Promise<NostrEvent[]> {
     const now = Math.floor(Date.now() / 1000);
-    const bucketCount = Math.max(limit * 10, 1000);
+    const bucketCount = this.sortBucketCount(filter, limit);
     const timeWindow = 48 * 60 * 60; // 48 hours
 
     const since = filter.since || now - timeWindow;
@@ -714,7 +739,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     filter: NostrFilter,
     limit: number,
   ): Promise<NostrEvent[]> {
-    const bucketCount = Math.max(limit * 10, 1000);
+    const bucketCount = this.sortBucketCount(filter, limit);
 
     const aggMust: Record<string, unknown>[] = [
       { term: { deleted: false } },
