@@ -143,8 +143,11 @@ async function main() {
       }
       ctx._source.tags_map = tagsMap;
 
-      // Strip language field (will be re-detected by backfill script)
+      // Strip fields that don't belong in the new strict mapping
       ctx._source.remove('language');
+      ctx._source.remove('metadata');
+      ctx._source.remove('relays');
+      ctx._source.remove('_relays');
 
       // Extract protocol from proxy tag (NIP-48)
       if (ctx._source.tags != null) {
