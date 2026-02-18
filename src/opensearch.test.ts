@@ -2077,6 +2077,105 @@ describe("OpenSearchRelay", () => {
     });
   });
 
+  describe("migrate", () => {
+    it("should reject documents with unknown fields (dynamic: strict)", async () => {
+      const KNOWN_FIELDS = new Set([
+        "id",
+        "pubkey",
+        "created_at",
+        "kind",
+        "tags",
+        "tags_map",
+        "content",
+        "sig",
+        "deleted",
+        "protocol",
+        "amount_msats",
+        "language",
+      ]);
+
+      const mockClient = {
+        bulk: async ({ body }: { body: unknown[] }) => {
+          const items: Array<Record<string, unknown>> = [];
+          for (let i = 0; i < body.length; i += 2) {
+            const action = body[i] as { index?: { _id: string } };
+            const payload = body[i + 1] as Record<string, unknown>;
+
+            if (action.index) {
+              // Simulate dynamic: strict — reject docs with unknown fields
+              const unknownFields = Object.keys(payload).filter(
+                (key) => !KNOWN_FIELDS.has(key),
+              );
+              if (unknownFields.length > 0) {
+                items.push({
+                  index: {
+                    error: {
+                      type: "strict_dynamic_mapping_exception",
+                      reason: `mapping set to strict, dynamic introduction of [${unknownFields[0]}] within [_doc] is not allowed`,
+                    },
+                  },
+                });
+              } else {
+                items.push({ index: {} });
+              }
+            }
+          }
+          return {
+            body: {
+              errors: items.some(
+                (item) =>
+                  (item.index as { error?: unknown } | undefined)?.error,
+              ),
+              items,
+            },
+          };
+        },
+        indices: {
+          exists: async () => ({ body: true }),
+          create: async () => ({ body: {} }),
+        },
+        close: async () => {},
+      };
+
+      const relay = new OpenSearchRelay(mockClient as unknown as Client, {
+        indexName: "test-index",
+        bulkMaxSize: 1,
+      });
+
+      const sk = generateSecretKey();
+      const event = finalizeEvent(
+        {
+          kind: 1,
+          created_at: Math.floor(Date.now() / 1000),
+          tags: [],
+          content: "Normal event",
+        },
+        sk,
+      );
+
+      // A well-formed event should be accepted
+      await relay.event(event);
+
+      // An event with a spoofed extra field should be rejected
+      const badEvent = {
+        ...finalizeEvent(
+          {
+            kind: 1,
+            created_at: Math.floor(Date.now() / 1000),
+            tags: [],
+            content: "Bad event",
+          },
+          sk,
+        ),
+        mystery_field: "should not be allowed",
+      };
+
+      await assert.rejects(() => relay.event(badEvent), {
+        message: /strict_dynamic_mapping_exception/,
+      });
+    });
+  });
+
   describe("parseBolt11Amount", () => {
     it("should parse nano-BTC amounts", () => {
       // 210n = 210 nano-BTC = 21 sats = 21,000 msats
