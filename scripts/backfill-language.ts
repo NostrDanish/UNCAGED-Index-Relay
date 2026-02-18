@@ -4,20 +4,45 @@
  *
  * Unlike backfill-protocol.ts (which uses a Painless script), this script
  * must run client-side because language detection uses the `tinyld` JS
- * library.  It scrolls through all documents missing a `language` field,
- * detects the language from `content` (honouring `["l", …, "ISO-639-1"]`
- * tags), and bulk-updates the results.
+ * library.  It scrolls through all documents missing a `language` field
+ * whose kind is eligible for detection, runs tinyld, and bulk-updates
+ * the results.
  *
  * Usage:
  *   bun run scripts/backfill-language.ts
  */
 
 import process from "node:process";
+import { NSchema as n } from "@nostrify/nostrify";
 import type { ClientOptions } from "@opensearch-project/opensearch";
 import { Client as OpenSearchClient } from "@opensearch-project/opensearch";
 import { detect as detectLanguage } from "tinyld";
 import { Config } from "../src/config.ts";
 import { OpenSearchRelay } from "../src/opensearch.ts";
+
+/** Detect language from a document's kind and content. */
+function detectDocLanguage(kind: number, content: string): string | undefined {
+  let text: string;
+
+  if (kind === 0) {
+    const result = n.json().pipe(n.metadata()).safeParse(content);
+    if (!result.success) return undefined;
+    text = [result.data.name, result.data.display_name, result.data.about]
+      .filter(Boolean)
+      .join(" ");
+  } else if (OpenSearchRelay.TEXT_KINDS.has(kind)) {
+    text = content;
+  } else {
+    return undefined;
+  }
+
+  if (text.length < OpenSearchRelay.MIN_LANGUAGE_DETECT_LENGTH) {
+    return undefined;
+  }
+
+  const detected = detectLanguage(text);
+  return detected || undefined;
+}
 
 async function main() {
   console.log("Starting language field backfill\n");
@@ -61,12 +86,16 @@ async function main() {
       console.warn("Warning: could not update mapping (may already exist):", e);
     }
 
+    // Only query kinds that are eligible for language detection.
+    const eligibleKinds = [0, ...OpenSearchRelay.TEXT_KINDS];
+
     // Count documents missing the language field
     const countResponse = await client.count({
       index: config.opensearchIndex,
       body: {
         query: {
           bool: {
+            must: [{ terms: { kind: eligibleKinds } }],
             must_not: [{ exists: { field: "language" } }],
           },
         },
@@ -74,7 +103,7 @@ async function main() {
     });
     const total = (countResponse.body as { count: number }).count;
     console.log(
-      `Found ${total.toLocaleString()} documents without a language field.\n`,
+      `Found ${total.toLocaleString()} eligible documents without a language field.\n`,
     );
 
     if (total === 0) {
@@ -84,7 +113,7 @@ async function main() {
 
     // Scroll through documents missing the language field
     const SCROLL_SIZE = 1000;
-    const SCROLL_TTL = "5m";
+    const SCROLL_TTL = "2h";
     let updated = 0;
     let skipped = 0;
 
@@ -93,9 +122,10 @@ async function main() {
       scroll: SCROLL_TTL,
       body: {
         size: SCROLL_SIZE,
-        _source: ["content", "tags"],
+        _source: ["kind", "content"],
         query: {
           bool: {
+            must: [{ terms: { kind: eligibleKinds } }],
             must_not: [{ exists: { field: "language" } }],
           },
         },
@@ -107,7 +137,7 @@ async function main() {
       initialResponse.body.hits as unknown as {
         hits: Array<{
           _id: string;
-          _source: { content: string; tags: string[][] };
+          _source: { kind: number; content: string };
         }>;
       }
     ).hits;
@@ -116,23 +146,8 @@ async function main() {
       const bulkBody: Array<Record<string, unknown>> = [];
 
       for (const hit of hits) {
-        const { content, tags } = hit._source;
-
-        // Check for author-declared language tag first
-        const langTag = (tags ?? []).find(
-          (t: string[]) => t[0] === "l" && t[2] === "ISO-639-1" && t[1],
-        );
-
-        let language: string | undefined;
-        if (langTag) {
-          language = langTag[1].toLowerCase();
-        } else if (
-          content &&
-          content.length >= OpenSearchRelay.MIN_LANGUAGE_DETECT_LENGTH
-        ) {
-          const detected = detectLanguage(content);
-          language = detected || undefined;
-        }
+        const { kind, content } = hit._source;
+        const language = detectDocLanguage(kind, content);
 
         if (language) {
           bulkBody.push({
@@ -183,7 +198,7 @@ async function main() {
         scrollResponse.body.hits as unknown as {
           hits: Array<{
             _id: string;
-            _source: { content: string; tags: string[][] };
+            _source: { kind: number; content: string };
           }>;
         }
       ).hits;

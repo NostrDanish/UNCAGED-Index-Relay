@@ -1777,20 +1777,6 @@ describe("OpenSearchRelay", () => {
       assert.equal(OpenSearchRelay.detectEventLanguage(event), "es");
     });
 
-    it("should honour author-declared language tag over auto-detection", () => {
-      const event: NostrEvent = {
-        id: "a".repeat(64),
-        pubkey: "b".repeat(64),
-        created_at: 0,
-        kind: 1,
-        tags: [["l", "pt", "ISO-639-1"]],
-        content: "This is actually English but the author says Portuguese",
-        sig: "c".repeat(128),
-      };
-
-      assert.equal(OpenSearchRelay.detectEventLanguage(event), "pt");
-    });
-
     it("should return undefined for very short content", () => {
       const event: NostrEvent = {
         id: "a".repeat(64),
@@ -1819,18 +1805,68 @@ describe("OpenSearchRelay", () => {
       assert.equal(OpenSearchRelay.detectEventLanguage(event), undefined);
     });
 
-    it("should lowercase the author-declared language tag", () => {
+    it("should return undefined for unsupported kinds", () => {
       const event: NostrEvent = {
         id: "a".repeat(64),
         pubkey: "b".repeat(64),
         created_at: 0,
-        kind: 1,
-        tags: [["l", "EN", "ISO-639-1"]],
-        content: "This is English",
+        kind: 7, // Reaction - not a text kind
+        tags: [],
+        content:
+          "This is a long enough English string but the kind is unsupported",
+        sig: "c".repeat(128),
+      };
+
+      assert.equal(OpenSearchRelay.detectEventLanguage(event), undefined);
+    });
+
+    it("should detect language from kind 0 metadata about field", () => {
+      const event: NostrEvent = {
+        id: "a".repeat(64),
+        pubkey: "b".repeat(64),
+        created_at: 0,
+        kind: 0,
+        tags: [],
+        content: JSON.stringify({
+          name: "Satoshi",
+          about:
+            "Bitcoin developer and enthusiast sharing thoughts on decentralization",
+        }),
         sig: "c".repeat(128),
       };
 
       assert.equal(OpenSearchRelay.detectEventLanguage(event), "en");
+    });
+
+    it("should detect Chinese from kind 0 metadata", () => {
+      const event: NostrEvent = {
+        id: "a".repeat(64),
+        pubkey: "b".repeat(64),
+        created_at: 0,
+        kind: 0,
+        tags: [],
+        content: JSON.stringify({
+          name: "中本聪",
+          about: "比特币开发者和爱好者，分享关于去中心化的想法",
+        }),
+        sig: "c".repeat(128),
+      };
+
+      assert.equal(OpenSearchRelay.detectEventLanguage(event), "zh");
+    });
+
+    it("should return undefined for kind 0 with invalid JSON", () => {
+      const event: NostrEvent = {
+        id: "a".repeat(64),
+        pubkey: "b".repeat(64),
+        created_at: 0,
+        kind: 0,
+        tags: [],
+        content: "not json at all",
+        sig: "c".repeat(128),
+      };
+
+      assert.equal(OpenSearchRelay.detectEventLanguage(event), undefined);
     });
   });
 
@@ -2038,35 +2074,6 @@ describe("OpenSearchRelay", () => {
 
       const results = await relay.query([{ kinds: [1] }]);
       assert.equal(results.length, 2);
-    });
-
-    it("should respect author-declared language tag in indexed document", async () => {
-      const { client, documents } = createLanguageMockClient();
-      const relay = new OpenSearchRelay(client as unknown as Client, {
-        indexName: "test-index",
-        bulkMaxSize: 1,
-      });
-
-      const sk = generateSecretKey();
-      const now = Math.floor(Date.now() / 1000);
-
-      const event = finalizeEvent(
-        {
-          kind: 1,
-          created_at: now,
-          tags: [["l", "fr", "ISO-639-1"]],
-          content:
-            "This is English text but the author tagged it as French for some reason",
-        },
-        sk,
-      );
-
-      await relay.event(event);
-
-      const doc = Array.from(documents.values())[0] as {
-        language?: string;
-      };
-      assert.equal(doc.language, "fr");
     });
   });
 

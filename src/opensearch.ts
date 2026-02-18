@@ -6,7 +6,7 @@ import type {
   NostrRelayEVENT,
   NRelay,
 } from "@nostrify/nostrify";
-import { NIP50, NKinds } from "@nostrify/nostrify";
+import { NIP50, NKinds, NSchema as n } from "@nostrify/nostrify";
 import type { Client, ClientOptions } from "@opensearch-project/opensearch";
 import { Client as OpenSearchClient } from "@opensearch-project/opensearch";
 import { naddrEncode, noteEncode } from "nostr-tools/nip19";
@@ -178,31 +178,48 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
   /** Minimum content length (in characters) required to attempt language detection. */
   static MIN_LANGUAGE_DETECT_LENGTH = 10;
 
+  /** Event kinds with plaintext content suitable for language detection. */
+  static TEXT_KINDS = new Set([
+    1, // Short Text Note (NIP-10)
+    11, // Thread (NIP-7D)
+    30023, // Long-form Content (NIP-23)
+    1111, // Comment (NIP-22)
+    9, // Chat Message (NIP-C7)
+    42, // Channel Message (NIP-28)
+    1311, // Live Chat Message (NIP-53)
+  ]);
+
   /**
-   * Detect the language of a Nostr event.
+   * Detect the language of a Nostr event's content using `tinyld`.
    *
-   * If the event has an `["l", "<code>", "ISO-639-1"]` tag, that value is
-   * used directly (author-declared language).  Otherwise `tinyld` is used to
-   * auto-detect the language from `content`.
+   * Only runs for kinds with meaningful text content. Kind 0 (metadata)
+   * is handled specially by parsing the JSON and joining the `name`,
+   * `display_name`, and `about` fields.
    *
    * Returns an ISO 639-1 two-letter code, or `undefined` when the language
    * cannot be determined.
    */
   static detectEventLanguage(event: NostrEvent): string | undefined {
-    // 1. Honour author-declared language tag (NIP-32 label)
-    const langTag = event.tags.find(
-      (t) => t[0] === "l" && t[2] === "ISO-639-1" && t[1],
-    );
-    if (langTag) {
-      return langTag[1].toLowerCase();
-    }
+    let text: string;
 
-    // 2. Auto-detect from content
-    if (event.content.length < OpenSearchRelay.MIN_LANGUAGE_DETECT_LENGTH) {
+    if (event.kind === 0) {
+      // Parse JSON metadata and join relevant text fields.
+      const result = n.json().pipe(n.metadata()).safeParse(event.content);
+      if (!result.success) return undefined;
+      text = [result.data.name, result.data.display_name, result.data.about]
+        .filter(Boolean)
+        .join(" ");
+    } else if (OpenSearchRelay.TEXT_KINDS.has(event.kind)) {
+      text = event.content;
+    } else {
       return undefined;
     }
 
-    const detected = detectLanguage(event.content);
+    if (text.length < OpenSearchRelay.MIN_LANGUAGE_DETECT_LENGTH) {
+      return undefined;
+    }
+
+    const detected = detectLanguage(text);
     return detected || undefined; // tinyld returns "" when unsure
   }
 
