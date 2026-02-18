@@ -83,6 +83,7 @@ async function main() {
             "index.refresh_interval": "30s", // Less frequent refresh during reindex
           },
           mappings: {
+            dynamic: "strict",
             dynamic_templates: [
               {
                 tags_map_keyword: {
@@ -97,7 +98,7 @@ async function main() {
               created_at: { type: "long" },
               kind: { type: "integer" },
               tags: { type: "object", enabled: false },
-              tags_map: { type: "object" },
+              tags_map: { type: "object", dynamic: "true" },
               content: { type: "text", analyzer: "standard" },
               sig: { type: "keyword" },
               deleted: { type: "boolean" },
