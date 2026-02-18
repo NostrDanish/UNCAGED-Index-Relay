@@ -19,6 +19,7 @@ interface NostrEventDocument extends NostrEvent {
   tags_map: Record<string, string[]>;
   deleted?: boolean;
   protocol?: string;
+  amount_msats?: number;
 }
 
 /** Pending bulk operation for an event. */
@@ -141,6 +142,38 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
   }
 
   /**
+   * Parse the amount in millisatoshis from a bolt11 invoice string.
+   * Returns undefined if the invoice cannot be parsed.
+   *
+   * BOLT 11 encodes amounts in the human-readable prefix as `lnbc{number}{multiplier}`:
+   * - `m` = milli-BTC (×100,000,000 msats)
+   * - `u` = micro-BTC (×100,000 msats)
+   * - `n` = nano-BTC  (×100 msats)
+   * - `p` = pico-BTC  (×0.1 msats, must be multiple of 10)
+   */
+  static parseBolt11Amount(bolt11: string): number | undefined {
+    const match = bolt11.match(/^lnbc(\d+)([munp])/);
+    if (!match) return undefined;
+
+    const num = Number.parseInt(match[1], 10);
+    const multiplier = match[2];
+
+    // 1 BTC = 10^8 sats = 10^11 msats
+    // m (milli) = 10^-3 BTC = 10^5 sats = 10^8  msats
+    // u (micro) = 10^-6 BTC = 10^2 sats = 10^5  msats
+    // n (nano)  = 10^-9 BTC = 10^-1 sats = 10^2  msats
+    // p (pico)  = 10^-12 BTC = 10^-4 sats = 10^-1 msats
+    const msatsPerUnit: Record<string, number> = {
+      m: 100_000_000,
+      u: 100_000,
+      n: 100,
+      p: 0.1,
+    };
+
+    return Math.round(num * msatsPerUnit[multiplier]);
+  }
+
+  /**
    * Convert NostrEvent to OpenSearch document
    */
   private eventToDocument(event: NostrEvent): NostrEventDocument {
@@ -153,11 +186,21 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     );
     const protocol = proxyTag?.[2];
 
+    // Extract zap amount from bolt11 for kind 9735 (zap receipts)
+    let amount_msats: number | undefined;
+    if (event.kind === 9735) {
+      const bolt11Tag = event.tags.find((t) => t[0] === "bolt11" && t[1]);
+      if (bolt11Tag) {
+        amount_msats = OpenSearchRelay.parseBolt11Amount(bolt11Tag[1]);
+      }
+    }
+
     return {
       ...event,
       tags_map: tagsMap,
       deleted: false,
       ...(protocol && { protocol }),
+      ...(amount_msats !== undefined && { amount_msats }),
     };
   }
 
@@ -306,7 +349,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
 
   /**
    * Query top events — most referenced of all time.
-   * Scored by doc_count (total references).
+   * Scored by unique authors (cardinality on pubkey) to resist spam.
    */
   private async querySortTop(
     filter: NostrFilter,
@@ -340,6 +383,11 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
               size: bucketCount,
               order: { _count: "desc" as const },
             },
+            aggs: {
+              unique_authors: {
+                cardinality: { field: "pubkey" },
+              },
+            },
           },
         },
       },
@@ -348,27 +396,33 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     const buckets =
       (
         response.body.aggregations?.by_event as unknown as {
-          buckets?: Array<{ key: string; doc_count: number }>;
+          buckets?: Array<{
+            key: string;
+            doc_count: number;
+            unique_authors?: { value: number };
+          }>;
         }
       )?.buckets || [];
 
     if (buckets.length === 0) return [];
 
-    const refCountMap = new Map(buckets.map((b) => [b.key, b.doc_count]));
+    const scoreMap = new Map(
+      buckets.map((b) => [b.key, b.unique_authors?.value ?? 0]),
+    );
     const eventIds = buckets.map((b) => b.key);
 
     const eventsById = await this.fetchTargetEvents(eventIds, filter);
     if (eventsById.size === 0) return [];
 
     return [...eventsById.values()].sort(
-      (a, b) => (refCountMap.get(b.id) || 0) - (refCountMap.get(a.id) || 0),
+      (a, b) => (scoreMap.get(b.id) || 0) - (scoreMap.get(a.id) || 0),
     );
   }
 
   /**
    * Query hot events — most engagement in a recent time window.
    * Time window is applied to the **referencing events**, not the targets.
-   * Score = doc_count * decay_factor (half-life of 24 hours based on target age).
+   * Score = unique_authors * decay_factor (half-life of 24 hours based on target age).
    */
   private async querySortHot(
     filter: NostrFilter,
@@ -401,6 +455,11 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
               size: bucketCount,
               order: { _count: "desc" as const },
             },
+            aggs: {
+              unique_authors: {
+                cardinality: { field: "pubkey" },
+              },
+            },
           },
         },
       },
@@ -409,24 +468,30 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     const buckets =
       (
         response.body.aggregations?.by_event as unknown as {
-          buckets?: Array<{ key: string; doc_count: number }>;
+          buckets?: Array<{
+            key: string;
+            doc_count: number;
+            unique_authors?: { value: number };
+          }>;
         }
       )?.buckets || [];
 
     if (buckets.length === 0) return [];
 
-    const refCountMap = new Map(buckets.map((b) => [b.key, b.doc_count]));
+    const scoreMap = new Map(
+      buckets.map((b) => [b.key, b.unique_authors?.value ?? 0]),
+    );
     const eventIds = buckets.map((b) => b.key);
 
     const eventsById = await this.fetchTargetEvents(eventIds, filter);
     if (eventsById.size === 0) return [];
 
-    // Score: doc_count * exponential decay (half-life 24h)
+    // Score: unique_authors * exponential decay (half-life 24h)
     return [...eventsById.values()]
       .map((event) => {
-        const refCount = refCountMap.get(event.id) || 0;
+        const uniqueAuthors = scoreMap.get(event.id) || 0;
         const ageInHours = (now - event.created_at) / 3600;
-        const score = refCount * 0.5 ** (ageInHours / 24);
+        const score = uniqueAuthors * 0.5 ** (ageInHours / 24);
         return { event, score };
       })
       .sort((a, b) => b.score - a.score)
@@ -587,9 +652,9 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
   }
 
   /**
-   * Query most-zapped events — ranked by number of zap receipts.
-   * Since zap receipts (kind 9735) don't store the amount in tags_map,
-   * we use zap receipt count as the score.
+   * Query most-zapped events — ranked by total millisatoshis received.
+   * Uses the `amount_msats` field parsed from bolt11 invoices at index time.
+   * Falls back to zap receipt count if amount data is unavailable.
    */
   private async querySortZaps(
     filter: NostrFilter,
@@ -620,7 +685,12 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
             terms: {
               field: "tags_map.e",
               size: bucketCount,
-              order: { _count: "desc" as const },
+              order: { total_msats: "desc" as const },
+            },
+            aggs: {
+              total_msats: {
+                sum: { field: "amount_msats" },
+              },
             },
           },
         },
@@ -630,21 +700,36 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     const buckets =
       (
         response.body.aggregations?.by_event as unknown as {
-          buckets?: Array<{ key: string; doc_count: number }>;
+          buckets?: Array<{
+            key: string;
+            doc_count: number;
+            total_msats?: { value: number };
+          }>;
         }
       )?.buckets || [];
 
     if (buckets.length === 0) return [];
 
-    const zapCountMap = new Map(buckets.map((b) => [b.key, b.doc_count]));
-    const eventIds = buckets.map((b) => b.key);
+    // Score by total msats; fall back to doc_count if amounts aren't populated
+    const scoreMap = new Map(
+      buckets
+        .map((b) => {
+          const msats = b.total_msats?.value ?? 0;
+          const score = msats > 0 ? msats : b.doc_count;
+          return [b.key, score] as const;
+        })
+        .filter(([, score]) => score > 0),
+    );
+    const eventIds = [...scoreMap.keys()];
+
+    if (eventIds.length === 0) return [];
 
     const eventsById = await this.fetchTargetEvents(eventIds, filter);
     if (eventsById.size === 0) return [];
 
-    return [...eventsById.values()].sort(
-      (a, b) => (zapCountMap.get(b.id) || 0) - (zapCountMap.get(a.id) || 0),
-    );
+    return [...eventsById.values()]
+      .filter((e) => scoreMap.has(e.id))
+      .sort((a, b) => (scoreMap.get(b.id) || 0) - (scoreMap.get(a.id) || 0));
   }
 
   /**
@@ -1148,6 +1233,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
               sig: { type: "keyword" },
               deleted: { type: "boolean" },
               protocol: { type: "keyword" },
+              amount_msats: { type: "long" },
             },
           },
         },

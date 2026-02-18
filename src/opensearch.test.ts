@@ -348,7 +348,7 @@ describe("OpenSearchRelay", () => {
     const createSortMockClient = () => {
       const documents = new Map<string, unknown>();
       const references = new Map<string, unknown[]>(); // eventId -> array of references
-      const zaps = new Map<string, number>(); // eventId -> zap receipt count
+      const zaps = new Map<string, number>(); // eventId -> total msats
 
       return {
         documents,
@@ -391,23 +391,27 @@ describe("OpenSearchRelay", () => {
               );
 
               if (isZapQuery) {
-                // Zap aggregation: return buckets with doc_count based on zap count
+                // Zap aggregation: return buckets with total_msats
                 const zapBuckets: Array<{
                   key: string;
                   doc_count: number;
+                  total_msats: { value: number };
                 }> = [];
 
-                for (const [eventId, zapCount] of zaps.entries()) {
-                  if (zapCount > 0) {
+                for (const [eventId, totalMsats] of zaps.entries()) {
+                  if (totalMsats > 0) {
                     zapBuckets.push({
                       key: eventId,
-                      doc_count: zapCount,
+                      doc_count: 1,
+                      total_msats: { value: totalMsats },
                     });
                   }
                 }
 
-                // Sort by doc_count descending (most zaps first)
-                zapBuckets.sort((a, b) => b.doc_count - a.doc_count);
+                // Sort by total_msats descending
+                zapBuckets.sort(
+                  (a, b) => b.total_msats.value - a.total_msats.value,
+                );
 
                 return {
                   body: {
@@ -419,13 +423,15 @@ describe("OpenSearchRelay", () => {
                 };
               }
 
-              // Handle reference aggregation queries (used by sort modes)
+              // Detect sub-aggregation type
               const byEventAgg = aggs.by_event as Record<string, unknown>;
-              const hasSubAggs = byEventAgg?.aggs !== undefined;
+              const subAggs = byEventAgg?.aggs as
+                | Record<string, unknown>
+                | undefined;
 
-              if (hasSubAggs) {
-                // Aggregation with sub-aggs (used by sort:controversial for by_kind)
-                const detailedBuckets: Array<{
+              if (subAggs?.by_kind) {
+                // sort:controversial — return by_kind sub-agg
+                const buckets: Array<{
                   key: string;
                   doc_count: number;
                   by_kind: {
@@ -435,7 +441,7 @@ describe("OpenSearchRelay", () => {
 
                 for (const [eventId, refs] of references.entries()) {
                   if (refs.length > 0) {
-                    detailedBuckets.push({
+                    buckets.push({
                       key: eventId,
                       doc_count: refs.length,
                       by_kind: {
@@ -447,15 +453,39 @@ describe("OpenSearchRelay", () => {
 
                 return {
                   body: {
-                    aggregations: {
-                      by_event: { buckets: detailedBuckets },
-                    },
+                    aggregations: { by_event: { buckets } },
                     hits: { hits: [] },
                   },
                 };
               }
 
-              // Simple aggregation (used by sort:top, sort:hot, sort:rising)
+              if (subAggs?.unique_authors) {
+                // sort:top / sort:hot — return unique_authors sub-agg
+                const buckets: Array<{
+                  key: string;
+                  doc_count: number;
+                  unique_authors: { value: number };
+                }> = [];
+
+                for (const [eventId, refs] of references.entries()) {
+                  if (refs.length > 0) {
+                    buckets.push({
+                      key: eventId,
+                      doc_count: refs.length,
+                      unique_authors: { value: refs.length },
+                    });
+                  }
+                }
+
+                return {
+                  body: {
+                    aggregations: { by_event: { buckets } },
+                    hits: { hits: [] },
+                  },
+                };
+              }
+
+              // Simple aggregation (sort:rising — no sub-aggs)
               const simpleBuckets: Array<{
                 key: string;
                 doc_count: number;
@@ -1015,14 +1045,14 @@ describe("OpenSearchRelay", () => {
       await relay.event(event1);
       await relay.event(event2);
 
-      // event1 received 2 zaps, event2 received 10 zaps
-      zaps.set(event1.id, 2);
-      zaps.set(event2.id, 10);
+      // event1 received 1000 sats (1M msats), event2 received 50000 sats (50M msats)
+      zaps.set(event1.id, 1_000_000);
+      zaps.set(event2.id, 50_000_000);
 
       // Query with sort:zaps
       const results = await relay.query([{ kinds: [1], search: "sort:zaps" }]);
 
-      // Event2 should be first (more zaps)
+      // Event2 should be first (more sats)
       assert.equal(results.length, 2);
       assert.equal(results[0].id, event2.id);
       assert.equal(results[1].id, event1.id);
@@ -1062,7 +1092,7 @@ describe("OpenSearchRelay", () => {
       await relay.event(unzappedEvent);
 
       // Only one event has zaps
-      zaps.set(zappedEvent.id, 3);
+      zaps.set(zappedEvent.id, 5_000_000);
 
       const results = await relay.query([{ kinds: [1], search: "sort:zaps" }]);
 
@@ -1104,7 +1134,7 @@ describe("OpenSearchRelay", () => {
       const sk2 = generateSecretKey();
       const now = Math.floor(Date.now() / 1000);
 
-      // Author 1: two events, one with 1 zap and one with 5 zaps
+      // Author 1: two events, one with 100 sats and one with 5000 sats
       const event1a = finalizeEvent(
         {
           kind: 1,
@@ -1125,7 +1155,7 @@ describe("OpenSearchRelay", () => {
         sk1,
       );
 
-      // Author 2: one event with 3 zaps
+      // Author 2: one event with 3000 sats
       const event2 = finalizeEvent(
         {
           kind: 1,
@@ -1140,9 +1170,9 @@ describe("OpenSearchRelay", () => {
       await relay.event(event1b);
       await relay.event(event2);
 
-      zaps.set(event1a.id, 1);
-      zaps.set(event1b.id, 5);
-      zaps.set(event2.id, 3);
+      zaps.set(event1a.id, 100_000);
+      zaps.set(event1b.id, 5_000_000);
+      zaps.set(event2.id, 3_000_000);
 
       // Query with sort:zaps and distinct:author
       const results = await relay.query([
@@ -1154,7 +1184,7 @@ describe("OpenSearchRelay", () => {
       const pubkeys = results.map((e) => e.pubkey);
       assert.equal(new Set(pubkeys).size, 2);
 
-      // event1b should be first (5 zaps, highest for author 1), event2 second (3 zaps)
+      // event1b should be first (5000 sats, highest for author 1), event2 second (3000 sats)
       assert.equal(results[0].id, event1b.id);
       assert.equal(results[1].id, event2.id);
     });
@@ -1685,6 +1715,52 @@ describe("OpenSearchRelay", () => {
       ]);
       assert.equal(results.length, 1);
       assert.equal(results[0].id, event.id);
+    });
+  });
+
+  describe("parseBolt11Amount", () => {
+    it("should parse nano-BTC amounts", () => {
+      // 210n = 210 nano-BTC = 21 sats = 21,000 msats
+      assert.equal(
+        OpenSearchRelay.parseBolt11Amount("lnbc210n1p5eyu7fpp5..."),
+        21_000,
+      );
+    });
+
+    it("should parse micro-BTC amounts", () => {
+      // 10u = 10 micro-BTC = 1000 sats = 1,000,000 msats
+      assert.equal(
+        OpenSearchRelay.parseBolt11Amount("lnbc10u1p5..."),
+        1_000_000,
+      );
+    });
+
+    it("should parse milli-BTC amounts", () => {
+      // 1m = 1 milli-BTC = 100,000 sats = 100,000,000 msats
+      assert.equal(
+        OpenSearchRelay.parseBolt11Amount("lnbc1m1p5..."),
+        100_000_000,
+      );
+    });
+
+    it("should parse pico-BTC amounts", () => {
+      // 100p = 100 pico-BTC = 10 msats
+      assert.equal(OpenSearchRelay.parseBolt11Amount("lnbc100p1p5..."), 10);
+    });
+
+    it("should return undefined for invalid bolt11", () => {
+      assert.equal(
+        OpenSearchRelay.parseBolt11Amount("not-a-bolt11"),
+        undefined,
+      );
+      assert.equal(OpenSearchRelay.parseBolt11Amount(""), undefined);
+    });
+
+    it("should parse real-world bolt11 invoices", () => {
+      // 21 sats = 21,000 msats
+      const bolt11 =
+        "lnbc210n1p5e2srfpp5x4fd3rjklja8fhvn3y5vjnrc00775805hts9rewjl2v3g8ma7d5q";
+      assert.equal(OpenSearchRelay.parseBolt11Amount(bolt11), 21_000);
     });
   });
 });
