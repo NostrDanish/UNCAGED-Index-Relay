@@ -2,15 +2,15 @@
  * Reindex all documents from the current index into a fresh index with
  * clean mappings, then swap the alias.
  *
- * This eliminates the 600+ garbage fields in tags_map that were created
- * by old data (hex pubkeys, timestamps, relay hints, etc. used as tag names).
- * The Painless script applies the same validation as buildTagsMap:
- * - Tag names must match /^[\w-]{1,15}$/
- * - Tag values must be ≤ 255 characters
+ * The Painless script:
+ * - Rebuilds tags_map with validated tag names (^[\w-]{1,15}$) and values (≤255 chars)
+ * - Strips the `language` field (to be re-detected by backfill-language.ts)
+ * - Extracts `protocol` from proxy tags (NIP-48)
+ * - Parses `amount_msats` from bolt11 invoices on kind 9735 zap receipts
  *
  * Steps:
- *   1. Create a new index (nostr-events-v3) with clean mappings
- *   2. Reindex from old to new with the validation script
+ *   1. Create a new index (nostr-events-v4) with clean mappings
+ *   2. Reindex from old to new with the processing script
  *   3. Swap the alias from old to new
  *
  * Usage:
@@ -22,8 +22,8 @@ import type { ClientOptions } from "@opensearch-project/opensearch";
 import { Client as OpenSearchClient } from "@opensearch-project/opensearch";
 import { Config } from "../src/config.ts";
 
-const OLD_INDEX = "nostr-events-v2";
-const NEW_INDEX = "nostr-events-v3";
+const OLD_INDEX = "nostr-events-v3";
+const NEW_INDEX = "nostr-events-v4";
 
 async function main() {
   const config = new Config({
@@ -102,6 +102,8 @@ async function main() {
               sig: { type: "keyword" },
               deleted: { type: "boolean" },
               protocol: { type: "keyword" },
+              amount_msats: { type: "long" },
+              language: { type: "keyword" },
             },
           },
         },
@@ -139,6 +141,37 @@ async function main() {
         }
       }
       ctx._source.tags_map = tagsMap;
+
+      // Strip language field (will be re-detected by backfill script)
+      ctx._source.remove('language');
+
+      // Extract protocol from proxy tag (NIP-48)
+      if (ctx._source.tags != null) {
+        for (def tag : ctx._source.tags) {
+          if (tag != null && tag.size() >= 3 && tag[0] == 'proxy') {
+            ctx._source.protocol = tag[2];
+            break;
+          }
+        }
+      }
+
+      // Parse amount_msats from bolt11 for kind 9735 (zap receipts)
+      if (ctx._source.kind == 9735 && ctx._source.tags != null) {
+        for (def tag : ctx._source.tags) {
+          if (tag != null && tag.size() >= 2 && tag[0] == 'bolt11') {
+            Matcher m = /^lnbc(\\d+)([munp])/.matcher(tag[1]);
+            if (m.find()) {
+              long num = Long.parseLong(m.group(1));
+              String unit = m.group(2);
+              if (unit.equals('m'))      { ctx._source.amount_msats = num * 100000000L; }
+              else if (unit.equals('u')) { ctx._source.amount_msats = num * 100000L; }
+              else if (unit.equals('n')) { ctx._source.amount_msats = num * 100L; }
+              else if (unit.equals('p')) { ctx._source.amount_msats = Math.round(num * 0.1); }
+            }
+            break;
+          }
+        }
+      }
     `;
 
     console.log("Starting reindex (this will take a while)...\n");
@@ -274,7 +307,7 @@ async function main() {
     const tagsMapFields = Object.keys(
       newMapping.mappings.properties.tags_map?.properties ?? {},
     ).length;
-    console.log(`New index has ${tagsMapFields} fields in tags_map (was 604)`);
+    console.log(`New index has ${tagsMapFields} fields in tags_map`);
 
     console.log(
       `\nDone! The old index ${OLD_INDEX} can be deleted once you're satisfied:`,
