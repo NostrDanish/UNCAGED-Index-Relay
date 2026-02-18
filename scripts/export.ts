@@ -85,31 +85,40 @@ async function main() {
       return;
     }
 
-    // Use scroll API for efficient pagination
+    // Use search_after for cursor-based pagination (no server-side state, runs indefinitely)
     console.error("Exporting events...");
-    const scrollTimeout = "5m";
     const batchSize = 1000;
     let exportedCount = 0;
+    let searchAfter: [number, string] | undefined;
 
-    // Initial search request
-    let response = await client.search({
-      index: config.opensearchIndex,
-      scroll: scrollTimeout,
-      body: {
+    while (true) {
+      const searchBody: Record<string, unknown> = {
         query,
         size: batchSize,
-        sort: [{ created_at: { order: "desc" as const } }],
-      },
-    });
+        sort: [
+          { created_at: { order: "desc" as const } },
+          { id: { order: "desc" as const } },
+        ],
+      };
 
-    let scrollId = response.body._scroll_id as string;
+      if (searchAfter) {
+        searchBody.search_after = searchAfter;
+      }
 
-    // Process first batch
-    let hits = response.body.hits.hits as unknown as Array<{
-      _source: NostrEventDocument;
-    }>;
+      const response = await client.search({
+        index: config.opensearchIndex,
+        body: searchBody,
+      });
 
-    while (hits.length > 0) {
+      const hits = response.body.hits.hits as unknown as Array<{
+        _source: NostrEventDocument;
+        sort: [number, string];
+      }>;
+
+      if (hits.length === 0) {
+        break;
+      }
+
       // Export events to stdout as JSONL
       for (const hit of hits) {
         const event = documentToEvent(hit._source);
@@ -122,22 +131,9 @@ async function main() {
         `Progress: ${exportedCount}/${totalEvents} (${Math.round((exportedCount / totalEvents) * 100)}%)`,
       );
 
-      // Get next batch
-      response = await client.scroll({
-        scroll_id: scrollId,
-        scroll: scrollTimeout,
-      });
-
-      scrollId = response.body._scroll_id as string;
-      hits = response.body.hits.hits as unknown as Array<{
-        _source: NostrEventDocument;
-      }>;
+      // Set cursor for next page
+      searchAfter = hits[hits.length - 1].sort;
     }
-
-    // Clear scroll context
-    await client.clearScroll({
-      scroll_id: scrollId,
-    });
 
     console.error(`\n✅ Exported ${exportedCount} events successfully`);
   } catch (error) {
