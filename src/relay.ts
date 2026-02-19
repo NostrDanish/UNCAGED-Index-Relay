@@ -89,7 +89,7 @@ export class Relay {
     this.relayInfo = {
       name: "Ditto Relay",
       description: "A Nostr relay backed by OpenSearch",
-      supported_nips: [1, 9, 11, 42, 45, 50, 70],
+      supported_nips: [1, 9, 11, 40, 42, 45, 50, 70],
       software: "https://gitlab.com/soapbox-pub/ditto-relay",
       version: "0.1.0",
       limitation: {
@@ -200,6 +200,9 @@ export class Relay {
    * even if multiple filters within the subscription match.
    */
   private broadcast(event: NostrEvent): void {
+    // NIP-40: Don't broadcast expired events
+    if (this.isExpired(event)) return;
+
     // Collect candidate indexed filters: kind-specific + catchAll
     const kindSet = this.kindIndex.get(event.kind);
 
@@ -242,6 +245,20 @@ export class Relay {
   }
 
   /**
+   * Check if an event has expired (NIP-40) by checking the "expiration" tag.
+   * Returns true if the event has an expiration tag with a timestamp in the past.
+   */
+  private isExpired(event: NostrEvent): boolean {
+    const expirationTag = event.tags.find(
+      (tag) => tag[0] === "expiration" && tag.length >= 2,
+    );
+    if (!expirationTag) return false;
+    const expiration = Number.parseInt(expirationTag[1], 10);
+    if (Number.isNaN(expiration)) return false;
+    return expiration <= Math.floor(Date.now() / 1000);
+  }
+
+  /**
    * Handle an EVENT message according to NIP-01
    */
   private async handleEventMessage(
@@ -272,6 +289,15 @@ export class Relay {
             "auth-required: this event may only be published by its author",
         };
       }
+    }
+
+    // NIP-40: Reject events that are already expired
+    if (this.isExpired(event)) {
+      return {
+        eventId: event.id,
+        accepted: false,
+        message: "invalid: event has expired",
+      };
     }
 
     // Handle deletion events (kind 5) using NRelay's remove method

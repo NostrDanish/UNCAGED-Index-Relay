@@ -57,7 +57,7 @@ describe("Relay", () => {
       assert.equal(info.name, "Ditto Relay");
       assert.equal(info.software, "https://gitlab.com/soapbox-pub/ditto-relay");
       assert.equal(info.version, "0.1.0");
-      assert.deepEqual(info.supported_nips, [1, 9, 11, 42, 45, 50, 70]);
+      assert.deepEqual(info.supported_nips, [1, 9, 11, 40, 42, 45, 50, 70]);
     });
 
     it("should allow customizing relay info", () => {
@@ -1596,6 +1596,110 @@ describe("Relay", () => {
       assert.equal(sentMessages[0][0], "OK");
       assert.equal(sentMessages[0][2], false);
       assert.ok((sentMessages[0][3] as string).includes("auth-required"));
+    });
+  });
+
+  describe("NIP-40 expiration", () => {
+    it("should include NIP-40 in supported NIPs", () => {
+      const info = relay.getRelayInfo();
+      assert.ok(info.supported_nips?.includes(40));
+    });
+
+    it("should reject an event that is already expired", async () => {
+      const sk = generateSecretKey();
+      const pastTimestamp = String(Math.floor(Date.now() / 1000) - 3600); // 1 hour ago
+      const expiredEvent = finalizeEvent(
+        {
+          kind: 1,
+          created_at: Math.floor(Date.now() / 1000) - 7200,
+          tags: [["expiration", pastTimestamp]],
+          content: "This has expired",
+        },
+        sk,
+      );
+
+      await relay.handleEvent(mockWs, expiredEvent);
+
+      assert.equal(sentMessages.length, 1);
+      assert.equal(sentMessages[0][0], "OK");
+      assert.equal(sentMessages[0][1], expiredEvent.id);
+      assert.equal(sentMessages[0][2], false);
+      assert.ok((sentMessages[0][3] as string).includes("expired"));
+    });
+
+    it("should accept an event with a future expiration", async () => {
+      const sk = generateSecretKey();
+      const futureTimestamp = String(Math.floor(Date.now() / 1000) + 3600); // 1 hour from now
+      const event = finalizeEvent(
+        {
+          kind: 1,
+          created_at: Math.floor(Date.now() / 1000),
+          tags: [["expiration", futureTimestamp]],
+          content: "Not expired yet",
+        },
+        sk,
+      );
+
+      await relay.handleEvent(mockWs, event);
+
+      assert.equal(sentMessages.length, 1);
+      assert.deepEqual(sentMessages[0], ["OK", event.id, true, ""]);
+    });
+
+    it("should accept an event with no expiration tag", async () => {
+      const sk = generateSecretKey();
+      const event = finalizeEvent(
+        {
+          kind: 1,
+          created_at: Math.floor(Date.now() / 1000),
+          tags: [],
+          content: "No expiration",
+        },
+        sk,
+      );
+
+      await relay.handleEvent(mockWs, event);
+
+      assert.equal(sentMessages.length, 1);
+      assert.deepEqual(sentMessages[0], ["OK", event.id, true, ""]);
+    });
+
+    it("should not broadcast an expired event", async () => {
+      // Create a subscriber
+      const sub = {
+        send: (message: string) => {
+          sentMessages.push(JSON.parse(message));
+        },
+        data: {
+          subscriptions: new Map(),
+          challenge: "",
+          authedPubkeys: new Set(),
+        },
+      } as unknown as ServerWebSocket<WebSocketData>;
+
+      relay.handleOpen(sub);
+      mockStorage.query = async () => [];
+      await relay.handleReq(sub, "sub1", [{ kinds: [1] }]);
+      sentMessages.length = 0;
+
+      // Publish an expired event
+      relay.handleOpen(mockWs);
+      const sk = generateSecretKey();
+      const expiredEvent = finalizeEvent(
+        {
+          kind: 1,
+          created_at: Math.floor(Date.now() / 1000) - 7200,
+          tags: [["expiration", String(Math.floor(Date.now() / 1000) - 3600)]],
+          content: "Expired broadcast",
+        },
+        sk,
+      );
+
+      await relay.handleEvent(mockWs, expiredEvent);
+
+      // The event should be rejected, so no EVENT message to subscriber
+      const eventMessages = sentMessages.filter((m) => m[0] === "EVENT");
+      assert.equal(eventMessages.length, 0);
     });
   });
 });

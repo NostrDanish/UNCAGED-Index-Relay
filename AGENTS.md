@@ -34,6 +34,7 @@
 │   ├── backfill-sentiment.ts      # Backfill sentiment field for existing events
 │   ├── backfill-zap-amounts.ts    # Backfill zap amount fields for kind 9735
 │   ├── delete-ephemeral-events.ts # Delete ephemeral events from storage
+│   ├── delete-expired-events.ts   # Delete expired events (NIP-40)
 │   ├── delete-incomplete-events.ts # Delete events with missing fields
 │   ├── export.ts                  # Export events from the index
 │   ├── reindex-tags-map.ts        # Reindex tags_map for existing documents
@@ -63,12 +64,6 @@ Edit `.env` to configure the application:
 - `OPENSEARCH_PASSWORD` - OpenSearch password (optional)
 
 ## Adding Features
-
-### Additional NIPs
-
-Consider implementing:
-
-- NIP-40: Expiration timestamp
 
 ### Performance Optimizations
 

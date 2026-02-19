@@ -776,6 +776,12 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     ];
     const mustNot: Record<string, unknown>[] = [];
 
+    // NIP-40: Exclude expired events
+    const now = Math.floor(Date.now() / 1000);
+    mustNot.push({
+      range: { "tags_map.expiration": { lte: String(now) } },
+    });
+
     // ID filter
     if (filter.ids && filter.ids.length > 0) {
       must.push({ terms: { id: filter.ids } });
