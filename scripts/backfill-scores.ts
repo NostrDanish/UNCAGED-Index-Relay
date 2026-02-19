@@ -20,7 +20,46 @@ import { noteEncode } from "nostr-tools/nip19";
 import { Config } from "../src/config.ts";
 import { OpenSearchRelay } from "../src/opensearch.ts";
 
-const BATCH_SIZE = 5000;
+const BATCH_SIZE = 1000;
+
+/** Delay for the given number of milliseconds. */
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Check if a string is a valid 64-char lowercase hex event ID. */
+function isValidEventId(s: string): boolean {
+  return /^[0-9a-f]{64}$/.test(s);
+}
+
+/** Run an async function with retries on 429/circuit breaker errors. */
+async function withRetry<T>(
+  fn: () => Promise<T>,
+  maxRetries = 5,
+  baseDelay = 30_000,
+): Promise<T> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await fn();
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      const isRetryable =
+        msg.includes("circuit_breaking") ||
+        msg.includes("429") ||
+        msg.includes("Data too large") ||
+        msg.includes("search_phase_execution_exception") ||
+        msg.includes("too_many_requests");
+
+      if (!isRetryable || attempt >= maxRetries) throw error;
+
+      const delay = baseDelay * 2 ** attempt;
+      console.log(
+        `Circuit breaker hit, waiting ${delay / 1000}s before retry...`,
+      );
+      await sleep(delay);
+    }
+  }
+}
 
 interface ScoreEntry {
   top_score: number;
@@ -83,22 +122,24 @@ async function main() {
       },
     };
 
-    // @ts-expect-error: composite aggregation not in client types
-    const response = await client.search({
-      index: indexName,
-      body: {
-        query: {
-          bool: {
-            must: [
-              { term: { deleted: false } },
-              { terms: { kind: [1, 6, 7, 16, 1111] } },
-            ],
+    const response = await withRetry(() =>
+      // @ts-expect-error: composite aggregation not in client types
+      client.search({
+        index: indexName,
+        body: {
+          query: {
+            bool: {
+              must: [
+                { term: { deleted: false } },
+                { terms: { kind: [1, 6, 7, 16, 1111] } },
+              ],
+            },
           },
+          size: 0,
+          aggs: { by_event: compositeAgg },
         },
-        size: 0,
-        aggs: { by_event: compositeAgg },
-      },
-    });
+      }),
+    );
 
     const aggResult = response.body.aggregations?.by_event as {
       buckets: Array<{
@@ -149,6 +190,7 @@ async function main() {
     const body: Array<Record<string, unknown>> = [];
 
     for (const [id, s] of scores) {
+      if (!isValidEventId(id)) continue;
       body.push({
         update: { _index: indexName, _id: noteEncode(id) },
       });
@@ -223,6 +265,10 @@ async function main() {
     );
 
     if (!afterKey) break;
+
+    // Small delay between batches to avoid fielddata accumulation
+    // triggering the circuit breaker.
+    await sleep(500);
   }
 
   // Phase 2: Same for zap amounts (kind 9735).
@@ -243,19 +289,21 @@ async function main() {
       },
     };
 
-    // @ts-expect-error: composite aggregation not in client types
-    const response = await client.search({
-      index: indexName,
-      body: {
-        query: {
-          bool: {
-            must: [{ term: { deleted: false } }, { term: { kind: 9735 } }],
+    const response = await withRetry(() =>
+      // @ts-expect-error: composite aggregation not in client types
+      client.search({
+        index: indexName,
+        body: {
+          query: {
+            bool: {
+              must: [{ term: { deleted: false } }, { term: { kind: 9735 } }],
+            },
           },
+          size: 0,
+          aggs: { by_event: compositeAgg },
         },
-        size: 0,
-        aggs: { by_event: compositeAgg },
-      },
-    });
+      }),
+    );
 
     const aggResult = response.body.aggregations?.by_event as {
       buckets: Array<{
@@ -278,6 +326,7 @@ async function main() {
       const id = bucket.key.event_id;
       const msats = bucket.total_msats?.value ?? 0;
       if (msats <= 0) continue;
+      if (!isValidEventId(id)) continue;
 
       idList.push(id);
       zapAmounts.set(id, msats);
@@ -342,6 +391,8 @@ async function main() {
     );
 
     if (!afterKey) break;
+
+    await sleep(500);
   }
 
   // Phase 3: Clear dirty flag on remaining events that were never referenced.
