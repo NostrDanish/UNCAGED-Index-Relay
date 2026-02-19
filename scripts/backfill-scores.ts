@@ -20,7 +20,7 @@ import { noteEncode } from "nostr-tools/nip19";
 import { Config } from "../src/config.ts";
 import { OpenSearchRelay } from "../src/opensearch.ts";
 
-const BATCH_SIZE = 1000;
+const BATCH_SIZE = 5000;
 
 /** Delay for the given number of milliseconds. */
 function sleep(ms: number): Promise<void> {
@@ -35,9 +35,15 @@ function isValidEventId(s: string): boolean {
 /** Run an async function with retries on 429/circuit breaker errors. */
 async function withRetry<T>(
   fn: () => Promise<T>,
-  maxRetries = 5,
-  baseDelay = 30_000,
+  opts: {
+    maxRetries?: number;
+    baseDelay?: number;
+    onRetry?: () => Promise<void>;
+  } = {},
 ): Promise<T> {
+  const maxRetries = opts.maxRetries ?? 5;
+  const baseDelay = opts.baseDelay ?? 30_000;
+
   for (let attempt = 0; ; attempt++) {
     try {
       return await fn();
@@ -54,8 +60,15 @@ async function withRetry<T>(
 
       const delay = baseDelay * 2 ** attempt;
       console.log(
-        `Circuit breaker hit, waiting ${delay / 1000}s before retry...`,
+        `Circuit breaker hit, waiting ${delay / 1000}s before retry (attempt ${attempt + 1}/${maxRetries})...`,
       );
+      if (opts.onRetry) {
+        try {
+          await opts.onRetry();
+        } catch (_) {
+          // Ignore
+        }
+      }
       await sleep(delay);
     }
   }
@@ -122,23 +135,29 @@ async function main() {
       },
     };
 
-    const response = await withRetry(() =>
-      // @ts-expect-error: composite aggregation not in client types
-      client.search({
-        index: indexName,
-        body: {
-          query: {
-            bool: {
-              must: [
-                { term: { deleted: false } },
-                { terms: { kind: [1, 6, 7, 16, 1111] } },
-              ],
+    const clearCache = async () => {
+      await client.indices.clearCache({ index: indexName, fielddata: true });
+    };
+
+    const response = await withRetry(
+      () =>
+        // @ts-expect-error: composite aggregation not in client types
+        client.search({
+          index: indexName,
+          body: {
+            query: {
+              bool: {
+                must: [
+                  { term: { deleted: false } },
+                  { terms: { kind: [1, 6, 7, 16, 1111] } },
+                ],
+              },
             },
+            size: 0,
+            aggs: { by_event: compositeAgg },
           },
-          size: 0,
-          aggs: { by_event: compositeAgg },
-        },
-      }),
+        }),
+      { onRetry: clearCache },
     );
 
     const aggResult = response.body.aggregations?.by_event as {
@@ -267,7 +286,7 @@ async function main() {
     if (!afterKey) break;
 
     // Periodically clear fielddata cache to prevent circuit breaker.
-    if (totalProcessed % 10_000 === 0) {
+    if (totalProcessed % 5_000 === 0) {
       await client.indices.clearCache({
         index: indexName,
         fielddata: true,
@@ -297,20 +316,26 @@ async function main() {
       },
     };
 
-    const response = await withRetry(() =>
-      // @ts-expect-error: composite aggregation not in client types
-      client.search({
-        index: indexName,
-        body: {
-          query: {
-            bool: {
-              must: [{ term: { deleted: false } }, { term: { kind: 9735 } }],
+    const clearCache = async () => {
+      await client.indices.clearCache({ index: indexName, fielddata: true });
+    };
+
+    const response = await withRetry(
+      () =>
+        // @ts-expect-error: composite aggregation not in client types
+        client.search({
+          index: indexName,
+          body: {
+            query: {
+              bool: {
+                must: [{ term: { deleted: false } }, { term: { kind: 9735 } }],
+              },
             },
+            size: 0,
+            aggs: { by_event: compositeAgg },
           },
-          size: 0,
-          aggs: { by_event: compositeAgg },
-        },
-      }),
+        }),
+      { onRetry: clearCache },
     );
 
     const aggResult = response.body.aggregations?.by_event as {
@@ -400,7 +425,7 @@ async function main() {
 
     if (!afterKey) break;
 
-    if (zapProcessed % 10_000 === 0) {
+    if (zapProcessed % 5_000 === 0) {
       await client.indices.clearCache({
         index: indexName,
         fielddata: true,
