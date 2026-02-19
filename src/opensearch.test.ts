@@ -137,6 +137,7 @@ describe("OpenSearchRelay", () => {
             }
             return { body: { found: false }, statusCode: 404 };
           },
+          updateByQuery: async () => ({ body: { updated: 0 } }),
           indices: {
             exists: async () => ({ body: true }),
             create: async () => ({ body: {} }),
@@ -344,23 +345,151 @@ describe("OpenSearchRelay", () => {
   });
 
   describe("NIP-50 sort", () => {
-    // Mock client with aggregation support for sort tests
+    // Mock client with precomputed score support for sort tests.
+    // Score fields are set directly on documents by tests; the mock client
+    // simulates OpenSearch sort, script_score, and range filter behaviour.
     const createSortMockClient = () => {
       const documents = new Map<string, unknown>();
-      const references = new Map<string, unknown[]>(); // eventId -> array of references
-      const zaps = new Map<string, number>(); // eventId -> total msats
+
+      /** Helper: extract the bool.must array from a query (unwrapping script_score). */
+      const extractMustClauses = (
+        query: Record<string, unknown>,
+      ): Array<Record<string, unknown>> => {
+        // script_score wraps the real query
+        if (query.script_score) {
+          const inner = (
+            query.script_score as { query: Record<string, unknown> }
+          ).query;
+          return (
+            ((inner.bool as Record<string, unknown>)?.must as Array<
+              Record<string, unknown>
+            >) || []
+          );
+        }
+        return (
+          ((query.bool as Record<string, unknown>)?.must as Array<
+            Record<string, unknown>
+          >) || []
+        );
+      };
+
+      /** Helper: check if a document passes all must clauses. */
+      const matchesMust = (
+        // biome-ignore lint/suspicious/noExplicitAny: test mock
+        doc: any,
+        clauses: Array<Record<string, unknown>>,
+      ): boolean => {
+        for (const clause of clauses) {
+          if (clause.term) {
+            const [field, value] = Object.entries(
+              clause.term as Record<string, unknown>,
+            )[0];
+            if (doc[field] !== value) return false;
+          }
+          if (clause.terms) {
+            const [field, values] = Object.entries(
+              clause.terms as Record<string, unknown[]>,
+            )[0];
+            if (!values.includes(doc[field])) return false;
+          }
+          if (clause.range) {
+            const [field, bounds] = Object.entries(
+              clause.range as Record<string, Record<string, number>>,
+            )[0];
+            const val = doc[field];
+            if (val === undefined || val === null) return false;
+            if (bounds.gt !== undefined && !(val > bounds.gt)) return false;
+            if (bounds.gte !== undefined && !(val >= bounds.gte)) return false;
+            if (bounds.lt !== undefined && !(val < bounds.lt)) return false;
+            if (bounds.lte !== undefined && !(val <= bounds.lte)) return false;
+          }
+          if (clause.match) {
+            const [field, matchValue] = Object.entries(
+              clause.match as Record<string, unknown>,
+            )[0];
+            const matchQuery =
+              typeof matchValue === "object"
+                ? (matchValue as { query: string }).query
+                : String(matchValue);
+            const text = String(doc[field] || "").toLowerCase();
+            const terms = matchQuery.toLowerCase().split(/\s+/);
+            if (!terms.every((t: string) => text.includes(t))) return false;
+          }
+        }
+        return true;
+      };
+
+      /** Helper: compute script_score for a document. */
+      const computeScriptScore = (
+        // biome-ignore lint/suspicious/noExplicitAny: test mock
+        doc: any,
+        query: Record<string, unknown>,
+      ): number | null => {
+        if (!query.script_score) return null;
+        const script = (
+          query.script_score as {
+            script: { source: string; params?: Record<string, number> };
+          }
+        ).script;
+        const params = script.params || {};
+
+        // Simple script evaluation for our known scripts
+        const src = script.source.replace(/\s+/g, " ").trim();
+
+        if (src.includes("Math.pow(0.5, ageHours / 24.0)")) {
+          // sort:hot
+          const topScore = doc.top_score || 0;
+          const ageHours = (params.now - doc.created_at) / 3600;
+          return topScore * 0.5 ** (ageHours / 24);
+        }
+        if (src.includes("Math.min(replies, reactions)")) {
+          // sort:controversial
+          const replies = doc.reply_count || 0;
+          const reactions = doc.reaction_count || 0;
+          const balanced = Math.min(replies, reactions);
+          return balanced * Math.sqrt(replies + reactions);
+        }
+        if (src.includes("total / ageHours")) {
+          // sort:rising
+          const total =
+            (doc.reply_count || 0) +
+            (doc.reaction_count || 0) +
+            (doc.repost_count || 0);
+          const ageHours = Math.max((params.now - doc.created_at) / 3600, 0.1);
+          return total / ageHours;
+        }
+        return 0;
+      };
 
       return {
         documents,
-        references,
-        zaps,
+        /** Set a score field on a stored document (by event ID). */
+        setScore: (
+          eventId: string,
+          scores: Partial<{
+            top_score: number;
+            reply_count: number;
+            reaction_count: number;
+            repost_count: number;
+            zap_amount_msats: number;
+          }>,
+        ) => {
+          for (const [_docId, doc] of documents.entries()) {
+            // biome-ignore lint/suspicious/noExplicitAny: test mock
+            const d = doc as any;
+            if (d.id === eventId) {
+              Object.assign(d, scores);
+              break;
+            }
+          }
+        },
         client: {
           search: async ({ body }: { body: Record<string, unknown> }) => {
-            // Handle aggregation queries
+            const query = body.query as Record<string, unknown>;
+
+            // Handle aggregation queries (used by distinct:author count)
             if (body.aggs) {
               const aggs = body.aggs as Record<string, unknown>;
-
-              // Handle cardinality aggregation (used by distinct:author count)
               if (aggs.unique_authors) {
                 const allDocs = Array.from(documents.values());
                 const uniquePubkeys = new Set(
@@ -377,236 +506,71 @@ describe("OpenSearchRelay", () => {
                   },
                 };
               }
-
-              // Detect zap aggregation queries (kind 9735)
-              const queryMust = (
-                (body.query as Record<string, unknown>)?.bool as Record<
-                  string,
-                  unknown
-                >
-              )?.must as Array<Record<string, unknown>> | undefined;
-              const isZapQuery = queryMust?.some(
-                (clause) =>
-                  (clause.term as Record<string, unknown>)?.kind === 9735,
-              );
-
-              if (isZapQuery) {
-                // Zap aggregation: return buckets with total_msats
-                const zapBuckets: Array<{
-                  key: string;
-                  doc_count: number;
-                  total_msats: { value: number };
-                }> = [];
-
-                for (const [eventId, totalMsats] of zaps.entries()) {
-                  if (totalMsats > 0) {
-                    zapBuckets.push({
-                      key: eventId,
-                      doc_count: 1,
-                      total_msats: { value: totalMsats },
-                    });
-                  }
-                }
-
-                // Sort by total_msats descending
-                zapBuckets.sort(
-                  (a, b) => b.total_msats.value - a.total_msats.value,
-                );
-
-                return {
-                  body: {
-                    aggregations: {
-                      by_event: { buckets: zapBuckets },
-                    },
-                    hits: { hits: [] },
-                  },
-                };
-              }
-
-              // Detect sub-aggregation type
-              const byEventAgg = aggs.by_event as Record<string, unknown>;
-              const subAggs = byEventAgg?.aggs as
-                | Record<string, unknown>
-                | undefined;
-
-              if (subAggs?.by_kind) {
-                // sort:controversial — return by_kind sub-agg
-                const buckets: Array<{
-                  key: string;
-                  doc_count: number;
-                  by_kind: {
-                    buckets: Array<{ key: number; doc_count: number }>;
-                  };
-                }> = [];
-
-                for (const [eventId, refs] of references.entries()) {
-                  if (refs.length > 0) {
-                    buckets.push({
-                      key: eventId,
-                      doc_count: refs.length,
-                      by_kind: {
-                        buckets: [{ key: 1, doc_count: refs.length }],
-                      },
-                    });
-                  }
-                }
-
-                return {
-                  body: {
-                    aggregations: { by_event: { buckets } },
-                    hits: { hits: [] },
-                  },
-                };
-              }
-
-              if (subAggs?.unique_authors) {
-                // sort:top / sort:hot — return unique_authors sub-agg
-                const buckets: Array<{
-                  key: string;
-                  doc_count: number;
-                  unique_authors: { value: number };
-                }> = [];
-
-                for (const [eventId, refs] of references.entries()) {
-                  if (refs.length > 0) {
-                    buckets.push({
-                      key: eventId,
-                      doc_count: refs.length,
-                      unique_authors: { value: refs.length },
-                    });
-                  }
-                }
-
-                return {
-                  body: {
-                    aggregations: { by_event: { buckets } },
-                    hits: { hits: [] },
-                  },
-                };
-              }
-
-              // Simple aggregation (sort:rising — no sub-aggs)
-              const simpleBuckets: Array<{
-                key: string;
-                doc_count: number;
-              }> = [];
-
-              for (const [eventId, refs] of references.entries()) {
-                if (refs.length > 0) {
-                  simpleBuckets.push({
-                    key: eventId,
-                    doc_count: refs.length,
-                  });
-                }
-              }
-
-              return {
-                body: {
-                  aggregations: {
-                    by_event: { buckets: simpleBuckets },
-                  },
-                  hits: { hits: [] },
-                },
-              };
             }
 
-            // Handle normal search queries
-            const results: unknown[] = [];
-
-            // Extract id filter from query if present
-            const queryMustClauses = (
-              (body.query as Record<string, unknown>)?.bool as Record<
-                string,
-                unknown
-              >
-            )?.must as Array<Record<string, unknown>> | undefined;
-            const idFilter = queryMustClauses?.find(
-              (clause) =>
-                (clause.terms as Record<string, unknown>)?.id !== undefined,
-            );
-            const allowedIds = idFilter
-              ? ((clause) => (clause.terms as Record<string, string[]>).id)(
-                  idFilter,
-                )
-              : null;
-
-            // Extract kind filter from query if present
-            const kindFilter = queryMustClauses?.find(
-              (clause) =>
-                (clause.terms as Record<string, unknown>)?.kind !== undefined,
-            );
-            const allowedKinds = kindFilter
-              ? new Set(
-                  ((clause) => (clause.terms as Record<string, number[]>).kind)(
-                    kindFilter,
-                  ),
-                )
-              : null;
-
-            // Extract time range filter from query if present
-            const timeFilter = queryMustClauses?.find(
-              (clause) =>
-                (clause.range as Record<string, unknown>)?.created_at !==
-                undefined,
-            );
-            const timeRange = timeFilter
-              ? ((clause) =>
-                  (clause.range as Record<string, Record<string, number>>)
-                    .created_at)(timeFilter)
-              : null;
+            // Filter documents against the query
+            const mustClauses = extractMustClauses(query);
+            const results: Array<{ _source: unknown; _score?: number }> = [];
 
             for (const [_id, doc] of documents.entries()) {
-              const docTyped = doc as NostrEvent & { deleted?: boolean };
-              if (docTyped.deleted) continue;
-              if (allowedIds && !allowedIds.includes(docTyped.id)) continue;
-              if (allowedKinds && !allowedKinds.has(docTyped.kind)) continue;
-              if (timeRange) {
-                if (
-                  timeRange.gte !== undefined &&
-                  docTyped.created_at < timeRange.gte
-                )
-                  continue;
-                if (
-                  timeRange.lte !== undefined &&
-                  docTyped.created_at > timeRange.lte
-                )
-                  continue;
-              }
-              results.push({ _source: doc });
+              // biome-ignore lint/suspicious/noExplicitAny: test mock
+              const d = doc as any;
+              if (d.deleted) continue;
+              if (!matchesMust(d, mustClauses)) continue;
+
+              const scriptScore = computeScriptScore(d, query);
+              results.push({
+                _source: doc,
+                ...(scriptScore !== null && { _score: scriptScore }),
+              });
             }
 
-            // Sort by created_at desc
-            results.sort((a, b) => {
-              const aDoc = (a as { _source: NostrEvent })._source;
-              const bDoc = (b as { _source: NostrEvent })._source;
-              return bDoc.created_at - aDoc.created_at;
-            });
+            // Apply sorting
+            const sort = body.sort as
+              | Array<Record<string, { order: string }>>
+              | undefined;
+
+            if (sort && sort.length > 0) {
+              const [sortField, sortOpts] = Object.entries(sort[0])[0];
+              const desc = (sortOpts as { order: string }).order === "desc";
+              results.sort((a, b) => {
+                // biome-ignore lint/suspicious/noExplicitAny: test mock
+                const aVal = (a._source as any)[sortField] ?? 0;
+                // biome-ignore lint/suspicious/noExplicitAny: test mock
+                const bVal = (b._source as any)[sortField] ?? 0;
+                return desc ? bVal - aVal : aVal - bVal;
+              });
+            } else if (results.length > 0 && results[0]._score !== undefined) {
+              // Sort by script score descending
+              results.sort((a, b) => (b._score ?? 0) - (a._score ?? 0));
+            } else {
+              // Default sort by created_at desc
+              results.sort((a, b) => {
+                const aDoc = a._source as NostrEvent;
+                const bDoc = b._source as NostrEvent;
+                return bDoc.created_at - aDoc.created_at;
+              });
+            }
 
             // Simulate OpenSearch collapse (field collapsing)
             const collapse = body.collapse as { field: string } | undefined;
             if (collapse?.field) {
               const seen = new Set<string>();
-              const collapsed: unknown[] = [];
+              const collapsed: typeof results = [];
               for (const hit of results) {
-                const src = (hit as { _source: NostrEvent })._source;
+                const src = hit._source as NostrEvent;
                 const val = src[collapse.field as keyof NostrEvent] as string;
                 if (!seen.has(val)) {
                   seen.add(val);
                   collapsed.push(hit);
                 }
               }
-              return {
-                body: {
-                  hits: { hits: collapsed },
-                },
-              };
+              return { body: { hits: { hits: collapsed } } };
             }
 
-            return {
-              body: {
-                hits: { hits: results },
-              },
-            };
+            // Apply size limit
+            const size = (body.size as number) ?? results.length;
+            return { body: { hits: { hits: results.slice(0, size) } } };
           },
           bulk: async ({ body }: { body: unknown[] }) => {
             const items: Array<Record<string, unknown>> = [];
@@ -636,6 +600,7 @@ describe("OpenSearchRelay", () => {
               },
             };
           },
+          updateByQuery: async () => ({ body: { updated: 0 } }),
           count: async () => {
             const nonDeleted = Array.from(documents.values()).filter(
               (doc) => !(doc as { deleted?: boolean }).deleted,
@@ -652,7 +617,7 @@ describe("OpenSearchRelay", () => {
     };
 
     it("should handle sort:top query", async () => {
-      const { client, references } = createSortMockClient();
+      const { client, setScore } = createSortMockClient();
       const relay = new OpenSearchRelay(client as unknown as Client, {
         indexName: "test-index",
         bulkMaxSize: 1,
@@ -685,14 +650,14 @@ describe("OpenSearchRelay", () => {
       await relay.event(event1);
       await relay.event(event2);
 
-      // Add references (event2 has more references)
-      references.set(event1.id, [{ kind: 1 }]);
-      references.set(event2.id, [{ kind: 1 }, { kind: 1 }, { kind: 1 }]);
+      // Set precomputed scores (event2 has higher top_score)
+      setScore(event1.id, { top_score: 1 });
+      setScore(event2.id, { top_score: 3 });
 
       // Query with sort:top
       const results = await relay.query([{ kinds: [1], search: "sort:top" }]);
 
-      // Event2 should be first (more references)
+      // Event2 should be first (higher top_score)
       assert.equal(results.length, 2);
       assert.equal(results[0].id, event2.id);
       assert.equal(results[1].id, event1.id);
@@ -727,7 +692,7 @@ describe("OpenSearchRelay", () => {
     });
 
     it("should handle sort:hot with time decay", async () => {
-      const { client, references } = createSortMockClient();
+      const { client, setScore } = createSortMockClient();
       const relay = new OpenSearchRelay(client as unknown as Client, {
         indexName: "test-index",
         bulkMaxSize: 1,
@@ -736,7 +701,7 @@ describe("OpenSearchRelay", () => {
       const sk = generateSecretKey();
       const now = Math.floor(Date.now() / 1000);
 
-      // Create two events within the 24h hot window: one very recent, one older
+      // Create two events: one very recent, one older
       const recentEvent = finalizeEvent(
         {
           kind: 1,
@@ -750,7 +715,7 @@ describe("OpenSearchRelay", () => {
       const olderEvent = finalizeEvent(
         {
           kind: 1,
-          created_at: now - 20 * 3600, // 20 hours ago (within 24h window)
+          created_at: now - 20 * 3600, // 20 hours ago
           tags: [],
           content: "Older event",
         },
@@ -760,38 +725,21 @@ describe("OpenSearchRelay", () => {
       await relay.event(recentEvent);
       await relay.event(olderEvent);
 
-      // Recent event has 2 refs, older event has 10 refs
-      // But with 24h half-life decay, recent should score higher:
-      //   recent: 2 * 0.5^(0.5/24) ≈ 1.97
-      //   older:  10 * 0.5^(20/24) ≈ 4.35
-      // Actually older still wins here, so give recent more refs
-      references.set(recentEvent.id, [
-        { kind: 1 },
-        { kind: 1 },
-        { kind: 1 },
-        { kind: 1 },
-        { kind: 1 },
-      ]);
-      references.set(olderEvent.id, [
-        { kind: 1 },
-        { kind: 1 },
-        { kind: 1 },
-        { kind: 1 },
-        { kind: 1 },
-      ]);
+      // Same top_score, but recent event scores higher due to less time decay
+      // recent: 5 * 0.5^(0.5/24) ≈ 4.93
+      // older:  5 * 0.5^(20/24) ≈ 2.17
+      setScore(recentEvent.id, { top_score: 5 });
+      setScore(olderEvent.id, { top_score: 5 });
 
       // Query with sort:hot
       const results = await relay.query([{ kinds: [1], search: "sort:hot" }]);
 
-      // Both events have same ref count, but recent scores higher due to less decay
-      // recent: 5 * 0.5^(0.5/24) ≈ 4.93
-      // older:  5 * 0.5^(20/24) ≈ 2.17
       assert.equal(results.length, 2);
       assert.equal(results[0].id, recentEvent.id);
     });
 
     it("should combine sort with full-text search", async () => {
-      const { client, references } = createSortMockClient();
+      const { client, setScore } = createSortMockClient();
       const relay = new OpenSearchRelay(client as unknown as Client, {
         indexName: "test-index",
         bulkMaxSize: 1,
@@ -811,7 +759,7 @@ describe("OpenSearchRelay", () => {
       );
 
       await relay.event(event);
-      references.set(event.id, [{ kind: 1 }]);
+      setScore(event.id, { top_score: 1 });
 
       // Query combining search text and sort
       const results = await relay.query([
@@ -939,7 +887,7 @@ describe("OpenSearchRelay", () => {
     });
 
     it("should combine distinct:author with sort:top", async () => {
-      const { client, references } = createSortMockClient();
+      const { client, setScore } = createSortMockClient();
       const relay = new OpenSearchRelay(client as unknown as Client, {
         indexName: "test-index",
         bulkMaxSize: 1,
@@ -985,16 +933,10 @@ describe("OpenSearchRelay", () => {
       await relay.event(event1b);
       await relay.event(event2);
 
-      // event1b has 5 refs, event1a has 1 ref, event2 has 3 refs
-      references.set(event1b.id, [
-        { kind: 1 },
-        { kind: 1 },
-        { kind: 1 },
-        { kind: 1 },
-        { kind: 1 },
-      ]);
-      references.set(event1a.id, [{ kind: 1 }]);
-      references.set(event2.id, [{ kind: 1 }, { kind: 1 }, { kind: 1 }]);
+      // Set precomputed scores
+      setScore(event1b.id, { top_score: 5 });
+      setScore(event1a.id, { top_score: 1 });
+      setScore(event2.id, { top_score: 3 });
 
       // Query with sort:top and distinct:author
       const results = await relay.query([
@@ -1012,7 +954,7 @@ describe("OpenSearchRelay", () => {
     });
 
     it("should handle sort:zaps query", async () => {
-      const { client, zaps } = createSortMockClient();
+      const { client, setScore } = createSortMockClient();
       const relay = new OpenSearchRelay(client as unknown as Client, {
         indexName: "test-index",
         bulkMaxSize: 1,
@@ -1045,9 +987,9 @@ describe("OpenSearchRelay", () => {
       await relay.event(event1);
       await relay.event(event2);
 
-      // event1 received 1000 sats (1M msats), event2 received 50000 sats (50M msats)
-      zaps.set(event1.id, 1_000_000);
-      zaps.set(event2.id, 50_000_000);
+      // Set precomputed zap amounts
+      setScore(event1.id, { zap_amount_msats: 1_000_000 });
+      setScore(event2.id, { zap_amount_msats: 50_000_000 });
 
       // Query with sort:zaps
       const results = await relay.query([{ kinds: [1], search: "sort:zaps" }]);
@@ -1059,7 +1001,7 @@ describe("OpenSearchRelay", () => {
     });
 
     it("should exclude events with no zaps from sort:zaps results", async () => {
-      const { client, zaps } = createSortMockClient();
+      const { client, setScore } = createSortMockClient();
       const relay = new OpenSearchRelay(client as unknown as Client, {
         indexName: "test-index",
         bulkMaxSize: 1,
@@ -1092,7 +1034,7 @@ describe("OpenSearchRelay", () => {
       await relay.event(unzappedEvent);
 
       // Only one event has zaps
-      zaps.set(zappedEvent.id, 5_000_000);
+      setScore(zappedEvent.id, { zap_amount_msats: 5_000_000 });
 
       const results = await relay.query([{ kinds: [1], search: "sort:zaps" }]);
 
@@ -1124,7 +1066,7 @@ describe("OpenSearchRelay", () => {
     });
 
     it("should combine distinct:author with sort:zaps", async () => {
-      const { client, zaps } = createSortMockClient();
+      const { client, setScore } = createSortMockClient();
       const relay = new OpenSearchRelay(client as unknown as Client, {
         indexName: "test-index",
         bulkMaxSize: 1,
@@ -1134,7 +1076,7 @@ describe("OpenSearchRelay", () => {
       const sk2 = generateSecretKey();
       const now = Math.floor(Date.now() / 1000);
 
-      // Author 1: two events, one with 100 sats and one with 5000 sats
+      // Author 1: two events, one with low zaps and one with high zaps
       const event1a = finalizeEvent(
         {
           kind: 1,
@@ -1155,7 +1097,7 @@ describe("OpenSearchRelay", () => {
         sk1,
       );
 
-      // Author 2: one event with 3000 sats
+      // Author 2: one event with medium zaps
       const event2 = finalizeEvent(
         {
           kind: 1,
@@ -1170,9 +1112,9 @@ describe("OpenSearchRelay", () => {
       await relay.event(event1b);
       await relay.event(event2);
 
-      zaps.set(event1a.id, 100_000);
-      zaps.set(event1b.id, 5_000_000);
-      zaps.set(event2.id, 3_000_000);
+      setScore(event1a.id, { zap_amount_msats: 100_000 });
+      setScore(event1b.id, { zap_amount_msats: 5_000_000 });
+      setScore(event2.id, { zap_amount_msats: 3_000_000 });
 
       // Query with sort:zaps and distinct:author
       const results = await relay.query([
@@ -1184,7 +1126,7 @@ describe("OpenSearchRelay", () => {
       const pubkeys = results.map((e) => e.pubkey);
       assert.equal(new Set(pubkeys).size, 2);
 
-      // event1b should be first (5000 sats, highest for author 1), event2 second (3000 sats)
+      // event1b should be first (5M msats, highest for author 1), event2 second (3M msats)
       assert.equal(results[0].id, event1b.id);
       assert.equal(results[1].id, event2.id);
     });
@@ -1327,6 +1269,7 @@ describe("OpenSearchRelay", () => {
             }
             return { body: { errors: false, items } };
           },
+          updateByQuery: async () => ({ body: { updated: 0 } }),
           indices: {
             exists: async () => ({ body: true }),
             create: async () => ({ body: {} }),
@@ -1559,6 +1502,7 @@ describe("OpenSearchRelay", () => {
             );
             return { body: { count: nonDeleted.length } };
           },
+          updateByQuery: async () => ({ body: { updated: 0 } }),
           indices: {
             exists: async () => ({ body: true }),
             create: async () => ({ body: {} }),
@@ -1797,6 +1741,7 @@ describe("OpenSearchRelay", () => {
             );
             return { body: { count: nonDeleted.length } };
           },
+          updateByQuery: async () => ({ body: { updated: 0 } }),
           indices: {
             exists: async () => ({ body: true }),
             create: async () => ({ body: {} }),
@@ -2004,6 +1949,7 @@ describe("OpenSearchRelay", () => {
             );
             return { body: { count: nonDeleted.length } };
           },
+          updateByQuery: async () => ({ body: { updated: 0 } }),
           indices: {
             exists: async () => ({ body: true }),
             create: async () => ({ body: {} }),
@@ -2228,6 +2174,7 @@ describe("OpenSearchRelay", () => {
             );
             return { body: { count: nonDeleted.length } };
           },
+          updateByQuery: async () => ({ body: { updated: 0 } }),
           indices: {
             exists: async () => ({ body: true }),
             create: async () => ({ body: {} }),
@@ -2813,6 +2760,12 @@ describe("OpenSearchRelay", () => {
         "sentiment",
         "media",
         "video",
+        "top_score",
+        "reply_count",
+        "reaction_count",
+        "repost_count",
+        "zap_amount_msats",
+        "scores_dirty",
       ]);
 
       const mockClient = {
@@ -2851,6 +2804,7 @@ describe("OpenSearchRelay", () => {
             },
           };
         },
+        updateByQuery: async () => ({ body: { updated: 0 } }),
         indices: {
           exists: async () => ({ body: true }),
           create: async () => ({ body: {} }),

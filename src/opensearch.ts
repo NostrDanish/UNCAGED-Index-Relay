@@ -25,6 +25,18 @@ interface NostrEventDocument extends NostrEvent {
   sentiment?: string;
   media: boolean;
   video: boolean;
+  /** Unique authors who referenced this event (replies, reposts, reactions). */
+  top_score: number;
+  /** Count of kind 1/1111 referencing events. */
+  reply_count: number;
+  /** Count of kind 7 referencing events. */
+  reaction_count: number;
+  /** Count of kind 6/16 referencing events. */
+  repost_count: number;
+  /** Sum of amount_msats from kind 9735 zap receipts referencing this event. */
+  zap_amount_msats: number;
+  /** Whether engagement scores need recomputation. */
+  scores_dirty: boolean;
 }
 
 /** Pending bulk operation for an event. */
@@ -236,6 +248,12 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
       ...(sentiment && { sentiment }),
       media: mediaResult.media ?? false,
       video: mediaResult.video ?? false,
+      top_score: 0,
+      reply_count: 0,
+      reaction_count: 0,
+      repost_count: 0,
+      zap_amount_msats: 0,
+      scores_dirty: false,
     };
   }
 
@@ -299,11 +317,13 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
   }
 
   /**
-   * Query events with NIP-50 sort algorithms using aggregation-first approach.
+   * Query events using precomputed engagement scores.
    *
-   * Each sort mode aggregates referencing events (with the appropriate time
-   * window on the *referencing* events, not the targets), fetches the
-   * referenced events applying the user's filter, then scores and sorts.
+   * Each sort mode uses the building-block score fields (top_score,
+   * reply_count, reaction_count, repost_count, zap_amount_msats) that
+   * are maintained by the background recomputeScores() job. Filters
+   * are applied directly in the query, so results are correct for any
+   * filter narrowing (kinds, tags, full-text search, etc.).
    */
   private async querySortedEvents(
     filter: NostrFilter,
@@ -351,420 +371,184 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
   }
 
   /**
-   * Fetch target events by IDs, applying the user's filter constraints.
-   * Returns a map of event ID to NostrEvent for events that pass the filter.
+   * Extract hits from an OpenSearch response as NostrEvent[].
    */
-  private async fetchTargetEvents(
-    eventIds: string[],
-    filter: NostrFilter,
-  ): Promise<Map<string, NostrEvent>> {
-    const query = this.buildQuery(filter) as {
-      bool: { must: Record<string, unknown>[] };
-    };
-    query.bool.must.push({ terms: { id: eventIds } });
-
-    const response = await this.client.search({
-      index: this.indexName,
-      body: {
-        query,
-        size: Math.min(eventIds.length, 5000),
-      },
-    });
-
-    const eventsById = new Map<string, NostrEvent>();
-    for (const hit of response.body.hits.hits) {
-      const h = hit as { _source?: NostrEventDocument };
-      if (h._source) {
-        const event = this.documentToEvent(h._source);
-        eventsById.set(event.id, event);
-      }
-    }
-    return eventsById;
+  private hitsToEvents(
+    // biome-ignore lint/suspicious/noExplicitAny: OpenSearch response typing
+    response: any,
+  ): NostrEvent[] {
+    const hits = response.body.hits.hits;
+    return hits
+      .filter(
+        (hit: { _source?: NostrEventDocument }) => hit._source !== undefined,
+      )
+      .map((hit: { _source: NostrEventDocument }) =>
+        this.documentToEvent(hit._source),
+      );
   }
 
   /**
-   * Query top events — most referenced of all time.
-   * Scored by unique authors (cardinality on pubkey) to resist spam.
+   * Query top events — sorted by precomputed `top_score` (unique authors
+   * who referenced this event). Single OpenSearch query with the user's
+   * filter applied directly.
    */
   private async querySortTop(
     filter: NostrFilter,
     limit: number,
   ): Promise<NostrEvent[]> {
-    const bucketCount = Math.max(limit * 10, 1000);
-
-    // Aggregate referencing events (no time window — all time)
-    const aggMust: Record<string, unknown>[] = [
-      { term: { deleted: false } },
-      { terms: { kind: [1, 6, 7, 16, 1111] } },
-    ];
-
-    // If the user specified a time range, apply it to referencing events
-    if (filter.since || filter.until) {
-      const range: Record<string, number> = {};
-      if (filter.since) range.gte = filter.since;
-      if (filter.until) range.lte = filter.until;
-      aggMust.push({ range: { created_at: range } });
-    }
+    const query = this.buildQuery(filter) as {
+      bool: { must: Record<string, unknown>[] };
+    };
+    query.bool.must.push({ range: { top_score: { gt: 0 } } });
 
     const response = await this.client.search({
       index: this.indexName,
       body: {
-        query: { bool: { must: aggMust } },
-        size: 0,
-        aggs: {
-          by_event: {
-            terms: {
-              field: "tags_map.e",
-              size: bucketCount,
-              order: { _count: "desc" as const },
-            },
-            aggs: {
-              unique_authors: {
-                cardinality: { field: "pubkey" },
-              },
-            },
-          },
-        },
+        query,
+        sort: [{ top_score: { order: "desc" as const } }],
+        size: limit,
       },
     });
 
-    const buckets =
-      (
-        response.body.aggregations?.by_event as unknown as {
-          buckets?: Array<{
-            key: string;
-            doc_count: number;
-            unique_authors?: { value: number };
-          }>;
-        }
-      )?.buckets || [];
-
-    if (buckets.length === 0) return [];
-
-    const scoreMap = new Map(
-      buckets.map((b) => [b.key, b.unique_authors?.value ?? 0]),
-    );
-    const eventIds = buckets.map((b) => b.key);
-
-    const eventsById = await this.fetchTargetEvents(eventIds, filter);
-    if (eventsById.size === 0) return [];
-
-    return [...eventsById.values()].sort(
-      (a, b) => (scoreMap.get(b.id) || 0) - (scoreMap.get(a.id) || 0),
-    );
+    return this.hitsToEvents(response);
   }
 
   /**
-   * Query hot events — most engagement in a recent time window.
-   * Time window is applied to the **referencing events**, not the targets.
-   * Score = unique_authors * decay_factor (half-life of 24 hours based on target age).
+   * Query hot events — top_score weighted by exponential time decay.
+   * Score = top_score * 0.5^(age_in_hours / 24).
+   * Uses a script_score query so OpenSearch computes and sorts server-side.
    */
   private async querySortHot(
     filter: NostrFilter,
     limit: number,
   ): Promise<NostrEvent[]> {
     const now = Math.floor(Date.now() / 1000);
-    const bucketCount = Math.max(limit * 10, 1000);
-    const timeWindow = 7 * 24 * 60 * 60; // 7 days
-
-    const since = filter.since || now - timeWindow;
-    const until = filter.until || now;
+    const query = this.buildQuery(filter) as {
+      bool: { must: Record<string, unknown>[] };
+    };
+    query.bool.must.push({ range: { top_score: { gt: 0 } } });
 
     const response = await this.client.search({
       index: this.indexName,
       body: {
         query: {
-          bool: {
-            must: [
-              { term: { deleted: false } },
-              { terms: { kind: [1, 6, 7, 16, 1111] } },
-              { range: { created_at: { gte: since, lte: until } } },
-            ],
-          },
-        },
-        size: 0,
-        aggs: {
-          by_event: {
-            terms: {
-              field: "tags_map.e",
-              size: bucketCount,
-              order: { _count: "desc" as const },
-            },
-            aggs: {
-              unique_authors: {
-                cardinality: { field: "pubkey" },
-              },
+          script_score: {
+            query,
+            script: {
+              source: `
+                double topScore = doc['top_score'].value;
+                double ageHours = (params.now - doc['created_at'].value) / 3600.0;
+                return topScore * Math.pow(0.5, ageHours / 24.0);
+              `,
+              params: { now },
             },
           },
         },
+        size: limit,
       },
     });
 
-    const buckets =
-      (
-        response.body.aggregations?.by_event as unknown as {
-          buckets?: Array<{
-            key: string;
-            doc_count: number;
-            unique_authors?: { value: number };
-          }>;
-        }
-      )?.buckets || [];
-
-    if (buckets.length === 0) return [];
-
-    const scoreMap = new Map(
-      buckets.map((b) => [b.key, b.unique_authors?.value ?? 0]),
-    );
-    const eventIds = buckets.map((b) => b.key);
-
-    const eventsById = await this.fetchTargetEvents(eventIds, filter);
-    if (eventsById.size === 0) return [];
-
-    // Score: unique_authors * exponential decay (half-life 24h)
-    return [...eventsById.values()]
-      .map((event) => {
-        const uniqueAuthors = scoreMap.get(event.id) || 0;
-        const ageInHours = (now - event.created_at) / 3600;
-        const score = uniqueAuthors * 0.5 ** (ageInHours / 24);
-        return { event, score };
-      })
-      .sort((a, b) => b.score - a.score)
-      .map((item) => item.event);
+    return this.hitsToEvents(response);
   }
 
   /**
-   * Query controversial events — high engagement with mixed reaction types.
-   * Time window is applied to referencing events. Score rewards events
-   * with balanced replies vs reactions.
+   * Query controversial events — high engagement with balanced replies
+   * vs reactions. Score = min(reply_count, reaction_count) * sqrt(total).
    */
   private async querySortControversial(
     filter: NostrFilter,
     limit: number,
   ): Promise<NostrEvent[]> {
-    const now = Math.floor(Date.now() / 1000);
-    const bucketCount = Math.max(limit * 10, 1000);
-    const timeWindow = 7 * 24 * 60 * 60; // 7 days
-
-    const since = filter.since || now - timeWindow;
-    const until = filter.until || now;
+    const query = this.buildQuery(filter) as {
+      bool: { must: Record<string, unknown>[] };
+    };
+    // Require at least one reply AND one reaction for controversy
+    query.bool.must.push({ range: { reply_count: { gt: 0 } } });
+    query.bool.must.push({ range: { reaction_count: { gt: 0 } } });
 
     const response = await this.client.search({
       index: this.indexName,
       body: {
         query: {
-          bool: {
-            must: [
-              { term: { deleted: false } },
-              { terms: { kind: [1, 6, 7, 16, 1111] } },
-              { range: { created_at: { gte: since, lte: until } } },
-            ],
-          },
-        },
-        size: 0,
-        aggs: {
-          by_event: {
-            terms: {
-              field: "tags_map.e",
-              size: bucketCount,
-            },
-            aggs: {
-              by_kind: {
-                terms: { field: "kind", size: 20 },
-              },
+          script_score: {
+            query,
+            script: {
+              source: `
+                double replies = doc['reply_count'].value;
+                double reactions = doc['reaction_count'].value;
+                double balanced = Math.min(replies, reactions);
+                return balanced * Math.sqrt(replies + reactions);
+              `,
             },
           },
         },
+        size: limit,
       },
     });
 
-    const buckets =
-      (
-        response.body.aggregations?.by_event as unknown as {
-          buckets?: Array<{
-            key: string;
-            doc_count: number;
-            by_kind?: {
-              buckets?: Array<{ key: number; doc_count: number }>;
-            };
-          }>;
-        }
-      )?.buckets || [];
-
-    if (buckets.length === 0) return [];
-
-    // Score: min(replies, reactions) * sqrt(total)
-    const scoreMap = new Map<string, number>();
-    for (const bucket of buckets) {
-      const kindBuckets = bucket.by_kind?.buckets || [];
-      let replies = 0;
-      let engagement = 0;
-      for (const kb of kindBuckets) {
-        if (kb.key === 1) replies += kb.doc_count;
-        else if (kb.key === 6 || kb.key === 7) engagement += kb.doc_count;
-      }
-      const balanced = Math.min(replies, engagement);
-      const score = balanced * Math.sqrt(replies + engagement);
-      if (score > 0) scoreMap.set(bucket.key, score);
-    }
-
-    const eventIds = [...scoreMap.keys()];
-    if (eventIds.length === 0) return [];
-
-    const eventsById = await this.fetchTargetEvents(eventIds, filter);
-    if (eventsById.size === 0) return [];
-
-    return [...eventsById.values()]
-      .filter((e) => scoreMap.has(e.id))
-      .sort((a, b) => (scoreMap.get(b.id) || 0) - (scoreMap.get(a.id) || 0));
+    return this.hitsToEvents(response);
   }
 
   /**
-   * Query rising events — gaining engagement quickly in a short window.
-   * Time window is applied to referencing events.
-   * Score = doc_count / age_in_hours (references per hour).
+   * Query rising events — gaining engagement quickly relative to age.
+   * Score = (reply_count + reaction_count + repost_count) / age_in_hours.
+   * Uses all-time counts as the score basis.
    */
   private async querySortRising(
     filter: NostrFilter,
     limit: number,
   ): Promise<NostrEvent[]> {
     const now = Math.floor(Date.now() / 1000);
-    const bucketCount = Math.max(limit * 10, 1000);
-    const timeWindow = 48 * 60 * 60; // 48 hours
-
-    const since = filter.since || now - timeWindow;
-    const until = filter.until || now;
+    const query = this.buildQuery(filter) as {
+      bool: { must: Record<string, unknown>[] };
+    };
+    query.bool.must.push({ range: { top_score: { gt: 0 } } });
 
     const response = await this.client.search({
       index: this.indexName,
       body: {
         query: {
-          bool: {
-            must: [
-              { term: { deleted: false } },
-              { terms: { kind: [1, 6, 7, 16, 1111] } },
-              { range: { created_at: { gte: since, lte: until } } },
-            ],
-          },
-        },
-        size: 0,
-        aggs: {
-          by_event: {
-            terms: {
-              field: "tags_map.e",
-              size: bucketCount,
-              order: { _count: "desc" as const },
+          script_score: {
+            query,
+            script: {
+              source: `
+                double total = doc['reply_count'].value + doc['reaction_count'].value + doc['repost_count'].value;
+                double ageHours = Math.max((params.now - doc['created_at'].value) / 3600.0, 0.1);
+                return total / ageHours;
+              `,
+              params: { now },
             },
           },
         },
+        size: limit,
       },
     });
 
-    const buckets =
-      (
-        response.body.aggregations?.by_event as unknown as {
-          buckets?: Array<{ key: string; doc_count: number }>;
-        }
-      )?.buckets || [];
-
-    if (buckets.length === 0) return [];
-
-    const refCountMap = new Map(buckets.map((b) => [b.key, b.doc_count]));
-    const eventIds = buckets.map((b) => b.key);
-
-    const eventsById = await this.fetchTargetEvents(eventIds, filter);
-    if (eventsById.size === 0) return [];
-
-    return [...eventsById.values()]
-      .map((event) => {
-        const refCount = refCountMap.get(event.id) || 0;
-        const ageInHours = Math.max((now - event.created_at) / 3600, 0.1);
-        const score = refCount / ageInHours;
-        return { event, score };
-      })
-      .sort((a, b) => b.score - a.score)
-      .map((item) => item.event);
+    return this.hitsToEvents(response);
   }
 
   /**
-   * Query most-zapped events — ranked by total millisatoshis received.
-   * Uses the `amount_msats` field parsed from bolt11 invoices at index time.
-   * Falls back to zap receipt count if amount data is unavailable.
+   * Query most-zapped events — sorted by precomputed `zap_amount_msats`.
    */
   private async querySortZaps(
     filter: NostrFilter,
     limit: number,
   ): Promise<NostrEvent[]> {
-    const bucketCount = Math.max(limit * 10, 1000);
-
-    const aggMust: Record<string, unknown>[] = [
-      { term: { deleted: false } },
-      { term: { kind: 9735 } },
-    ];
-
-    // If the user specified a time range, apply it to zap receipts
-    if (filter.since || filter.until) {
-      const range: Record<string, number> = {};
-      if (filter.since) range.gte = filter.since;
-      if (filter.until) range.lte = filter.until;
-      aggMust.push({ range: { created_at: range } });
-    }
+    const query = this.buildQuery(filter) as {
+      bool: { must: Record<string, unknown>[] };
+    };
+    query.bool.must.push({ range: { zap_amount_msats: { gt: 0 } } });
 
     const response = await this.client.search({
       index: this.indexName,
       body: {
-        query: { bool: { must: aggMust } },
-        size: 0,
-        aggs: {
-          by_event: {
-            terms: {
-              field: "tags_map.e",
-              size: bucketCount,
-              order: { total_msats: "desc" as const },
-            },
-            aggs: {
-              total_msats: {
-                sum: { field: "amount_msats" },
-              },
-            },
-          },
-        },
+        query,
+        sort: [{ zap_amount_msats: { order: "desc" as const } }],
+        size: limit,
       },
     });
 
-    const buckets =
-      (
-        response.body.aggregations?.by_event as unknown as {
-          buckets?: Array<{
-            key: string;
-            doc_count: number;
-            total_msats?: { value: number };
-          }>;
-        }
-      )?.buckets || [];
-
-    if (buckets.length === 0) return [];
-
-    // Score by total msats; fall back to doc_count if amounts aren't populated
-    const scoreMap = new Map(
-      buckets
-        .map((b) => {
-          const msats = b.total_msats?.value ?? 0;
-          const score = msats > 0 ? msats : b.doc_count;
-          return [b.key, score] as const;
-        })
-        .filter(([, score]) => score > 0),
-    );
-    const eventIds = [...scoreMap.keys()];
-
-    if (eventIds.length === 0) return [];
-
-    const eventsById = await this.fetchTargetEvents(eventIds, filter);
-    if (eventsById.size === 0) return [];
-
-    return [...eventsById.values()]
-      .filter((e) => scoreMap.has(e.id))
-      .sort((a, b) => (scoreMap.get(b.id) || 0) - (scoreMap.get(a.id) || 0));
+    return this.hitsToEvents(response);
   }
 
   /**
@@ -1072,6 +856,12 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
           entry.resolve();
         }
       }
+
+      // Mark referenced events as scores_dirty when referencing events are indexed.
+      // Referencing kinds: 1, 6, 7, 16, 1111 (engagement), 9735 (zaps).
+      this.markReferencedEventsDirty(entries).catch((err) => {
+        console.error("Failed to mark referenced events dirty:", err);
+      });
     } catch (error) {
       // Entire bulk request failed — reject all entries
       const err = error instanceof Error ? error : new Error(String(error));
@@ -1079,6 +869,53 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
         entry.reject(err);
       }
     }
+  }
+
+  /** Kinds whose `e`-tag references affect engagement scores. */
+  private static REFERENCING_KINDS = new Set([1, 6, 7, 16, 1111, 9735]);
+
+  /**
+   * After indexing referencing events, mark the target events they reference
+   * as needing score recomputation by setting `scores_dirty: true`.
+   */
+  private async markReferencedEventsDirty(entries: BulkEntry[]): Promise<void> {
+    const referencedIds = new Set<string>();
+
+    for (const entry of entries) {
+      if (!OpenSearchRelay.REFERENCING_KINDS.has(entry.event.kind)) continue;
+
+      for (const tag of entry.event.tags) {
+        if (tag[0] === "e" && tag[1]) {
+          referencedIds.add(tag[1]);
+        }
+      }
+    }
+
+    if (referencedIds.size === 0) return;
+
+    // Use update_by_query to set scores_dirty=true on all referenced events
+    // in a single server-side operation (no round-trip for document IDs).
+    await this.client.updateByQuery({
+      index: this.indexName,
+      body: {
+        query: {
+          bool: {
+            must: [
+              { terms: { id: [...referencedIds] } },
+              { term: { scores_dirty: false } },
+            ],
+          },
+        },
+        script: {
+          source: "ctx._source.scores_dirty = true",
+          lang: "painless",
+        },
+      },
+      // Don't wait for completion or refresh — this is best-effort and
+      // the background job will catch anything missed.
+      refresh: false,
+      conflicts: "proceed",
+    });
   }
 
   /**
@@ -1310,6 +1147,12 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     sentiment: { type: "keyword" },
     media: { type: "boolean" },
     video: { type: "boolean" },
+    top_score: { type: "integer" },
+    reply_count: { type: "integer" },
+    reaction_count: { type: "integer" },
+    repost_count: { type: "integer" },
+    zap_amount_msats: { type: "long" },
+    scores_dirty: { type: "boolean" },
   };
 
   /**
@@ -1369,6 +1212,266 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
       console.error("Failed to create index:", error);
       throw error;
     }
+  }
+
+  /**
+   * Recompute engagement scores for events marked as dirty.
+   *
+   * Finds events where `scores_dirty: true`, aggregates their referencing
+   * events to compute `top_score`, `reply_count`, `reaction_count`,
+   * `repost_count`, and `zap_amount_msats`, then writes the scores back
+   * and clears the dirty flag.
+   *
+   * Designed to be called periodically (e.g. via setInterval).
+   * Returns the number of events whose scores were updated.
+   */
+  async recomputeScores(batchSize = 500): Promise<number> {
+    // Phase 1: Find dirty event IDs.
+    const dirtyResponse = await this.client.search({
+      index: this.indexName,
+      body: {
+        query: {
+          bool: {
+            must: [{ term: { scores_dirty: true } }],
+          },
+        },
+        _source: ["id"],
+        size: batchSize,
+      },
+    });
+
+    const dirtyHits = dirtyResponse.body.hits.hits as unknown as Array<{
+      _source?: { id: string };
+    }>;
+    if (dirtyHits.length === 0) return 0;
+
+    const dirtyIds = dirtyHits
+      .filter((h) => h._source?.id)
+      .map((h) => h._source?.id as string);
+
+    // Phase 2: Aggregate engagement referencing events (kinds 1/6/7/16/1111)
+    // scoped to just these dirty event IDs.
+    const engagementResponse = await this.client.search({
+      index: this.indexName,
+      body: {
+        query: {
+          bool: {
+            must: [
+              { term: { deleted: false } },
+              { terms: { kind: [1, 6, 7, 16, 1111] } },
+              { terms: { "tags_map.e": dirtyIds } },
+            ],
+          },
+        },
+        size: 0,
+        aggs: {
+          by_event: {
+            terms: {
+              field: "tags_map.e",
+              size: dirtyIds.length,
+              // Include only the dirty IDs in the aggregation
+              include: dirtyIds,
+            },
+            aggs: {
+              unique_authors: {
+                cardinality: { field: "pubkey" },
+              },
+              by_kind: {
+                terms: { field: "kind", size: 10 },
+              },
+            },
+          },
+        },
+      },
+    });
+
+    const engagementBuckets =
+      (
+        engagementResponse.body.aggregations?.by_event as unknown as {
+          buckets?: Array<{
+            key: string;
+            doc_count: number;
+            unique_authors?: { value: number };
+            by_kind?: {
+              buckets?: Array<{ key: number; doc_count: number }>;
+            };
+          }>;
+        }
+      )?.buckets || [];
+
+    // Phase 3: Aggregate zap amounts (kind 9735) separately.
+    const zapResponse = await this.client.search({
+      index: this.indexName,
+      body: {
+        query: {
+          bool: {
+            must: [
+              { term: { deleted: false } },
+              { term: { kind: 9735 } },
+              { terms: { "tags_map.e": dirtyIds } },
+            ],
+          },
+        },
+        size: 0,
+        aggs: {
+          by_event: {
+            terms: {
+              field: "tags_map.e",
+              size: dirtyIds.length,
+              include: dirtyIds,
+            },
+            aggs: {
+              total_msats: {
+                sum: { field: "amount_msats" },
+              },
+            },
+          },
+        },
+      },
+    });
+
+    const zapBuckets =
+      (
+        zapResponse.body.aggregations?.by_event as unknown as {
+          buckets?: Array<{
+            key: string;
+            doc_count: number;
+            total_msats?: { value: number };
+          }>;
+        }
+      )?.buckets || [];
+
+    // Build score maps.
+    const scores = new Map<
+      string,
+      {
+        top_score: number;
+        reply_count: number;
+        reaction_count: number;
+        repost_count: number;
+        zap_amount_msats: number;
+      }
+    >();
+
+    // Initialize all dirty IDs with zeros (events with no references get 0 scores).
+    for (const id of dirtyIds) {
+      scores.set(id, {
+        top_score: 0,
+        reply_count: 0,
+        reaction_count: 0,
+        repost_count: 0,
+        zap_amount_msats: 0,
+      });
+    }
+
+    // Fill in engagement scores.
+    for (const bucket of engagementBuckets) {
+      const s = scores.get(bucket.key);
+      if (!s) continue;
+
+      s.top_score = bucket.unique_authors?.value ?? 0;
+
+      for (const kb of bucket.by_kind?.buckets || []) {
+        switch (kb.key) {
+          case 1:
+          case 1111:
+            s.reply_count += kb.doc_count;
+            break;
+          case 7:
+            s.reaction_count += kb.doc_count;
+            break;
+          case 6:
+          case 16:
+            s.repost_count += kb.doc_count;
+            break;
+        }
+      }
+    }
+
+    // Fill in zap amounts.
+    for (const bucket of zapBuckets) {
+      const s = scores.get(bucket.key);
+      if (s) {
+        s.zap_amount_msats = bucket.total_msats?.value ?? 0;
+      }
+    }
+
+    // Phase 4: Bulk update the dirty events with computed scores.
+    const body: Array<Record<string, unknown>> = [];
+
+    for (const [id, s] of scores) {
+      body.push({
+        update: {
+          _index: this.indexName,
+          _id: noteEncode(id),
+        },
+      });
+      body.push({
+        doc: {
+          top_score: s.top_score,
+          reply_count: s.reply_count,
+          reaction_count: s.reaction_count,
+          repost_count: s.repost_count,
+          zap_amount_msats: s.zap_amount_msats,
+          scores_dirty: false,
+        },
+      });
+    }
+
+    if (body.length > 0) {
+      const updateResponse = await this.client.bulk({
+        body,
+        refresh: false,
+      });
+
+      // Some updates may fail if the doc ID doesn't match (e.g. replaceable
+      // events use naddr encoding). Fall back to update_by_query for those.
+      if (updateResponse.body.errors) {
+        const failedIds: string[] = [];
+        const items: Array<
+          Record<string, { error?: unknown; status?: number }>
+        > = updateResponse.body.items;
+
+        for (let i = 0; i < items.length; i++) {
+          const result = items[i].update;
+          if (result?.error) {
+            // This dirty ID's document uses a different _id format
+            failedIds.push(dirtyIds[i]);
+          }
+        }
+
+        // Retry failed IDs with update_by_query (finds docs by `id` field)
+        if (failedIds.length > 0) {
+          for (const id of failedIds) {
+            const s = scores.get(id);
+            if (!s) continue;
+
+            await this.client.updateByQuery({
+              index: this.indexName,
+              body: {
+                query: { term: { id } },
+                script: {
+                  source: `
+                    ctx._source.top_score = params.top_score;
+                    ctx._source.reply_count = params.reply_count;
+                    ctx._source.reaction_count = params.reaction_count;
+                    ctx._source.repost_count = params.repost_count;
+                    ctx._source.zap_amount_msats = params.zap_amount_msats;
+                    ctx._source.scores_dirty = false;
+                  `,
+                  lang: "painless",
+                  params: s,
+                },
+              },
+              refresh: false,
+              conflicts: "proceed",
+            });
+          }
+        }
+      }
+    }
+
+    return dirtyIds.length;
   }
 
   /**
