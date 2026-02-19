@@ -266,9 +266,17 @@ async function main() {
 
     if (!afterKey) break;
 
+    // Periodically clear fielddata cache to prevent circuit breaker.
+    if (totalProcessed % 10_000 === 0) {
+      await client.indices.clearCache({
+        index: indexName,
+        fielddata: true,
+      });
+    }
+
     // Small delay between batches to avoid fielddata accumulation
     // triggering the circuit breaker.
-    await sleep(500);
+    await sleep(200);
   }
 
   // Phase 2: Same for zap amounts (kind 9735).
@@ -392,7 +400,14 @@ async function main() {
 
     if (!afterKey) break;
 
-    await sleep(500);
+    if (zapProcessed % 10_000 === 0) {
+      await client.indices.clearCache({
+        index: indexName,
+        fielddata: true,
+      });
+    }
+
+    await sleep(200);
   }
 
   // Phase 3: Clear dirty flag on remaining events that were never referenced.
