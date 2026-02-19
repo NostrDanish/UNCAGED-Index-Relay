@@ -39,7 +39,7 @@ const CUSTOM_EMOJI_RE = /^:[\w-]+:$/;
 import { detectMedia } from "./media.ts";
 
 /** NIP-05 verification timeout in milliseconds. */
-const NIP05_TIMEOUT_MS = 700;
+const NIP05_TIMEOUT_MS = 3000;
 
 /**
  * Verify the NIP-05 identifier in a kind 0 (metadata) event.

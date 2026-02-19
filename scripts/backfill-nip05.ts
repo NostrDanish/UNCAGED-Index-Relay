@@ -18,7 +18,7 @@ import { parse as parseDomain } from "tldts";
 import { Config } from "../src/config.ts";
 
 /** NIP-05 verification timeout in milliseconds. */
-const NIP05_TIMEOUT_MS = 700;
+const NIP05_TIMEOUT_MS = 5000;
 
 /** Maximum concurrent NIP-05 lookups per batch. */
 const CONCURRENCY = 10;
