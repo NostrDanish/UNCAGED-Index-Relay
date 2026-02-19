@@ -10,6 +10,7 @@ import { NIP50, NKinds } from "@nostrify/nostrify";
 import type { Client, ClientOptions } from "@opensearch-project/opensearch";
 import { Client as OpenSearchClient } from "@opensearch-project/opensearch";
 import { naddrEncode, noteEncode } from "nostr-tools/nip19";
+import { parse as parseDomain } from "tldts";
 import type { Config } from "./config.ts";
 import { detectMedia } from "./media.ts";
 
@@ -25,6 +26,8 @@ interface NostrEventDocument extends NostrEvent {
   sentiment?: string;
   media: boolean;
   video: boolean;
+  nip05_domain?: string;
+  nip05_hostname?: string;
 }
 
 /** Pending bulk operation for an event. */
@@ -196,6 +199,8 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
       sentiment?: string;
       media?: boolean;
       video?: boolean;
+      nip05_domain?: string;
+      nip05_hostname?: string;
     },
   ): NostrEventDocument {
     const tagsMap = this.buildTagsMap(event.tags);
@@ -218,6 +223,8 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
 
     const language = analysis?.language;
     const sentiment = analysis?.sentiment;
+    const nip05_domain = analysis?.nip05_domain;
+    const nip05_hostname = analysis?.nip05_hostname;
 
     // Use pre-computed media detection from the analyze worker when available,
     // otherwise detect on the main thread (direct event() calls, eg tests).
@@ -236,6 +243,8 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
       ...(sentiment && { sentiment }),
       media: mediaResult.media ?? false,
       video: mediaResult.video ?? false,
+      ...(nip05_domain && { nip05_domain }),
+      ...(nip05_hostname && { nip05_hostname }),
     };
   }
 
@@ -358,6 +367,11 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     eventIds: string[],
     filter: NostrFilter,
   ): Promise<Map<string, NostrEvent>> {
+    // Resolve domain: extension to pubkeys before building the query.
+    const resolved = await this.resolveDomainFilter(filter);
+    if (resolved === null) return new Map();
+    filter = resolved;
+
     const query = this.buildQuery(filter) as {
       bool: { must: Record<string, unknown>[] };
     };
@@ -768,6 +782,105 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
   }
 
   /**
+   * Look up pubkeys whose kind 0 documents match the given NIP-05 domain.
+   *
+   * When `domain` is a bare registered domain (e.g. `example.com`), matches
+   * on `nip05_domain` so that all subdomains are included.
+   * When `domain` is a subdomain (e.g. `hi.example.com`), matches on
+   * `nip05_hostname` for an exact match.
+   */
+  private async resolveDomainPubkeys(domain: string): Promise<string[]> {
+    const parsed = parseDomain(domain);
+    if (!parsed.domain) return [];
+
+    const field = parsed.subdomain ? "nip05_hostname" : "nip05_domain";
+
+    try {
+      const response = await this.client.search({
+        index: this.indexName,
+        body: {
+          query: {
+            bool: {
+              must: [
+                { term: { kind: 0 } },
+                { term: { deleted: false } },
+                { term: { [field]: domain.toLowerCase() } },
+              ],
+            },
+          },
+          size: 0,
+          aggs: {
+            pubkeys: {
+              terms: { field: "pubkey", size: 10000 },
+            },
+          },
+        },
+      });
+
+      const buckets =
+        (
+          response.body.aggregations?.pubkeys as unknown as {
+            buckets?: Array<{ key: string }>;
+          }
+        )?.buckets || [];
+
+      return buckets.map((b) => b.key);
+    } catch (error) {
+      console.error("Failed to resolve domain pubkeys:", error);
+      return [];
+    }
+  }
+
+  /**
+   * If the filter contains a `domain:` NIP-50 extension, resolve it to
+   * pubkeys and return a modified filter with the pubkeys injected into
+   * `authors` and the `domain:` token removed from `search`.
+   *
+   * When the filter already has `authors`, the result is the intersection.
+   * Returns `null` when the domain matches zero pubkeys (caller should
+   * return an empty result).
+   */
+  private async resolveDomainFilter(
+    filter: NostrFilter,
+  ): Promise<NostrFilter | null> {
+    if (!filter.search) return filter;
+
+    const tokens = NIP50.parseInput(filter.search);
+    const domainToken = tokens.find(
+      (t) => typeof t === "object" && t.key === "domain",
+    );
+    if (!domainToken || typeof domainToken !== "object") return filter;
+
+    const pubkeys = await this.resolveDomainPubkeys(domainToken.value);
+    if (pubkeys.length === 0) return null;
+
+    // Intersect with existing authors if present.
+    let authors: string[];
+    if (filter.authors && filter.authors.length > 0) {
+      const pubkeySet = new Set(pubkeys);
+      authors = filter.authors.filter((a) => pubkeySet.has(a));
+      if (authors.length === 0) return null;
+    } else {
+      authors = pubkeys;
+    }
+
+    // Rebuild search string without the domain: token.
+    const remainingTokens = tokens.filter((t) => t !== domainToken);
+    const remainingSearch = remainingTokens
+      .map((t) => (typeof t === "string" ? t : `${t.key}:${t.value}`))
+      .join(" ")
+      .trim();
+
+    return {
+      ...filter,
+      authors,
+      ...(remainingSearch
+        ? { search: remainingSearch }
+        : { search: undefined }),
+    };
+  }
+
+  /**
    * Build OpenSearch query from Nostr filter
    */
   private buildQuery(filter: NostrFilter): Record<string, unknown> {
@@ -900,6 +1013,11 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     // Default to 500, cap at 5000
     const limit = Math.min(filter.limit || 500, 5000);
 
+    // Resolve domain: extension to pubkeys before building the query.
+    const resolved = await this.resolveDomainFilter(filter);
+    if (resolved === null) return [];
+    filter = resolved;
+
     // Check if this is a sort query
     const sortMode = this.parseSortMode(filter);
 
@@ -971,6 +1089,8 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
         sentiment?: string;
         media?: boolean;
         video?: boolean;
+        nip05_domain?: string;
+        nip05_hostname?: string;
       };
     },
   ): Promise<void> {
@@ -1146,12 +1266,17 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     let totalCount = 0;
     let approximate: boolean | undefined;
 
-    for (const filter of filters) {
+    for (let filter of filters) {
       if (opts?.signal?.aborted) {
         break;
       }
 
       try {
+        // Resolve domain: extension to pubkeys before building the query.
+        const resolved = await this.resolveDomainFilter(filter);
+        if (resolved === null) continue;
+        filter = resolved;
+
         const query = this.buildQuery(filter);
 
         if (
@@ -1304,6 +1429,8 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     sentiment: { type: "keyword" },
     media: { type: "boolean" },
     video: { type: "boolean" },
+    nip05_domain: { type: "keyword" },
+    nip05_hostname: { type: "keyword" },
   };
 
   /**

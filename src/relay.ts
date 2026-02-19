@@ -356,6 +356,8 @@ export class Relay {
           sentiment: analysis.sentiment,
           media: analysis.media,
           video: analysis.video,
+          nip05_domain: analysis.nip05_domain,
+          nip05_hostname: analysis.nip05_hostname,
         },
       };
       await this.storage.event(event, eventOpts);
