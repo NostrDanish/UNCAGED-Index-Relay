@@ -7,8 +7,6 @@ export interface AnalyzeResult {
   sentiment?: string;
   media?: boolean;
   video?: boolean;
-  nip05_domain?: string;
-  nip05_hostname?: string;
 }
 
 interface PendingRequest {
@@ -37,16 +35,7 @@ export class AnalyzePool {
       worker.onmessage = (
         event: MessageEvent<{ id: string } & AnalyzeResult>,
       ) => {
-        const {
-          id,
-          verified,
-          language,
-          sentiment,
-          media,
-          video,
-          nip05_domain,
-          nip05_hostname,
-        } = event.data;
+        const { id, verified, language, sentiment, media, video } = event.data;
         const request = this.pending.get(id);
         if (request) {
           this.pending.delete(id);
@@ -56,8 +45,6 @@ export class AnalyzePool {
             ...(sentiment && { sentiment }),
             ...(media !== undefined && { media }),
             ...(video !== undefined && { video }),
-            ...(nip05_domain && { nip05_domain }),
-            ...(nip05_hostname && { nip05_hostname }),
           });
         }
       };

@@ -4,12 +4,11 @@
 
 declare var self: Worker;
 
-import { NIP05, NSchema as n } from "@nostrify/nostrify";
+import { NSchema as n } from "@nostrify/nostrify";
 import type { NostrEvent } from "nostr-tools";
 import { initNostrWasm } from "nostr-wasm";
 import Sentiment from "sentiment";
 import { detect as detectLanguage } from "tinyld";
-import { parse as parseDomain } from "tldts";
 
 import type { AnalyzeResult } from "./analyze-pool.ts";
 
@@ -37,51 +36,6 @@ const SENTIMENT_THRESHOLD = 0.1;
 const CUSTOM_EMOJI_RE = /^:[\w-]+:$/;
 
 import { detectMedia } from "./media.ts";
-
-/** NIP-05 verification timeout in milliseconds. */
-const NIP05_TIMEOUT_MS = 3000;
-
-/**
- * Verify the NIP-05 identifier in a kind 0 (metadata) event.
- *
- * Performs an HTTP lookup to validate that the NIP-05 identifier resolves
- * to the event's pubkey. On success, returns the registered domain
- * (e.g. `example.com`) and the full hostname (e.g. `hi.example.com`).
- *
- * Returns an empty object when verification fails or the event is not kind 0.
- */
-async function verifyNip05(
-  event: NostrEvent,
-): Promise<{ nip05_domain?: string; nip05_hostname?: string }> {
-  if (event.kind !== 0) return {};
-
-  const result = n.json().pipe(n.metadata()).safeParse(event.content);
-  if (!result.success || !result.data.nip05) return {};
-
-  try {
-    const pointer = await NIP05.lookup(result.data.nip05, {
-      signal: AbortSignal.timeout(NIP05_TIMEOUT_MS),
-    });
-
-    // Verify the resolved pubkey matches the event author.
-    if (pointer.pubkey !== event.pubkey) return {};
-
-    // Extract the hostname from the NIP-05 identifier.
-    const match = result.data.nip05.match(NIP05.regex());
-    if (!match) return {};
-    const [, , hostname] = match;
-
-    const parsed = parseDomain(hostname);
-    if (!parsed.domain) return {};
-
-    return {
-      nip05_domain: parsed.domain,
-      nip05_hostname: hostname.toLowerCase(),
-    };
-  } catch {
-    return {}; // Timeout, network error, or no match.
-  }
-}
 
 /**
  * Detect the language of a Nostr event's content using `tinyld`.
@@ -182,19 +136,12 @@ self.onmessage = (event: MessageEvent<NostrEvent>) => {
   const sentiment = detectEventSentiment(nostrEvent);
   const { media, video } = detectMedia(nostrEvent);
 
-  // Step 3: Verify NIP-05 for kind 0 metadata events, then post result.
-  // Uses .then() instead of async/await to avoid Bun worker segfault
-  // with async onmessage handlers.
-  verifyNip05(nostrEvent).then(({ nip05_domain, nip05_hostname }) => {
-    postMessage({
-      id,
-      verified,
-      ...(language && { language }),
-      ...(sentiment && { sentiment }),
-      ...(media !== undefined && { media }),
-      ...(video !== undefined && { video }),
-      ...(nip05_domain && { nip05_domain }),
-      ...(nip05_hostname && { nip05_hostname }),
-    } satisfies { id: string } & AnalyzeResult);
-  });
+  postMessage({
+    id,
+    verified,
+    ...(language && { language }),
+    ...(sentiment && { sentiment }),
+    ...(media !== undefined && { media }),
+    ...(video !== undefined && { video }),
+  } satisfies { id: string } & AnalyzeResult);
 };
