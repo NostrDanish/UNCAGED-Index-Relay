@@ -103,7 +103,8 @@ const server = serve<WebSocketData>({
 console.log(`Nostr relay listening on ws://localhost:${server.port}`);
 
 // Background job: recompute engagement scores for dirty events.
-const SCORE_RECOMPUTE_INTERVAL_MS = 30_000;
+// Runs every 5s during backfill, effectively no-ops when no dirty events remain.
+const SCORE_RECOMPUTE_INTERVAL_MS = 5_000;
 setInterval(() => {
   opensearchRelay.recomputeScores().catch((err) => {
     console.error("Score recomputation failed:", err);

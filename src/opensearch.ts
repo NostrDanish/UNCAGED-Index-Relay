@@ -1225,7 +1225,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
    * Designed to be called periodically (e.g. via setInterval).
    * Returns the number of events whose scores were updated.
    */
-  async recomputeScores(batchSize = 500): Promise<number> {
+  async recomputeScores(batchSize = 5000): Promise<number> {
     // Phase 1: Find dirty event IDs.
     const dirtyResponse = await this.client.search({
       index: this.indexName,
@@ -1435,41 +1435,59 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
         for (let i = 0; i < items.length; i++) {
           const result = items[i].update;
           if (result?.error) {
-            // This dirty ID's document uses a different _id format
             failedIds.push(dirtyIds[i]);
           }
         }
 
-        // Retry failed IDs with update_by_query (finds docs by `id` field)
+        // Batch-clear dirty flag for failed IDs using a single Painless
+        // script that looks up each event's scores from a params map.
         if (failedIds.length > 0) {
+          const scoreParams: Record<
+            string,
+            {
+              top_score: number;
+              reply_count: number;
+              reaction_count: number;
+              repost_count: number;
+              zap_amount_msats: number;
+            }
+          > = {};
           for (const id of failedIds) {
             const s = scores.get(id);
-            if (!s) continue;
-
-            await this.client.updateByQuery({
-              index: this.indexName,
-              body: {
-                query: { term: { id } },
-                script: {
-                  source: `
-                    ctx._source.top_score = params.top_score;
-                    ctx._source.reply_count = params.reply_count;
-                    ctx._source.reaction_count = params.reaction_count;
-                    ctx._source.repost_count = params.repost_count;
-                    ctx._source.zap_amount_msats = params.zap_amount_msats;
-                    ctx._source.scores_dirty = false;
-                  `,
-                  lang: "painless",
-                  params: s,
-                },
-              },
-              refresh: false,
-              conflicts: "proceed",
-            });
+            if (s) scoreParams[id] = s;
           }
+
+          await this.client.updateByQuery({
+            index: this.indexName,
+            body: {
+              query: { terms: { id: failedIds } },
+              script: {
+                source: `
+                  def s = params.scores.get(ctx._source.id);
+                  if (s != null) {
+                    ctx._source.top_score = s.top_score;
+                    ctx._source.reply_count = s.reply_count;
+                    ctx._source.reaction_count = s.reaction_count;
+                    ctx._source.repost_count = s.repost_count;
+                    ctx._source.zap_amount_msats = s.zap_amount_msats;
+                    ctx._source.scores_dirty = false;
+                  }
+                `,
+                lang: "painless",
+                params: { scores: scoreParams },
+              },
+            },
+            refresh: false,
+            conflicts: "proceed",
+          });
         }
       }
     }
+
+    const withEngagement = engagementBuckets.length + zapBuckets.length;
+    console.log(
+      `Recomputed scores for ${dirtyIds.length} events (${withEngagement} with engagement)`,
+    );
 
     return dirtyIds.length;
   }
