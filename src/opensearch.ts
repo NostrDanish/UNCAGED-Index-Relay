@@ -6,7 +6,7 @@ import type {
   NostrRelayEVENT,
   NRelay,
 } from "@nostrify/nostrify";
-import { NIP50, NKinds } from "@nostrify/nostrify";
+import { NIP50, NKinds, NSchema as n } from "@nostrify/nostrify";
 import type { Client, ClientOptions } from "@opensearch-project/opensearch";
 import { Client as OpenSearchClient } from "@opensearch-project/opensearch";
 import { naddrEncode, noteEncode } from "nostr-tools/nip19";
@@ -25,6 +25,13 @@ interface NostrEventDocument extends NostrEvent {
   sentiment?: string;
   media: boolean;
   video: boolean;
+  /** Parsed profile metadata fields for kind 0 events (name search). */
+  metadata?: {
+    name?: string;
+    display_name?: string;
+    nip05?: string;
+    about?: string;
+  };
   /** Unique authors who referenced this event (replies, reposts, reactions). */
   top_score: number;
   /** Count of kind 1/1111 referencing events. */
@@ -197,6 +204,30 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
   static detectMedia = detectMedia;
 
   /**
+   * Parse profile metadata from a kind 0 event's JSON content.
+   * Returns an object with `name`, `display_name`, `nip05`, and `about`
+   * fields, or `undefined` for non-kind-0 events or unparseable content.
+   */
+  static parseMetadata(
+    event: NostrEvent,
+  ):
+    | { name?: string; display_name?: string; nip05?: string; about?: string }
+    | undefined {
+    if (event.kind !== 0) return undefined;
+    const result = n.json().pipe(n.metadata()).safeParse(event.content);
+    if (!result.success) return undefined;
+    const { name, display_name, nip05, about } = result.data;
+    // Only return if at least one field is present.
+    if (!name && !display_name && !nip05 && !about) return undefined;
+    return {
+      ...(name && { name }),
+      ...(display_name && { display_name }),
+      ...(nip05 && { nip05 }),
+      ...(about && { about }),
+    };
+  }
+
+  /**
    * Convert NostrEvent to OpenSearch document.
    * When `analysis` is provided (from the worker pool), those pre-computed
    * values are used directly instead of detecting on the main thread.
@@ -238,6 +269,9 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
         ? { media: analysis.media, video: analysis.video }
         : OpenSearchRelay.detectMedia(event);
 
+    // Extract profile metadata for kind 0 events (name search).
+    const metadata = OpenSearchRelay.parseMetadata(event);
+
     return {
       ...event,
       tags_map: tagsMap,
@@ -248,6 +282,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
       ...(sentiment && { sentiment }),
       media: mediaResult.media ?? false,
       video: mediaResult.video ?? false,
+      ...(metadata && { metadata }),
       top_score: 0,
       reply_count: 0,
       reaction_count: 0,
@@ -858,14 +893,26 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
       const searchText = tokens.filter((t) => typeof t === "string").join(" ");
 
       if (searchText.trim()) {
-        must.push({
-          match: {
-            content: {
+        if (this.isKind0OnlyFilter(filter)) {
+          // For kind 0 searches, match against parsed metadata name fields
+          // using edge-ngram prefix matching for autocomplete-style queries.
+          must.push({
+            multi_match: {
               query: searchText,
+              fields: ["metadata.name", "metadata.display_name"],
               operator: "and",
             },
-          },
-        });
+          });
+        } else {
+          must.push({
+            match: {
+              content: {
+                query: searchText,
+                operator: "and",
+              },
+            },
+          });
+        }
       }
 
       // Handle protocol: extension (NIP-48 + NIP-50)
@@ -1419,6 +1466,28 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     }
   }
 
+  /** Custom analyzer settings for edge-ngram prefix matching on profile names. */
+  // biome-ignore lint/suspicious/noExplicitAny: OpenSearch settings types are dynamic
+  private static ANALYZER_SETTINGS: Record<string, any> = {
+    analysis: {
+      analyzer: {
+        edge_ngram_analyzer: {
+          type: "custom",
+          tokenizer: "edge_ngram_tokenizer",
+          filter: ["lowercase"],
+        },
+      },
+      tokenizer: {
+        edge_ngram_tokenizer: {
+          type: "edge_ngram",
+          min_gram: 2,
+          max_gram: 20,
+          token_chars: ["letter", "digit"],
+        },
+      },
+    },
+  };
+
   /** Mapping properties for the Nostr events index. */
   // biome-ignore lint/suspicious/noExplicitAny: OpenSearch client types are overly strict for dynamic mappings
   private static MAPPING_PROPERTIES: Record<string, any> = {
@@ -1446,6 +1515,23 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     sentiment: { type: "keyword" },
     media: { type: "boolean" },
     video: { type: "boolean" },
+    metadata: {
+      type: "object",
+      properties: {
+        name: {
+          type: "text",
+          analyzer: "edge_ngram_analyzer",
+          search_analyzer: "standard",
+        },
+        display_name: {
+          type: "text",
+          analyzer: "edge_ngram_analyzer",
+          search_analyzer: "standard",
+        },
+        nip05: { type: "keyword" },
+        about: { type: "text", analyzer: "standard" },
+      },
+    },
     top_score: { type: "integer" },
     reply_count: { type: "integer" },
     reaction_count: { type: "integer" },
@@ -1471,6 +1557,30 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
         (await this.client.indices.existsAlias({ name: this.indexName })).body;
 
       if (exists) {
+        // Add custom analyzer settings (requires close/open).
+        // This is idempotent — if the analyzer already exists, the close/open
+        // is a harmless no-op that briefly pauses writes.
+        try {
+          await this.client.indices.close({ index: this.indexName });
+          await this.client.indices.putSettings({
+            index: this.indexName,
+            body: { settings: OpenSearchRelay.ANALYZER_SETTINGS },
+          });
+          await this.client.indices.open({ index: this.indexName });
+          console.log(`Updated analyzer settings for index ${this.indexName}`);
+        } catch (e) {
+          // Ensure the index is reopened even if putSettings fails.
+          try {
+            await this.client.indices.open({ index: this.indexName });
+          } catch {
+            // Already open or unrecoverable — ignore.
+          }
+          console.warn(
+            "Warning: could not update analyzer settings (may already exist):",
+            e,
+          );
+        }
+
         // Update mappings so any new fields are added to the existing index.
         await this.client.indices.putMapping({
           index: this.indexName,
@@ -1490,6 +1600,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
             number_of_shards: 3,
             number_of_replicas: 1,
             "index.max_result_window": 100000,
+            ...OpenSearchRelay.ANALYZER_SETTINGS,
           },
           mappings: {
             dynamic: "strict",

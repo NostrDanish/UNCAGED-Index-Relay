@@ -373,6 +373,19 @@ describe("OpenSearchRelay", () => {
         );
       };
 
+      /** Helper: resolve a dotted field path on a document. */
+      // biome-ignore lint/suspicious/noExplicitAny: test mock
+      const resolveField = (doc: any, field: string): unknown => {
+        if (!field.includes(".")) return doc[field];
+        return field
+          .split(".")
+          .reduce(
+            (o: Record<string, unknown>, k: string) =>
+              o?.[k] as Record<string, unknown>,
+            doc,
+          );
+      };
+
       /** Helper: check if a document passes all must clauses. */
       const matchesMust = (
         // biome-ignore lint/suspicious/noExplicitAny: test mock
@@ -384,19 +397,20 @@ describe("OpenSearchRelay", () => {
             const [field, value] = Object.entries(
               clause.term as Record<string, unknown>,
             )[0];
-            if (doc[field] !== value) return false;
+            if (resolveField(doc, field) !== value) return false;
           }
           if (clause.terms) {
             const [field, values] = Object.entries(
               clause.terms as Record<string, unknown[]>,
             )[0];
-            if (!values.includes(doc[field])) return false;
+            if (!values.includes(resolveField(doc, field) as unknown))
+              return false;
           }
           if (clause.range) {
             const [field, bounds] = Object.entries(
               clause.range as Record<string, Record<string, number>>,
             )[0];
-            const val = doc[field];
+            const val = resolveField(doc, field) as number | undefined | null;
             if (val === undefined || val === null) return false;
             if (bounds.gt !== undefined && !(val > bounds.gt)) return false;
             if (bounds.gte !== undefined && !(val >= bounds.gte)) return false;
@@ -411,9 +425,23 @@ describe("OpenSearchRelay", () => {
               typeof matchValue === "object"
                 ? (matchValue as { query: string }).query
                 : String(matchValue);
-            const text = String(doc[field] || "").toLowerCase();
+            const text = String(resolveField(doc, field) || "").toLowerCase();
             const terms = matchQuery.toLowerCase().split(/\s+/);
             if (!terms.every((t: string) => text.includes(t))) return false;
+          }
+          // Handle multi_match (edge-ngram prefix matching on metadata fields)
+          if (clause.multi_match) {
+            const mm = clause.multi_match as {
+              query: string;
+              fields: string[];
+              operator?: string;
+            };
+            const queryTerms = mm.query.toLowerCase().split(/\s+/);
+            const anyFieldMatches = mm.fields.some((field) => {
+              const text = String(resolveField(doc, field) || "").toLowerCase();
+              return queryTerms.every((t) => text.includes(t));
+            });
+            if (!anyFieldMatches) return false;
           }
         }
         return true;
@@ -1417,6 +1445,19 @@ describe("OpenSearchRelay", () => {
         );
       };
 
+      /** Helper: resolve a dotted field path on a document. */
+      // biome-ignore lint/suspicious/noExplicitAny: test mock
+      const resolveField = (doc: any, field: string): unknown => {
+        if (!field.includes(".")) return doc[field];
+        return field
+          .split(".")
+          .reduce(
+            (o: Record<string, unknown>, k: string) =>
+              o?.[k] as Record<string, unknown>,
+            doc,
+          );
+      };
+
       /** Helper: check if a document passes all must clauses. */
       const matchesMust = (
         // biome-ignore lint/suspicious/noExplicitAny: test mock
@@ -1428,30 +1469,13 @@ describe("OpenSearchRelay", () => {
             const [field, value] = Object.entries(
               clause.term as Record<string, unknown>,
             )[0];
-            const docVal = field.includes(".")
-              ? field
-                  .split(".")
-                  .reduce(
-                    (o: Record<string, unknown>, k: string) =>
-                      o?.[k] as Record<string, unknown>,
-                    doc,
-                  )
-              : doc[field];
-            if (docVal !== value) return false;
+            if (resolveField(doc, field) !== value) return false;
           }
           if (clause.terms) {
             const [field, values] = Object.entries(
               clause.terms as Record<string, unknown[]>,
             )[0];
-            const docVal = field.includes(".")
-              ? field
-                  .split(".")
-                  .reduce(
-                    (o: Record<string, unknown>, k: string) =>
-                      o?.[k] as Record<string, unknown>,
-                    doc,
-                  )
-              : doc[field];
+            const docVal = resolveField(doc, field);
             // For array fields (like tags_map.p), check if any element matches
             if (Array.isArray(docVal)) {
               if (!docVal.some((v: unknown) => values.includes(v)))
@@ -1464,7 +1488,7 @@ describe("OpenSearchRelay", () => {
             const [field, bounds] = Object.entries(
               clause.range as Record<string, Record<string, number>>,
             )[0];
-            const val = doc[field];
+            const val = resolveField(doc, field) as number | undefined | null;
             if (val === undefined || val === null) return false;
             if (bounds.gt !== undefined && !(val > bounds.gt)) return false;
             if (bounds.gte !== undefined && !(val >= bounds.gte)) return false;
@@ -1479,9 +1503,25 @@ describe("OpenSearchRelay", () => {
               typeof matchValue === "object"
                 ? (matchValue as { query: string }).query
                 : String(matchValue);
-            const text = String(doc[field] || "").toLowerCase();
+            const text = String(resolveField(doc, field) || "").toLowerCase();
             const terms = matchQuery.toLowerCase().split(/\s+/);
             if (!terms.every((t: string) => text.includes(t))) return false;
+          }
+          // Handle multi_match (edge-ngram prefix matching on metadata fields)
+          if (clause.multi_match) {
+            const mm = clause.multi_match as {
+              query: string;
+              fields: string[];
+              operator?: string;
+            };
+            const queryTerms = mm.query.toLowerCase().split(/\s+/);
+            // At least one field must match all terms (prefix/substring match
+            // simulates edge-ngram behaviour).
+            const anyFieldMatches = mm.fields.some((field) => {
+              const text = String(resolveField(doc, field) || "").toLowerCase();
+              return queryTerms.every((t) => text.includes(t));
+            });
+            if (!anyFieldMatches) return false;
           }
         }
         return true;
@@ -2134,6 +2174,145 @@ describe("OpenSearchRelay", () => {
       ]);
 
       // Only the post has top_score > 0, profile has 0
+      assert.equal(results.length, 1);
+      assert.equal(results[0].id, post.id);
+    });
+
+    it("should match kind 0 profiles by partial name prefix", async () => {
+      const { client, setScore } = createKind0SortMockClient();
+      const relay = new OpenSearchRelay(client as unknown as Client, {
+        indexName: "test-index",
+        bulkMaxSize: 1,
+      });
+
+      const sk1 = generateSecretKey();
+      const sk2 = generateSecretKey();
+      const sk3 = generateSecretKey();
+      const now = Math.floor(Date.now() / 1000);
+
+      const profile1 = finalizeEvent(
+        {
+          kind: 0,
+          created_at: now,
+          tags: [],
+          content: JSON.stringify({ name: "jack" }),
+        },
+        sk1,
+      );
+
+      const profile2 = finalizeEvent(
+        {
+          kind: 0,
+          created_at: now - 10,
+          tags: [],
+          content: JSON.stringify({ name: "jackson" }),
+        },
+        sk2,
+      );
+
+      const profile3 = finalizeEvent(
+        {
+          kind: 0,
+          created_at: now - 20,
+          tags: [],
+          content: JSON.stringify({ name: "alice" }),
+        },
+        sk3,
+      );
+
+      await relay.event(profile1);
+      await relay.event(profile2);
+      await relay.event(profile3);
+
+      setScore(profile1.id, { top_score: 50000 });
+      setScore(profile2.id, { top_score: 200 });
+      setScore(profile3.id, { top_score: 1000 });
+
+      // "jac" is a prefix — should match "jack" and "jackson" but not "alice"
+      const results = await relay.query([{ kinds: [0], search: "jac" }]);
+
+      assert.equal(results.length, 2);
+      assert.equal(results[0].id, profile1.id); // jack (most followers)
+      assert.equal(results[1].id, profile2.id); // jackson
+    });
+
+    it("should match kind 0 profiles by display_name prefix", async () => {
+      const { client, setScore } = createKind0SortMockClient();
+      const relay = new OpenSearchRelay(client as unknown as Client, {
+        indexName: "test-index",
+        bulkMaxSize: 1,
+      });
+
+      const sk1 = generateSecretKey();
+      const sk2 = generateSecretKey();
+      const now = Math.floor(Date.now() / 1000);
+
+      const profile1 = finalizeEvent(
+        {
+          kind: 0,
+          created_at: now,
+          tags: [],
+          content: JSON.stringify({
+            name: "jack",
+            display_name: "Jack Dorsey",
+          }),
+        },
+        sk1,
+      );
+
+      const profile2 = finalizeEvent(
+        {
+          kind: 0,
+          created_at: now - 10,
+          tags: [],
+          content: JSON.stringify({
+            name: "alice",
+            display_name: "Alice Wonderland",
+          }),
+        },
+        sk2,
+      );
+
+      await relay.event(profile1);
+      await relay.event(profile2);
+
+      setScore(profile1.id, { top_score: 100 });
+      setScore(profile2.id, { top_score: 100 });
+
+      // Search by display_name prefix "dor" should match Jack Dorsey
+      const results = await relay.query([{ kinds: [0], search: "dor" }]);
+
+      assert.equal(results.length, 1);
+      assert.equal(results[0].id, profile1.id);
+    });
+
+    it("should not use metadata matching for non-kind-0 searches", async () => {
+      const { client, setScore } = createKind0SortMockClient();
+      const relay = new OpenSearchRelay(client as unknown as Client, {
+        indexName: "test-index",
+        bulkMaxSize: 1,
+      });
+
+      const sk = generateSecretKey();
+      const now = Math.floor(Date.now() / 1000);
+
+      // Kind 1 event with "jack" in content
+      const post = finalizeEvent(
+        {
+          kind: 1,
+          created_at: now,
+          tags: [],
+          content: "Hello from jack",
+        },
+        sk,
+      );
+
+      await relay.event(post);
+      setScore(post.id, { top_score: 10 });
+
+      // Kind 1 search should match via content, not metadata
+      const results = await relay.query([{ kinds: [1], search: "jack" }]);
+
       assert.equal(results.length, 1);
       assert.equal(results[0].id, post.id);
     });
