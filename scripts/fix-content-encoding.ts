@@ -67,7 +67,7 @@ async function main() {
     const SCROLL_TTL = "4h";
     let scanned = 0;
     let fixed = 0;
-    let unfixable = 0;
+    let deleted = 0;
 
     const initialResponse = await client.search({
       index: config.opensearchIndex,
@@ -111,9 +111,13 @@ async function main() {
           const fixedContent = unescapeContent(event.content);
 
           if (fixedContent === event.content) {
-            // Unescaping didn't change anything — unfixable
-            unfixable++;
-            console.error(`  Unfixable: ${event.id} (computed ${computedId})`);
+            // Unescaping didn't change anything — delete the corrupt event
+            deleted++;
+            if (!dryRun) {
+              bulkBody.push({
+                delete: { _index: config.opensearchIndex, _id: hit._id },
+              });
+            }
             continue;
           }
 
@@ -130,10 +134,13 @@ async function main() {
               bulkBody.push({ doc: { content: fixedContent } });
             }
           } else {
-            unfixable++;
-            console.error(
-              `  Unfixable: ${event.id} (computed ${computedId}, after unescape ${fixedId})`,
-            );
+            // Unescaping didn't produce the correct ID either — delete
+            deleted++;
+            if (!dryRun) {
+              bulkBody.push({
+                delete: { _index: config.opensearchIndex, _id: hit._id },
+              });
+            }
           }
         }
       }
@@ -145,12 +152,15 @@ async function main() {
         });
         const bulkResult = bulkResponse.body as {
           errors: boolean;
-          items: Array<{ update?: { error?: unknown } }>;
+          items: Array<{
+            update?: { error?: unknown };
+            delete?: { error?: unknown };
+          }>;
         };
 
         if (bulkResult.errors) {
           const failures = bulkResult.items.filter(
-            (item) => item.update?.error,
+            (item) => item.update?.error || item.delete?.error,
           );
           console.warn(`  ${failures.length} items failed in batch`);
         }
@@ -159,7 +169,7 @@ async function main() {
       scanned += hits.length;
       const pct = total > 0 ? ((scanned / total) * 100).toFixed(1) : "0.0";
       console.log(
-        `  Progress: ${scanned.toLocaleString()} / ${total.toLocaleString()} (${pct}%) — ${fixed.toLocaleString()} fixed, ${unfixable.toLocaleString()} unfixable`,
+        `  Progress: ${scanned.toLocaleString()} / ${total.toLocaleString()} (${pct}%) — ${fixed.toLocaleString()} fixed, ${deleted.toLocaleString()} deleted`,
       );
 
       // Fetch next batch
@@ -186,7 +196,7 @@ async function main() {
     }
 
     console.log(
-      `\n${dryRun ? "DRY RUN " : ""}Complete: scanned ${scanned.toLocaleString()}, fixed ${fixed.toLocaleString()}, unfixable ${unfixable.toLocaleString()}`,
+      `\n${dryRun ? "DRY RUN " : ""}Complete: scanned ${scanned.toLocaleString()}, fixed ${fixed.toLocaleString()}, deleted ${deleted.toLocaleString()}`,
     );
   } catch (error) {
     console.error("\nScript failed:");
