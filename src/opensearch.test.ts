@@ -1251,6 +1251,755 @@ describe("OpenSearchRelay", () => {
     });
   });
 
+  describe("NIP-50 sort: kind 0 (profile) queries", () => {
+    // Mock client supporting kind-0 sort queries. Extends the sort mock
+    // client with aggregation support for the zaps-by-author query.
+    const createKind0SortMockClient = () => {
+      const documents = new Map<string, unknown>();
+
+      /** Helper: extract the bool.must array from a query (unwrapping script_score). */
+      const extractMustClauses = (
+        query: Record<string, unknown>,
+      ): Array<Record<string, unknown>> => {
+        if (query.script_score) {
+          const inner = (
+            query.script_score as { query: Record<string, unknown> }
+          ).query;
+          return (
+            ((inner.bool as Record<string, unknown>)?.must as Array<
+              Record<string, unknown>
+            >) || []
+          );
+        }
+        return (
+          ((query.bool as Record<string, unknown>)?.must as Array<
+            Record<string, unknown>
+          >) || []
+        );
+      };
+
+      /** Helper: check if a document passes all must clauses. */
+      const matchesMust = (
+        // biome-ignore lint/suspicious/noExplicitAny: test mock
+        doc: any,
+        clauses: Array<Record<string, unknown>>,
+      ): boolean => {
+        for (const clause of clauses) {
+          if (clause.term) {
+            const [field, value] = Object.entries(
+              clause.term as Record<string, unknown>,
+            )[0];
+            const docVal = field.includes(".")
+              ? field
+                  .split(".")
+                  .reduce(
+                    (o: Record<string, unknown>, k: string) =>
+                      o?.[k] as Record<string, unknown>,
+                    doc,
+                  )
+              : doc[field];
+            if (docVal !== value) return false;
+          }
+          if (clause.terms) {
+            const [field, values] = Object.entries(
+              clause.terms as Record<string, unknown[]>,
+            )[0];
+            const docVal = field.includes(".")
+              ? field
+                  .split(".")
+                  .reduce(
+                    (o: Record<string, unknown>, k: string) =>
+                      o?.[k] as Record<string, unknown>,
+                    doc,
+                  )
+              : doc[field];
+            // For array fields (like tags_map.p), check if any element matches
+            if (Array.isArray(docVal)) {
+              if (!docVal.some((v: unknown) => values.includes(v)))
+                return false;
+            } else {
+              if (!values.includes(docVal as unknown)) return false;
+            }
+          }
+          if (clause.range) {
+            const [field, bounds] = Object.entries(
+              clause.range as Record<string, Record<string, number>>,
+            )[0];
+            const val = doc[field];
+            if (val === undefined || val === null) return false;
+            if (bounds.gt !== undefined && !(val > bounds.gt)) return false;
+            if (bounds.gte !== undefined && !(val >= bounds.gte)) return false;
+            if (bounds.lt !== undefined && !(val < bounds.lt)) return false;
+            if (bounds.lte !== undefined && !(val <= bounds.lte)) return false;
+          }
+          if (clause.match) {
+            const [field, matchValue] = Object.entries(
+              clause.match as Record<string, unknown>,
+            )[0];
+            const matchQuery =
+              typeof matchValue === "object"
+                ? (matchValue as { query: string }).query
+                : String(matchValue);
+            const text = String(doc[field] || "").toLowerCase();
+            const terms = matchQuery.toLowerCase().split(/\s+/);
+            if (!terms.every((t: string) => text.includes(t))) return false;
+          }
+        }
+        return true;
+      };
+
+      /** Helper: compute script_score for a document. */
+      const computeScriptScore = (
+        // biome-ignore lint/suspicious/noExplicitAny: test mock
+        doc: any,
+        query: Record<string, unknown>,
+      ): number | null => {
+        if (!query.script_score) return null;
+        const script = (
+          query.script_score as {
+            script: { source: string; params?: Record<string, number> };
+          }
+        ).script;
+        const params = script.params || {};
+        const src = script.source.replace(/\s+/g, " ").trim();
+
+        if (src.includes("Math.pow(0.5, ageHours / 24.0)")) {
+          const topScore = doc.top_score || 0;
+          const ageHours = (params.now - doc.created_at) / 3600;
+          return topScore * 0.5 ** (ageHours / 24);
+        }
+        if (src.includes("Math.min(replies, reactions)")) {
+          const replies = doc.reply_count || 0;
+          const reactions = doc.reaction_count || 0;
+          const balanced = Math.min(replies, reactions);
+          return balanced * Math.sqrt(replies + reactions);
+        }
+        if (src.includes("total / ageHours")) {
+          const total =
+            (doc.reply_count || 0) +
+            (doc.reaction_count || 0) +
+            (doc.repost_count || 0);
+          const ageHours = Math.max((params.now - doc.created_at) / 3600, 0.1);
+          return total / ageHours;
+        }
+        return 0;
+      };
+
+      return {
+        documents,
+        setScore: (
+          eventId: string,
+          scores: Partial<{
+            top_score: number;
+            reply_count: number;
+            reaction_count: number;
+            repost_count: number;
+            zap_amount_msats: number;
+          }>,
+        ) => {
+          for (const [_docId, doc] of documents.entries()) {
+            // biome-ignore lint/suspicious/noExplicitAny: test mock
+            const d = doc as any;
+            if (d.id === eventId) {
+              Object.assign(d, scores);
+              break;
+            }
+          }
+        },
+        client: {
+          search: async ({ body }: { body: Record<string, unknown> }) => {
+            const query = body.query as Record<string, unknown>;
+
+            // Handle aggregation queries (zaps-by-author)
+            if (body.aggs) {
+              const aggs = body.aggs as Record<string, unknown>;
+              if (aggs.top_authors) {
+                // Simulate terms aggregation on pubkey with sum of zap_amount_msats
+                const mustClauses = extractMustClauses(query);
+                const pubkeyZaps = new Map<string, number>();
+
+                for (const [_id, doc] of documents.entries()) {
+                  // biome-ignore lint/suspicious/noExplicitAny: test mock
+                  const d = doc as any;
+                  if (d.deleted) continue;
+                  if (!matchesMust(d, mustClauses)) continue;
+                  const current = pubkeyZaps.get(d.pubkey) ?? 0;
+                  pubkeyZaps.set(d.pubkey, current + (d.zap_amount_msats || 0));
+                }
+
+                const buckets = [...pubkeyZaps.entries()]
+                  .map(([key, total]) => ({
+                    key,
+                    doc_count: 1,
+                    total_zaps: { value: total },
+                  }))
+                  .sort((a, b) => b.total_zaps.value - a.total_zaps.value);
+
+                return {
+                  body: {
+                    aggregations: { top_authors: { buckets } },
+                    hits: { hits: [] },
+                  },
+                };
+              }
+              if (aggs.unique_authors) {
+                const allDocs = Array.from(documents.values());
+                const uniquePubkeys = new Set(
+                  allDocs
+                    .filter((doc) => !(doc as { deleted?: boolean }).deleted)
+                    .map((doc) => (doc as NostrEvent).pubkey),
+                );
+                return {
+                  body: {
+                    aggregations: {
+                      unique_authors: { value: uniquePubkeys.size },
+                    },
+                    hits: { hits: [] },
+                  },
+                };
+              }
+            }
+
+            // Filter documents against the query
+            const mustClauses = extractMustClauses(query);
+            const results: Array<{ _source: unknown; _score?: number }> = [];
+
+            for (const [_id, doc] of documents.entries()) {
+              // biome-ignore lint/suspicious/noExplicitAny: test mock
+              const d = doc as any;
+              if (d.deleted) continue;
+              if (!matchesMust(d, mustClauses)) continue;
+
+              const scriptScore = computeScriptScore(d, query);
+              results.push({
+                _source: doc,
+                ...(scriptScore !== null && { _score: scriptScore }),
+              });
+            }
+
+            // Apply sorting
+            const sort = body.sort as
+              | Array<Record<string, { order: string }>>
+              | undefined;
+
+            if (sort && sort.length > 0) {
+              const [sortField, sortOpts] = Object.entries(sort[0])[0];
+              const desc = (sortOpts as { order: string }).order === "desc";
+              results.sort((a, b) => {
+                // biome-ignore lint/suspicious/noExplicitAny: test mock
+                const aVal = (a._source as any)[sortField] ?? 0;
+                // biome-ignore lint/suspicious/noExplicitAny: test mock
+                const bVal = (b._source as any)[sortField] ?? 0;
+                return desc ? bVal - aVal : aVal - bVal;
+              });
+            } else if (results.length > 0 && results[0]._score !== undefined) {
+              results.sort((a, b) => (b._score ?? 0) - (a._score ?? 0));
+            } else {
+              results.sort((a, b) => {
+                const aDoc = a._source as NostrEvent;
+                const bDoc = b._source as NostrEvent;
+                return bDoc.created_at - aDoc.created_at;
+              });
+            }
+
+            const collapse = body.collapse as { field: string } | undefined;
+            if (collapse?.field) {
+              const seen = new Set<string>();
+              const collapsed: typeof results = [];
+              for (const hit of results) {
+                const src = hit._source as NostrEvent;
+                const val = src[collapse.field as keyof NostrEvent] as string;
+                if (!seen.has(val)) {
+                  seen.add(val);
+                  collapsed.push(hit);
+                }
+              }
+              return { body: { hits: { hits: collapsed } } };
+            }
+
+            const size = (body.size as number) ?? results.length;
+            return { body: { hits: { hits: results.slice(0, size) } } };
+          },
+          bulk: async ({ body }: { body: unknown[] }) => {
+            const items: Array<Record<string, unknown>> = [];
+            for (let i = 0; i < body.length; i += 2) {
+              const action = body[i] as {
+                index?: { _id: string };
+                update?: { _id: string };
+              };
+              const payload = body[i + 1] as Record<string, unknown>;
+
+              if (action.index) {
+                documents.set(action.index._id, payload);
+                items.push({ index: {} });
+              } else if (action.update) {
+                if (payload.upsert) {
+                  if (!documents.has(action.update._id)) {
+                    documents.set(action.update._id, payload.upsert);
+                  }
+                }
+                items.push({ update: {} });
+              }
+            }
+            return {
+              body: {
+                errors: false,
+                items,
+              },
+            };
+          },
+          updateByQuery: async () => ({ body: { updated: 0 } }),
+          count: async () => {
+            const nonDeleted = Array.from(documents.values()).filter(
+              (doc) => !(doc as { deleted?: boolean }).deleted,
+            );
+            return { body: { count: nonDeleted.length } };
+          },
+          indices: {
+            exists: async () => ({ body: true }),
+            create: async () => ({ body: {} }),
+          },
+          close: async () => {},
+        },
+      };
+    };
+
+    it("should sort kind 0 by follower count with sort:top", async () => {
+      const { client, setScore } = createKind0SortMockClient();
+      const relay = new OpenSearchRelay(client as unknown as Client, {
+        indexName: "test-index",
+        bulkMaxSize: 1,
+      });
+
+      const sk1 = generateSecretKey();
+      const sk2 = generateSecretKey();
+      const sk3 = generateSecretKey();
+      const now = Math.floor(Date.now() / 1000);
+
+      // Create kind 0 profile events for 3 users
+      const profile1 = finalizeEvent(
+        {
+          kind: 0,
+          created_at: now,
+          tags: [],
+          content: JSON.stringify({ name: "alice" }),
+        },
+        sk1,
+      );
+
+      const profile2 = finalizeEvent(
+        {
+          kind: 0,
+          created_at: now - 10,
+          tags: [],
+          content: JSON.stringify({ name: "jack" }),
+        },
+        sk2,
+      );
+
+      const profile3 = finalizeEvent(
+        {
+          kind: 0,
+          created_at: now - 20,
+          tags: [],
+          content: JSON.stringify({ name: "bob" }),
+        },
+        sk3,
+      );
+
+      await relay.event(profile1);
+      await relay.event(profile2);
+      await relay.event(profile3);
+
+      // Set follower counts (stored as top_score for kind 0)
+      setScore(profile1.id, { top_score: 100 });
+      setScore(profile2.id, { top_score: 50000 }); // jack is most followed
+      setScore(profile3.id, { top_score: 500 });
+
+      // Query kind 0 with sort:top
+      const results = await relay.query([{ kinds: [0], search: "sort:top" }]);
+
+      assert.equal(results.length, 3);
+      assert.equal(results[0].id, profile2.id); // jack (50000 followers)
+      assert.equal(results[1].id, profile3.id); // bob (500 followers)
+      assert.equal(results[2].id, profile1.id); // alice (100 followers)
+    });
+
+    it("should combine sort:top with text search for account autocomplete", async () => {
+      const { client, setScore } = createKind0SortMockClient();
+      const relay = new OpenSearchRelay(client as unknown as Client, {
+        indexName: "test-index",
+        bulkMaxSize: 1,
+      });
+
+      const sk1 = generateSecretKey();
+      const sk2 = generateSecretKey();
+      const sk3 = generateSecretKey();
+      const now = Math.floor(Date.now() / 1000);
+
+      const profile1 = finalizeEvent(
+        {
+          kind: 0,
+          created_at: now,
+          tags: [],
+          content: JSON.stringify({ name: "jack" }),
+        },
+        sk1,
+      );
+
+      const profile2 = finalizeEvent(
+        {
+          kind: 0,
+          created_at: now - 10,
+          tags: [],
+          content: JSON.stringify({ name: "jackson" }),
+        },
+        sk2,
+      );
+
+      const profile3 = finalizeEvent(
+        {
+          kind: 0,
+          created_at: now - 20,
+          tags: [],
+          content: JSON.stringify({ name: "alice" }),
+        },
+        sk3,
+      );
+
+      await relay.event(profile1);
+      await relay.event(profile2);
+      await relay.event(profile3);
+
+      setScore(profile1.id, { top_score: 50000 }); // jack — most followed
+      setScore(profile2.id, { top_score: 200 }); // jackson — fewer
+      setScore(profile3.id, { top_score: 1000 }); // alice — irrelevant to search
+
+      // Search for "jac" with sort:top — should find jack and jackson
+      const results = await relay.query([
+        { kinds: [0], search: "jac sort:top" },
+      ]);
+
+      assert.equal(results.length, 2);
+      assert.equal(results[0].id, profile1.id); // jack (most followed)
+      assert.equal(results[1].id, profile2.id); // jackson
+    });
+
+    it("should sort kind 0 by controversial (two-step author lookup)", async () => {
+      const { client, setScore } = createKind0SortMockClient();
+      const relay = new OpenSearchRelay(client as unknown as Client, {
+        indexName: "test-index",
+        bulkMaxSize: 1,
+      });
+
+      const sk1 = generateSecretKey();
+      const sk2 = generateSecretKey();
+      const now = Math.floor(Date.now() / 1000);
+
+      // Create kind 0 profiles
+      const profile1 = finalizeEvent(
+        {
+          kind: 0,
+          created_at: now,
+          tags: [],
+          content: JSON.stringify({ name: "controversial_alice" }),
+        },
+        sk1,
+      );
+
+      const profile2 = finalizeEvent(
+        {
+          kind: 0,
+          created_at: now - 10,
+          tags: [],
+          content: JSON.stringify({ name: "tame_bob" }),
+        },
+        sk2,
+      );
+
+      // Create kind 1 events (posts) that will have controversy scores
+      const post1 = finalizeEvent(
+        {
+          kind: 1,
+          created_at: now - 100,
+          tags: [],
+          content: "Controversial post by alice",
+        },
+        sk1,
+      );
+
+      const post2 = finalizeEvent(
+        {
+          kind: 1,
+          created_at: now - 200,
+          tags: [],
+          content: "Tame post by bob",
+        },
+        sk2,
+      );
+
+      await relay.event(profile1);
+      await relay.event(profile2);
+      await relay.event(post1);
+      await relay.event(post2);
+
+      // Set controversy scores on posts
+      // controversial = min(reply, reaction) * sqrt(total)
+      // post1: min(10, 8) * sqrt(18) = 8 * 4.24 = 33.9
+      setScore(post1.id, { reply_count: 10, reaction_count: 8 });
+      // post2: min(2, 1) * sqrt(3) = 1 * 1.73 = 1.73
+      setScore(post2.id, { reply_count: 2, reaction_count: 1 });
+
+      // Query kind 0 with sort:controversial
+      const results = await relay.query([
+        { kinds: [0], search: "sort:controversial" },
+      ]);
+
+      // Should return profiles ordered by their posts' controversy
+      assert.equal(results.length, 2);
+      assert.equal(results[0].id, profile1.id); // alice (more controversial)
+      assert.equal(results[1].id, profile2.id); // bob
+    });
+
+    it("should sort kind 0 by rising (two-step author lookup)", async () => {
+      const { client, setScore } = createKind0SortMockClient();
+      const relay = new OpenSearchRelay(client as unknown as Client, {
+        indexName: "test-index",
+        bulkMaxSize: 1,
+      });
+
+      const sk1 = generateSecretKey();
+      const sk2 = generateSecretKey();
+      const now = Math.floor(Date.now() / 1000);
+
+      // Create kind 0 profiles
+      const profile1 = finalizeEvent(
+        {
+          kind: 0,
+          created_at: now,
+          tags: [],
+          content: JSON.stringify({ name: "trending_alice" }),
+        },
+        sk1,
+      );
+
+      const profile2 = finalizeEvent(
+        {
+          kind: 0,
+          created_at: now - 10,
+          tags: [],
+          content: JSON.stringify({ name: "steady_bob" }),
+        },
+        sk2,
+      );
+
+      // Create recent posts
+      const post1 = finalizeEvent(
+        {
+          kind: 1,
+          created_at: now - 1800, // 30 min ago — very recent
+          tags: [],
+          content: "Viral post by alice",
+        },
+        sk1,
+      );
+
+      const post2 = finalizeEvent(
+        {
+          kind: 1,
+          created_at: now - 10 * 3600, // 10 hours ago
+          tags: [],
+          content: "Older post by bob",
+        },
+        sk2,
+      );
+
+      await relay.event(profile1);
+      await relay.event(profile2);
+      await relay.event(post1);
+      await relay.event(post2);
+
+      // rising = (reply + reaction + repost) / age_hours
+      // post1: (5 + 5 + 5) / 0.5 = 30
+      setScore(post1.id, {
+        top_score: 1,
+        reply_count: 5,
+        reaction_count: 5,
+        repost_count: 5,
+      });
+      // post2: (5 + 5 + 5) / 10 = 1.5
+      setScore(post2.id, {
+        top_score: 1,
+        reply_count: 5,
+        reaction_count: 5,
+        repost_count: 5,
+      });
+
+      const results = await relay.query([
+        { kinds: [0], search: "sort:rising" },
+      ]);
+
+      assert.equal(results.length, 2);
+      assert.equal(results[0].id, profile1.id); // alice (rising faster)
+      assert.equal(results[1].id, profile2.id); // bob
+    });
+
+    it("should sort kind 0 by total zaps received across all events", async () => {
+      const { client, setScore } = createKind0SortMockClient();
+      const relay = new OpenSearchRelay(client as unknown as Client, {
+        indexName: "test-index",
+        bulkMaxSize: 1,
+      });
+
+      const sk1 = generateSecretKey();
+      const sk2 = generateSecretKey();
+      const now = Math.floor(Date.now() / 1000);
+
+      // Create kind 0 profiles
+      const profile1 = finalizeEvent(
+        {
+          kind: 0,
+          created_at: now,
+          tags: [],
+          content: JSON.stringify({ name: "zap_queen_alice" }),
+        },
+        sk1,
+      );
+
+      const profile2 = finalizeEvent(
+        {
+          kind: 0,
+          created_at: now - 10,
+          tags: [],
+          content: JSON.stringify({ name: "modest_bob" }),
+        },
+        sk2,
+      );
+
+      // Create posts that received zaps
+      const post1a = finalizeEvent(
+        {
+          kind: 1,
+          created_at: now - 100,
+          tags: [],
+          content: "Alice post 1",
+        },
+        sk1,
+      );
+
+      const post1b = finalizeEvent(
+        {
+          kind: 1,
+          created_at: now - 200,
+          tags: [],
+          content: "Alice post 2",
+        },
+        sk1,
+      );
+
+      const post2 = finalizeEvent(
+        {
+          kind: 1,
+          created_at: now - 300,
+          tags: [],
+          content: "Bob post 1",
+        },
+        sk2,
+      );
+
+      await relay.event(profile1);
+      await relay.event(profile2);
+      await relay.event(post1a);
+      await relay.event(post1b);
+      await relay.event(post2);
+
+      // Set zap amounts on posts
+      setScore(post1a.id, { zap_amount_msats: 10_000_000 }); // 10k sats
+      setScore(post1b.id, { zap_amount_msats: 5_000_000 }); // 5k sats
+      // Alice total: 15k sats
+      setScore(post2.id, { zap_amount_msats: 3_000_000 }); // 3k sats
+      // Bob total: 3k sats
+
+      const results = await relay.query([{ kinds: [0], search: "sort:zaps" }]);
+
+      assert.equal(results.length, 2);
+      assert.equal(results[0].id, profile1.id); // alice (15k sats total)
+      assert.equal(results[1].id, profile2.id); // bob (3k sats)
+    });
+
+    it("should return empty when no authors have zaps for sort:zaps kind 0", async () => {
+      const { client } = createKind0SortMockClient();
+      const relay = new OpenSearchRelay(client as unknown as Client, {
+        indexName: "test-index",
+        bulkMaxSize: 1,
+      });
+
+      const sk = generateSecretKey();
+      const now = Math.floor(Date.now() / 1000);
+
+      await relay.event(
+        finalizeEvent(
+          {
+            kind: 0,
+            created_at: now,
+            tags: [],
+            content: JSON.stringify({ name: "no_zaps" }),
+          },
+          sk,
+        ),
+      );
+
+      const results = await relay.query([{ kinds: [0], search: "sort:zaps" }]);
+
+      assert.equal(results.length, 0);
+    });
+
+    it("should not use kind-0 sort for multi-kind queries", async () => {
+      const { client, setScore } = createKind0SortMockClient();
+      const relay = new OpenSearchRelay(client as unknown as Client, {
+        indexName: "test-index",
+        bulkMaxSize: 1,
+      });
+
+      const sk = generateSecretKey();
+      const now = Math.floor(Date.now() / 1000);
+
+      const profile = finalizeEvent(
+        {
+          kind: 0,
+          created_at: now,
+          tags: [],
+          content: JSON.stringify({ name: "alice" }),
+        },
+        sk,
+      );
+
+      const post = finalizeEvent(
+        {
+          kind: 1,
+          created_at: now - 100,
+          tags: [],
+          content: "A popular post",
+        },
+        sk,
+      );
+
+      await relay.event(profile);
+      await relay.event(post);
+
+      setScore(post.id, { top_score: 10 });
+
+      // Query with kinds [0, 1] — should use regular sort, not kind-0 sort
+      const results = await relay.query([
+        { kinds: [0, 1], search: "sort:top" },
+      ]);
+
+      // Only the post has top_score > 0, profile has 0
+      assert.equal(results.length, 1);
+      assert.equal(results[0].id, post.id);
+    });
+  });
+
   describe("buildTagsMap validation", () => {
     const createMockClient = () => {
       const documents = new Map<string, unknown>();

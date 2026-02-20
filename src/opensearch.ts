@@ -317,6 +317,19 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
   }
 
   /**
+   * Check whether the filter targets only kind 0 (profile metadata) events.
+   * When true, sort queries use follower-count / author-based ranking
+   * instead of engagement scores.
+   */
+  private isKind0OnlyFilter(filter: NostrFilter): boolean {
+    return (
+      Array.isArray(filter.kinds) &&
+      filter.kinds.length === 1 &&
+      filter.kinds[0] === 0
+    );
+  }
+
+  /**
    * Query events using precomputed engagement scores.
    *
    * Each sort mode uses the building-block score fields (top_score,
@@ -324,6 +337,10 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
    * are maintained by the background recomputeScores() job. Filters
    * are applied directly in the query, so results are correct for any
    * filter narrowing (kinds, tags, full-text search, etc.).
+   *
+   * When the filter targets only kind 0 (profile metadata), sort queries
+   * use follower-count and author-based ranking instead. See the
+   * `querySortTopKind0` etc. methods.
    */
   private async querySortedEvents(
     filter: NostrFilter,
@@ -333,24 +350,46 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     try {
       let events: NostrEvent[];
 
-      switch (sortMode) {
-        case "top":
-          events = await this.querySortTop(filter, limit);
-          break;
-        case "hot":
-          events = await this.querySortHot(filter, limit);
-          break;
-        case "controversial":
-          events = await this.querySortControversial(filter, limit);
-          break;
-        case "rising":
-          events = await this.querySortRising(filter, limit);
-          break;
-        case "zaps":
-          events = await this.querySortZaps(filter, limit);
-          break;
-        default:
-          return [];
+      if (this.isKind0OnlyFilter(filter)) {
+        switch (sortMode) {
+          case "top":
+            events = await this.querySortTopKind0(filter, limit);
+            break;
+          case "hot":
+            events = await this.querySortHotKind0(filter, limit);
+            break;
+          case "controversial":
+            events = await this.querySortControversialKind0(filter, limit);
+            break;
+          case "rising":
+            events = await this.querySortRisingKind0(filter, limit);
+            break;
+          case "zaps":
+            events = await this.querySortZapsKind0(filter, limit);
+            break;
+          default:
+            return [];
+        }
+      } else {
+        switch (sortMode) {
+          case "top":
+            events = await this.querySortTop(filter, limit);
+            break;
+          case "hot":
+            events = await this.querySortHot(filter, limit);
+            break;
+          case "controversial":
+            events = await this.querySortControversial(filter, limit);
+            break;
+          case "rising":
+            events = await this.querySortRising(filter, limit);
+            break;
+          case "zaps":
+            events = await this.querySortZaps(filter, limit);
+            break;
+          default:
+            return [];
+        }
       }
 
       // Apply distinct:author — keep only the highest-scored event per pubkey
@@ -549,6 +588,215 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     });
 
     return this.hitsToEvents(response);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Kind-0 (profile) sort methods
+  //
+  // When the filter targets only kind 0, sort queries use follower-count
+  // (stored in top_score) and author-based ranking.  For modes that don't
+  // apply directly to profiles (controversial, rising, zaps) we perform a
+  // two-step query: first find top events by the sort mode across all kinds,
+  // then return the kind 0 events for those authors.
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Sort kind 0 events by follower count (top_score).
+   * For profiles, top_score holds the number of followers.
+   */
+  private async querySortTopKind0(
+    filter: NostrFilter,
+    limit: number,
+  ): Promise<NostrEvent[]> {
+    // querySortTop already works — it sorts by top_score with the filter's
+    // kinds constraint (kind 0) applied.  For kind 0 events top_score holds
+    // follower count, so the result is correct.
+    return this.querySortTop(filter, limit);
+  }
+
+  /**
+   * Sort kind 0 events by follower count with time decay.
+   * Score = top_score * 0.5^(age_hours / 24).
+   */
+  private async querySortHotKind0(
+    filter: NostrFilter,
+    limit: number,
+  ): Promise<NostrEvent[]> {
+    return this.querySortHot(filter, limit);
+  }
+
+  /**
+   * Two-step sort: find the most controversial events across all kinds,
+   * extract unique author pubkeys, then return their kind 0 events
+   * (respecting any search-text filter on the kind 0 content).
+   */
+  private async querySortControversialKind0(
+    filter: NostrFilter,
+    limit: number,
+  ): Promise<NostrEvent[]> {
+    return this.querySortKind0ByAuthors(
+      filter,
+      limit,
+      this.querySortControversial.bind(this),
+    );
+  }
+
+  /**
+   * Two-step sort: find rising events, extract authors, return kind 0s.
+   */
+  private async querySortRisingKind0(
+    filter: NostrFilter,
+    limit: number,
+  ): Promise<NostrEvent[]> {
+    return this.querySortKind0ByAuthors(
+      filter,
+      limit,
+      this.querySortRising.bind(this),
+    );
+  }
+
+  /**
+   * Sort kind 0 events by the total zap amount received across all of
+   * an author's events.  Uses a terms aggregation on pubkey with a sum
+   * sub-aggregation on zap_amount_msats.
+   */
+  private async querySortZapsKind0(
+    filter: NostrFilter,
+    limit: number,
+  ): Promise<NostrEvent[]> {
+    // Phase 1: Aggregate total zap_amount_msats per author across all events.
+    const aggResponse = await this.client.search({
+      index: this.indexName,
+      body: {
+        query: {
+          bool: {
+            must: [
+              { term: { deleted: false } },
+              { range: { zap_amount_msats: { gt: 0 } } },
+            ],
+          },
+        },
+        size: 0,
+        aggs: {
+          top_authors: {
+            terms: {
+              field: "pubkey",
+              size: limit * 5,
+              order: { total_zaps: "desc" as const },
+            },
+            aggs: {
+              total_zaps: {
+                sum: { field: "zap_amount_msats" },
+              },
+            },
+          },
+        },
+      },
+    });
+
+    const buckets =
+      (
+        aggResponse.body.aggregations?.top_authors as unknown as {
+          buckets?: Array<{
+            key: string;
+            total_zaps?: { value: number };
+          }>;
+        }
+      )?.buckets || [];
+
+    if (buckets.length === 0) return [];
+
+    // Ordered list of pubkeys by total zaps
+    const orderedPubkeys = buckets.map((b) => b.key);
+
+    // Phase 2: Fetch kind 0 events for those pubkeys (with search text filter).
+    return this.fetchKind0ForAuthors(filter, orderedPubkeys, limit);
+  }
+
+  /**
+   * Generic two-step helper for kind-0 sort modes that derive author
+   * ordering from a non-kind-0 sort query.
+   *
+   * 1. Runs the provided `sortFn` WITHOUT the kinds:[0] constraint to
+   *    find top-scoring events across all kinds.
+   * 2. Extracts unique author pubkeys in score order.
+   * 3. Fetches kind 0 events for those pubkeys, preserving the order.
+   */
+  private async querySortKind0ByAuthors(
+    filter: NostrFilter,
+    limit: number,
+    sortFn: (filter: NostrFilter, limit: number) => Promise<NostrEvent[]>,
+  ): Promise<NostrEvent[]> {
+    // Build a filter without the kinds constraint so we search across all kinds.
+    const { kinds: _kinds, ...filterWithoutKinds } = filter;
+
+    // Over-fetch to account for deduplication by pubkey.
+    const overFetchLimit = limit * 5;
+    const events = await sortFn(filterWithoutKinds, overFetchLimit);
+
+    // Extract unique author pubkeys in score order.
+    const orderedPubkeys: string[] = [];
+    const seenPubkeys = new Set<string>();
+    for (const event of events) {
+      if (!seenPubkeys.has(event.pubkey)) {
+        seenPubkeys.add(event.pubkey);
+        orderedPubkeys.push(event.pubkey);
+      }
+    }
+
+    if (orderedPubkeys.length === 0) return [];
+
+    // Fetch kind 0 events for those pubkeys (with search text filter).
+    return this.fetchKind0ForAuthors(filter, orderedPubkeys, limit);
+  }
+
+  /**
+   * Fetch kind 0 events for an ordered list of author pubkeys.
+   *
+   * Applies search-text and other filter constraints from the original
+   * filter (except kinds and authors, which are overridden).  Results
+   * are returned in the same order as `orderedPubkeys`.
+   */
+  private async fetchKind0ForAuthors(
+    filter: NostrFilter,
+    orderedPubkeys: string[],
+    limit: number,
+  ): Promise<NostrEvent[]> {
+    // Override kinds and authors on the filter.
+    const kind0Filter: NostrFilter = {
+      ...filter,
+      kinds: [0],
+      authors: orderedPubkeys,
+    };
+
+    const query = this.buildQuery(kind0Filter);
+
+    const response = await this.client.search({
+      index: this.indexName,
+      body: {
+        query,
+        size: orderedPubkeys.length, // one kind 0 per pubkey at most
+      },
+    });
+
+    const events = this.hitsToEvents(response);
+
+    // Re-order events to match the original pubkey ordering.
+    const eventByPubkey = new Map<string, NostrEvent>();
+    for (const event of events) {
+      eventByPubkey.set(event.pubkey, event);
+    }
+
+    const ordered: NostrEvent[] = [];
+    for (const pubkey of orderedPubkeys) {
+      const event = eventByPubkey.get(pubkey);
+      if (event) {
+        ordered.push(event);
+        if (ordered.length >= limit) break;
+      }
+    }
+
+    return ordered;
   }
 
   /**
@@ -877,45 +1125,89 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
   /**
    * After indexing referencing events, mark the target events they reference
    * as needing score recomputation by setting `scores_dirty: true`.
+   *
+   * Also handles kind 3 (contact list) events: when a contact list is
+   * indexed, the pubkeys it follows (`p` tags) have their kind 0 events
+   * marked dirty so follower counts are recomputed.
    */
   private async markReferencedEventsDirty(entries: BulkEntry[]): Promise<void> {
     const referencedIds = new Set<string>();
+    const followedPubkeys = new Set<string>();
 
     for (const entry of entries) {
-      if (!OpenSearchRelay.REFERENCING_KINDS.has(entry.event.kind)) continue;
+      // Engagement-referencing events: mark target events dirty by event id.
+      if (OpenSearchRelay.REFERENCING_KINDS.has(entry.event.kind)) {
+        for (const tag of entry.event.tags) {
+          if (tag[0] === "e" && tag[1]) {
+            referencedIds.add(tag[1]);
+          }
+        }
+      }
 
-      for (const tag of entry.event.tags) {
-        if (tag[0] === "e" && tag[1]) {
-          referencedIds.add(tag[1]);
+      // Kind 3 (contact list): mark followed pubkeys' kind 0 events dirty.
+      if (entry.event.kind === 3) {
+        for (const tag of entry.event.tags) {
+          if (tag[0] === "p" && tag[1]) {
+            followedPubkeys.add(tag[1]);
+          }
         }
       }
     }
 
-    if (referencedIds.size === 0) return;
+    const promises: Promise<unknown>[] = [];
 
-    // Use update_by_query to set scores_dirty=true on all referenced events
-    // in a single server-side operation (no round-trip for document IDs).
-    await this.client.updateByQuery({
-      index: this.indexName,
-      body: {
-        query: {
-          bool: {
-            must: [
-              { terms: { id: [...referencedIds] } },
-              { term: { scores_dirty: false } },
-            ],
+    // Mark engagement-referenced events dirty by event id.
+    if (referencedIds.size > 0) {
+      promises.push(
+        this.client.updateByQuery({
+          index: this.indexName,
+          body: {
+            query: {
+              bool: {
+                must: [
+                  { terms: { id: [...referencedIds] } },
+                  { term: { scores_dirty: false } },
+                ],
+              },
+            },
+            script: {
+              source: "ctx._source.scores_dirty = true",
+              lang: "painless",
+            },
           },
-        },
-        script: {
-          source: "ctx._source.scores_dirty = true",
-          lang: "painless",
-        },
-      },
-      // Don't wait for completion or refresh — this is best-effort and
-      // the background job will catch anything missed.
-      refresh: false,
-      conflicts: "proceed",
-    });
+          refresh: false,
+          conflicts: "proceed",
+        }),
+      );
+    }
+
+    // Mark kind 0 events dirty for followed pubkeys.
+    if (followedPubkeys.size > 0) {
+      promises.push(
+        this.client.updateByQuery({
+          index: this.indexName,
+          body: {
+            query: {
+              bool: {
+                must: [
+                  { term: { kind: 0 } },
+                  { terms: { pubkey: [...followedPubkeys] } },
+                  { term: { scores_dirty: false } },
+                ],
+              },
+            },
+            script: {
+              source: "ctx._source.scores_dirty = true",
+              lang: "painless",
+            },
+          },
+          refresh: false,
+          conflicts: "proceed",
+        }),
+      );
+    }
+
+    await Promise.all(promises);
   }
 
   /**
@@ -1222,11 +1514,15 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
    * `repost_count`, and `zap_amount_msats`, then writes the scores back
    * and clears the dirty flag.
    *
+   * For kind 0 (profile) events, `top_score` is set to the follower count:
+   * the number of unique kind 3 (contact list) events whose `p` tags
+   * include this profile's pubkey.
+   *
    * Designed to be called periodically (e.g. via setInterval).
    * Returns the number of events whose scores were updated.
    */
   async recomputeScores(batchSize = 5000): Promise<number> {
-    // Phase 1: Find dirty event IDs.
+    // Phase 1: Find dirty events (need id, kind, and pubkey).
     const dirtyResponse = await this.client.search({
       index: this.indexName,
       body: {
@@ -1235,113 +1531,32 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
             must: [{ term: { scores_dirty: true } }],
           },
         },
-        _source: ["id"],
+        _source: ["id", "kind", "pubkey"],
         size: batchSize,
       },
     });
 
     const dirtyHits = dirtyResponse.body.hits.hits as unknown as Array<{
-      _source?: { id: string };
+      _source?: { id: string; kind: number; pubkey: string };
     }>;
     if (dirtyHits.length === 0) return 0;
 
-    const dirtyIds = dirtyHits
-      .filter((h) => h._source?.id)
-      .map((h) => h._source?.id as string);
+    // Separate dirty events into kind 0 (profiles) and non-kind-0.
+    const dirtyKind0: Array<{ id: string; pubkey: string }> = [];
+    const dirtyNonKind0Ids: string[] = [];
 
-    // Phase 2: Aggregate engagement referencing events (kinds 1/6/7/16/1111)
-    // scoped to just these dirty event IDs.
-    const engagementResponse = await this.client.search({
-      index: this.indexName,
-      body: {
-        query: {
-          bool: {
-            must: [
-              { term: { deleted: false } },
-              { terms: { kind: [1, 6, 7, 16, 1111] } },
-              { terms: { "tags_map.e": dirtyIds } },
-            ],
-          },
-        },
-        size: 0,
-        aggs: {
-          by_event: {
-            terms: {
-              field: "tags_map.e",
-              size: dirtyIds.length,
-              // Include only the dirty IDs in the aggregation
-              include: dirtyIds,
-            },
-            aggs: {
-              unique_authors: {
-                cardinality: { field: "pubkey" },
-              },
-              by_kind: {
-                terms: { field: "kind", size: 10 },
-              },
-            },
-          },
-        },
-      },
-    });
+    for (const h of dirtyHits) {
+      if (!h._source?.id) continue;
+      if (h._source.kind === 0) {
+        dirtyKind0.push({ id: h._source.id, pubkey: h._source.pubkey });
+      } else {
+        dirtyNonKind0Ids.push(h._source.id);
+      }
+    }
 
-    const engagementBuckets =
-      (
-        engagementResponse.body.aggregations?.by_event as unknown as {
-          buckets?: Array<{
-            key: string;
-            doc_count: number;
-            unique_authors?: { value: number };
-            by_kind?: {
-              buckets?: Array<{ key: number; doc_count: number }>;
-            };
-          }>;
-        }
-      )?.buckets || [];
+    const allDirtyIds = [...dirtyKind0.map((d) => d.id), ...dirtyNonKind0Ids];
 
-    // Phase 3: Aggregate zap amounts (kind 9735) separately.
-    const zapResponse = await this.client.search({
-      index: this.indexName,
-      body: {
-        query: {
-          bool: {
-            must: [
-              { term: { deleted: false } },
-              { term: { kind: 9735 } },
-              { terms: { "tags_map.e": dirtyIds } },
-            ],
-          },
-        },
-        size: 0,
-        aggs: {
-          by_event: {
-            terms: {
-              field: "tags_map.e",
-              size: dirtyIds.length,
-              include: dirtyIds,
-            },
-            aggs: {
-              total_msats: {
-                sum: { field: "amount_msats" },
-              },
-            },
-          },
-        },
-      },
-    });
-
-    const zapBuckets =
-      (
-        zapResponse.body.aggregations?.by_event as unknown as {
-          buckets?: Array<{
-            key: string;
-            doc_count: number;
-            total_msats?: { value: number };
-          }>;
-        }
-      )?.buckets || [];
-
-    // Build score maps.
+    // Build score maps — initialize all dirty IDs with zeros.
     const scores = new Map<
       string,
       {
@@ -1353,8 +1568,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
       }
     >();
 
-    // Initialize all dirty IDs with zeros (events with no references get 0 scores).
-    for (const id of dirtyIds) {
+    for (const id of allDirtyIds) {
       scores.set(id, {
         top_score: 0,
         reply_count: 0,
@@ -1364,35 +1578,178 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
       });
     }
 
-    // Fill in engagement scores.
-    for (const bucket of engagementBuckets) {
-      const s = scores.get(bucket.key);
-      if (!s) continue;
+    // Phase 2a: Compute follower counts for dirty kind 0 events.
+    if (dirtyKind0.length > 0) {
+      const kind0Pubkeys = dirtyKind0.map((d) => d.pubkey);
 
-      s.top_score = bucket.unique_authors?.value ?? 0;
+      // Count unique kind 3 events that p-tag each pubkey.
+      const followerResponse = await this.client.search({
+        index: this.indexName,
+        body: {
+          query: {
+            bool: {
+              must: [
+                { term: { deleted: false } },
+                { term: { kind: 3 } },
+                { terms: { "tags_map.p": kind0Pubkeys } },
+              ],
+            },
+          },
+          size: 0,
+          aggs: {
+            by_pubkey: {
+              terms: {
+                field: "tags_map.p",
+                size: kind0Pubkeys.length,
+                include: kind0Pubkeys,
+              },
+            },
+          },
+        },
+      });
 
-      for (const kb of bucket.by_kind?.buckets || []) {
-        switch (kb.key) {
-          case 1:
-          case 1111:
-            s.reply_count += kb.doc_count;
-            break;
-          case 7:
-            s.reaction_count += kb.doc_count;
-            break;
-          case 6:
-          case 16:
-            s.repost_count += kb.doc_count;
-            break;
+      const followerBuckets =
+        (
+          followerResponse.body.aggregations?.by_pubkey as unknown as {
+            buckets?: Array<{ key: string; doc_count: number }>;
+          }
+        )?.buckets || [];
+
+      // Map pubkey → follower count.
+      const followerCounts = new Map<string, number>();
+      for (const bucket of followerBuckets) {
+        followerCounts.set(bucket.key, bucket.doc_count);
+      }
+
+      // Set top_score = follower count for each kind 0 event.
+      for (const { id, pubkey } of dirtyKind0) {
+        const s = scores.get(id);
+        if (s) {
+          s.top_score = followerCounts.get(pubkey) ?? 0;
         }
       }
     }
 
-    // Fill in zap amounts.
-    for (const bucket of zapBuckets) {
-      const s = scores.get(bucket.key);
-      if (s) {
-        s.zap_amount_msats = bucket.total_msats?.value ?? 0;
+    // Phase 2b: Aggregate engagement referencing events (kinds 1/6/7/16/1111)
+    // scoped to just the non-kind-0 dirty event IDs.
+    if (dirtyNonKind0Ids.length > 0) {
+      const engagementResponse = await this.client.search({
+        index: this.indexName,
+        body: {
+          query: {
+            bool: {
+              must: [
+                { term: { deleted: false } },
+                { terms: { kind: [1, 6, 7, 16, 1111] } },
+                { terms: { "tags_map.e": dirtyNonKind0Ids } },
+              ],
+            },
+          },
+          size: 0,
+          aggs: {
+            by_event: {
+              terms: {
+                field: "tags_map.e",
+                size: dirtyNonKind0Ids.length,
+                include: dirtyNonKind0Ids,
+              },
+              aggs: {
+                unique_authors: {
+                  cardinality: { field: "pubkey" },
+                },
+                by_kind: {
+                  terms: { field: "kind", size: 10 },
+                },
+              },
+            },
+          },
+        },
+      });
+
+      const engagementBuckets =
+        (
+          engagementResponse.body.aggregations?.by_event as unknown as {
+            buckets?: Array<{
+              key: string;
+              doc_count: number;
+              unique_authors?: { value: number };
+              by_kind?: {
+                buckets?: Array<{ key: number; doc_count: number }>;
+              };
+            }>;
+          }
+        )?.buckets || [];
+
+      for (const bucket of engagementBuckets) {
+        const s = scores.get(bucket.key);
+        if (!s) continue;
+
+        s.top_score = bucket.unique_authors?.value ?? 0;
+
+        for (const kb of bucket.by_kind?.buckets || []) {
+          switch (kb.key) {
+            case 1:
+            case 1111:
+              s.reply_count += kb.doc_count;
+              break;
+            case 7:
+              s.reaction_count += kb.doc_count;
+              break;
+            case 6:
+            case 16:
+              s.repost_count += kb.doc_count;
+              break;
+          }
+        }
+      }
+
+      // Phase 3: Aggregate zap amounts (kind 9735) separately.
+      const zapResponse = await this.client.search({
+        index: this.indexName,
+        body: {
+          query: {
+            bool: {
+              must: [
+                { term: { deleted: false } },
+                { term: { kind: 9735 } },
+                { terms: { "tags_map.e": dirtyNonKind0Ids } },
+              ],
+            },
+          },
+          size: 0,
+          aggs: {
+            by_event: {
+              terms: {
+                field: "tags_map.e",
+                size: dirtyNonKind0Ids.length,
+                include: dirtyNonKind0Ids,
+              },
+              aggs: {
+                total_msats: {
+                  sum: { field: "amount_msats" },
+                },
+              },
+            },
+          },
+        },
+      });
+
+      const zapBuckets =
+        (
+          zapResponse.body.aggregations?.by_event as unknown as {
+            buckets?: Array<{
+              key: string;
+              doc_count: number;
+              total_msats?: { value: number };
+            }>;
+          }
+        )?.buckets || [];
+
+      for (const bucket of zapBuckets) {
+        const s = scores.get(bucket.key);
+        if (s) {
+          s.zap_amount_msats = bucket.total_msats?.value ?? 0;
+        }
       }
     }
 
@@ -1435,7 +1792,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
         for (let i = 0; i < items.length; i++) {
           const result = items[i].update;
           if (result?.error) {
-            failedIds.push(dirtyIds[i]);
+            failedIds.push(allDirtyIds[i]);
           }
         }
 
@@ -1484,12 +1841,13 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
       }
     }
 
-    const withEngagement = engagementBuckets.length + zapBuckets.length;
+    const kind0Count = dirtyKind0.length;
+    const nonKind0Count = dirtyNonKind0Ids.length;
     console.log(
-      `Recomputed scores for ${dirtyIds.length} events (${withEngagement} with engagement)`,
+      `Recomputed scores for ${allDirtyIds.length} events (${kind0Count} profiles, ${nonKind0Count} engagement)`,
     );
 
-    return dirtyIds.length;
+    return allDirtyIds.length;
   }
 
   /**
