@@ -116,8 +116,43 @@ describe("OpenSearchRelay", () => {
                   }
                 } else if (payload.upsert) {
                   // Scripted upsert (used by replaceable events)
-                  if (!documents.has(action.update._id)) {
+                  const existing = documents.get(action.update._id);
+                  if (!existing) {
                     documents.set(action.update._id, payload.upsert);
+                  } else {
+                    // Simulate the Painless replaceable upsert script
+                    const existingDoc = existing as Record<string, unknown>;
+                    const newDoc = (
+                      payload.script as {
+                        params: { event: Record<string, unknown> };
+                      }
+                    ).params.event;
+                    if (existingDoc.deleted === true) {
+                      // noop
+                    } else if (
+                      (newDoc.created_at as number) >
+                        (existingDoc.created_at as number) ||
+                      ((newDoc.created_at as number) ===
+                        (existingDoc.created_at as number) &&
+                        (newDoc.id as string) < (existingDoc.id as string))
+                    ) {
+                      // Preserve stats fields across replacement
+                      const statsFields = [
+                        "top_score",
+                        "reply_count",
+                        "reaction_count",
+                        "repost_count",
+                        "zap_amount_msats",
+                      ];
+                      const preserved: Record<string, unknown> = {};
+                      for (const field of statsFields) {
+                        preserved[field] = existingDoc[field];
+                      }
+                      documents.set(action.update._id, {
+                        ...newDoc,
+                        ...preserved,
+                      });
+                    }
                   }
                 }
                 items.push({ update: {} });
@@ -341,6 +376,76 @@ describe("OpenSearchRelay", () => {
         deleted?: boolean;
       };
       assert.equal(stored.deleted, true);
+    });
+
+    it("should preserve stats when replacing a replaceable event", async () => {
+      const { client, documents } = createMockClient();
+      const relay = new OpenSearchRelay(client as unknown as Client, {
+        indexName: "test-index",
+        bulkMaxSize: 1,
+      });
+
+      const sk = generateSecretKey();
+      const now = Math.floor(Date.now() / 1000);
+
+      // Store an initial kind 0 event
+      const event1 = finalizeEvent(
+        {
+          kind: 0,
+          created_at: now - 100,
+          tags: [],
+          content: JSON.stringify({ name: "Alice" }),
+        },
+        sk,
+      );
+
+      await relay.event(event1);
+
+      // Simulate accumulated stats (e.g., followers)
+      const doc = Array.from(documents.values())[0] as Record<string, unknown>;
+      doc.top_score = 42;
+      doc.reply_count = 5;
+      doc.reaction_count = 10;
+      doc.repost_count = 3;
+      doc.zap_amount_msats = 1_000_000;
+
+      // Now replace with a newer kind 0 event from the same author
+      const event2 = finalizeEvent(
+        {
+          kind: 0,
+          created_at: now,
+          tags: [],
+          content: JSON.stringify({ name: "Alice Updated" }),
+        },
+        sk,
+      );
+
+      await relay.event(event2);
+
+      // The document should have been replaced, but stats should be preserved
+      const updated = Array.from(documents.values())[0] as Record<
+        string,
+        unknown
+      >;
+      assert.equal(updated.id, event2.id, "Event should be replaced");
+      assert.equal(
+        (updated.content as string).includes("Alice Updated"),
+        true,
+        "Content should be updated",
+      );
+      assert.equal(updated.top_score, 42, "top_score should be preserved");
+      assert.equal(updated.reply_count, 5, "reply_count should be preserved");
+      assert.equal(
+        updated.reaction_count,
+        10,
+        "reaction_count should be preserved",
+      );
+      assert.equal(updated.repost_count, 3, "repost_count should be preserved");
+      assert.equal(
+        updated.zap_amount_msats,
+        1_000_000,
+        "zap_amount_msats should be preserved",
+      );
     });
   });
 

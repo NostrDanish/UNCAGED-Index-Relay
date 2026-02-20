@@ -1097,11 +1097,20 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     const replaceable_upsert_script = `
       if (ctx._source.deleted == true) {
         ctx.op = 'none';
-      } else if (params.event.created_at > ctx._source.created_at) {
+      } else if (params.event.created_at > ctx._source.created_at ||
+                 (params.event.created_at == ctx._source.created_at &&
+                  params.event.id.compareTo(ctx._source.id) < 0)) {
+        def old_top_score = ctx._source.top_score;
+        def old_reply_count = ctx._source.reply_count;
+        def old_reaction_count = ctx._source.reaction_count;
+        def old_repost_count = ctx._source.repost_count;
+        def old_zap_amount_msats = ctx._source.zap_amount_msats;
         ctx._source = params.event;
-      } else if (params.event.created_at == ctx._source.created_at && 
-                 params.event.id.compareTo(ctx._source.id) < 0) {
-        ctx._source = params.event;
+        ctx._source.top_score = old_top_score;
+        ctx._source.reply_count = old_reply_count;
+        ctx._source.reaction_count = old_reaction_count;
+        ctx._source.repost_count = old_repost_count;
+        ctx._source.zap_amount_msats = old_zap_amount_msats;
       } else {
         ctx.op = 'none';
       }
