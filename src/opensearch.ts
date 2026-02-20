@@ -313,6 +313,13 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
         : null;
     }
 
+    // If no extension tokens are provided at all, default to sort:top.
+    // Any extension token (eg sort:new, language:en) prevents this default.
+    const hasExtensionTokens = tokens.some((t) => typeof t === "object");
+    if (!hasExtensionTokens) {
+      return "top";
+    }
+
     return null;
   }
 

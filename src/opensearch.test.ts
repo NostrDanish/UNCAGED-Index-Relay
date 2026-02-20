@@ -1249,6 +1249,145 @@ describe("OpenSearchRelay", () => {
       const result = await relay.count([{ kinds: [1] }]);
       assert.equal(result.count, 3);
     });
+
+    it("should default to sort:top when search has no extension tokens", async () => {
+      const { client, setScore } = createSortMockClient();
+      const relay = new OpenSearchRelay(client as unknown as Client, {
+        indexName: "test-index",
+        bulkMaxSize: 1,
+      });
+
+      const sk = generateSecretKey();
+      const now = Math.floor(Date.now() / 1000);
+
+      const event1 = finalizeEvent(
+        {
+          kind: 1,
+          created_at: now - 3600,
+          tags: [],
+          content: "hello world",
+        },
+        sk,
+      );
+
+      const event2 = finalizeEvent(
+        {
+          kind: 1,
+          created_at: now - 7200,
+          tags: [],
+          content: "hello there",
+        },
+        sk,
+      );
+
+      await relay.event(event1);
+      await relay.event(event2);
+
+      // event2 has higher top_score
+      setScore(event1.id, { top_score: 1 });
+      setScore(event2.id, { top_score: 5 });
+
+      // Plain text search with no tokens should use sort:top
+      const results = await relay.query([{ kinds: [1], search: "hello" }]);
+
+      // event2 should be first (higher top_score), proving sort:top was applied
+      assert.equal(results.length, 2);
+      assert.equal(results[0].id, event2.id);
+      assert.equal(results[1].id, event1.id);
+    });
+
+    it("should not default to sort:top when sort:new token is present", async () => {
+      const { client, setScore } = createSortMockClient();
+      const relay = new OpenSearchRelay(client as unknown as Client, {
+        indexName: "test-index",
+        bulkMaxSize: 1,
+      });
+
+      const sk = generateSecretKey();
+      const now = Math.floor(Date.now() / 1000);
+
+      const event1 = finalizeEvent(
+        {
+          kind: 1,
+          created_at: now - 100,
+          tags: [],
+          content: "hello recent",
+        },
+        sk,
+      );
+
+      const event2 = finalizeEvent(
+        {
+          kind: 1,
+          created_at: now - 7200,
+          tags: [],
+          content: "hello older",
+        },
+        sk,
+      );
+
+      await relay.event(event1);
+      await relay.event(event2);
+
+      // event2 has higher top_score, but sort:new should use chronological order
+      setScore(event1.id, { top_score: 1 });
+      setScore(event2.id, { top_score: 10 });
+
+      // sort:new is a no-op token that prevents the default sort:top
+      const results = await relay.query([
+        { kinds: [1], search: "hello sort:new" },
+      ]);
+
+      // event1 should be first (more recent created_at), proving chronological order
+      assert.equal(results.length, 2);
+      assert.equal(results[0].id, event1.id);
+      assert.equal(results[1].id, event2.id);
+    });
+
+    it("should not default to sort:top when search is absent", async () => {
+      const { client, setScore } = createSortMockClient();
+      const relay = new OpenSearchRelay(client as unknown as Client, {
+        indexName: "test-index",
+        bulkMaxSize: 1,
+      });
+
+      const sk = generateSecretKey();
+      const now = Math.floor(Date.now() / 1000);
+
+      const event1 = finalizeEvent(
+        {
+          kind: 1,
+          created_at: now - 100,
+          tags: [],
+          content: "hello recent",
+        },
+        sk,
+      );
+
+      const event2 = finalizeEvent(
+        {
+          kind: 1,
+          created_at: now - 7200,
+          tags: [],
+          content: "hello older",
+        },
+        sk,
+      );
+
+      await relay.event(event1);
+      await relay.event(event2);
+
+      setScore(event1.id, { top_score: 1 });
+      setScore(event2.id, { top_score: 10 });
+
+      // No search field at all — should use default chronological order
+      const results = await relay.query([{ kinds: [1] }]);
+
+      // event1 should be first (more recent), proving chronological order was used
+      assert.equal(results.length, 2);
+      assert.equal(results[0].id, event1.id);
+      assert.equal(results[1].id, event2.id);
+    });
   });
 
   describe("NIP-50 sort: kind 0 (profile) queries", () => {
