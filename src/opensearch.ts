@@ -9,7 +9,6 @@ import type {
 import { NIP50, NKinds, NSchema as n } from "@nostrify/nostrify";
 import type { Client, ClientOptions } from "@opensearch-project/opensearch";
 import { Client as OpenSearchClient } from "@opensearch-project/opensearch";
-import { getEventHash } from "nostr-tools";
 import { naddrEncode, noteEncode } from "nostr-tools/nip19";
 import type { Config } from "./config.ts";
 import { detectMedia } from "./media.ts";
@@ -295,11 +294,9 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
 
   /**
    * Convert OpenSearch document back to NostrEvent.
-   * Returns `null` if the stored content doesn't match the event ID
-   * (data corruption from historical imports).
    */
-  private documentToEvent(doc: NostrEventDocument): NostrEvent | null {
-    const event: NostrEvent = {
+  private documentToEvent(doc: NostrEventDocument): NostrEvent {
+    return {
       id: doc.id,
       pubkey: doc.pubkey,
       created_at: doc.created_at,
@@ -308,18 +305,6 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
       content: doc.content,
       sig: doc.sig,
     };
-
-    // Verify event ID matches the hash of the serialized event.
-    // This catches data corruption (e.g. double-escaped content from historical imports).
-    const computedId = getEventHash(event);
-    if (computedId !== event.id) {
-      console.error(
-        `Corrupt event ${event.id}: computed ID ${computedId} does not match`,
-      );
-      return null;
-    }
-
-    return event;
   }
 
   /**
@@ -480,9 +465,6 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
       )
       .map((hit: { _source: NostrEventDocument }) =>
         this.documentToEvent(hit._source),
-      )
-      .filter(
-        (event: NostrEvent | null): event is NostrEvent => event !== null,
       );
   }
 
@@ -1057,8 +1039,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
       const hits = response.body.hits.hits;
       return hits
         .filter((hit) => hit._source !== undefined)
-        .map((hit) => this.documentToEvent(hit._source as NostrEventDocument))
-        .filter((event): event is NostrEvent => event !== null);
+        .map((hit) => this.documentToEvent(hit._source as NostrEventDocument));
     } catch (error) {
       console.error("OpenSearch query failed:", error);
       throw error;
