@@ -890,15 +890,24 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     // Full-text search (NIP-50)
     if (filter.search) {
       const tokens = NIP50.parseInput(filter.search);
-      const searchText = tokens.filter((t) => typeof t === "string").join(" ");
+      const textTokens = tokens.filter((t) => typeof t === "string");
 
-      if (searchText.trim()) {
+      // Split into positive and negative (prefixed with "-") search terms
+      const positiveTerms = textTokens
+        .filter((t) => !t.startsWith("-"))
+        .join(" ");
+      const negativeTerms = textTokens
+        .filter((t) => t.startsWith("-"))
+        .map((t) => t.slice(1))
+        .filter((t) => t.length > 0);
+
+      if (positiveTerms.trim()) {
         if (this.isKind0OnlyFilter(filter)) {
           // For kind 0 searches, match against parsed metadata name fields
           // using edge-ngram prefix matching for autocomplete-style queries.
           must.push({
             multi_match: {
-              query: searchText,
+              query: positiveTerms,
               fields: ["metadata.name", "metadata.display_name"],
               operator: "and",
             },
@@ -907,10 +916,26 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
           must.push({
             match: {
               content: {
-                query: searchText,
+                query: positiveTerms,
                 operator: "and",
               },
             },
+          });
+        }
+      }
+
+      // Add negative terms as must_not clauses
+      for (const term of negativeTerms) {
+        if (this.isKind0OnlyFilter(filter)) {
+          mustNot.push({
+            multi_match: {
+              query: term,
+              fields: ["metadata.name", "metadata.display_name"],
+            },
+          });
+        } else {
+          mustNot.push({
+            match: { content: term },
           });
         }
       }

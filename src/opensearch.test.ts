@@ -478,6 +478,27 @@ describe("OpenSearchRelay", () => {
         );
       };
 
+      /** Helper: extract the bool.must_not array from a query (unwrapping script_score). */
+      const extractMustNotClauses = (
+        query: Record<string, unknown>,
+      ): Array<Record<string, unknown>> => {
+        if (query.script_score) {
+          const inner = (
+            query.script_score as { query: Record<string, unknown> }
+          ).query;
+          return (
+            ((inner.bool as Record<string, unknown>)?.must_not as Array<
+              Record<string, unknown>
+            >) || []
+          );
+        }
+        return (
+          ((query.bool as Record<string, unknown>)?.must_not as Array<
+            Record<string, unknown>
+          >) || []
+        );
+      };
+
       /** Helper: resolve a dotted field path on a document. */
       // biome-ignore lint/suspicious/noExplicitAny: test mock
       const resolveField = (doc: any, field: string): unknown => {
@@ -643,6 +664,7 @@ describe("OpenSearchRelay", () => {
 
             // Filter documents against the query
             const mustClauses = extractMustClauses(query);
+            const mustNotClauses = extractMustNotClauses(query);
             const results: Array<{ _source: unknown; _score?: number }> = [];
 
             for (const [_id, doc] of documents.entries()) {
@@ -650,6 +672,8 @@ describe("OpenSearchRelay", () => {
               const d = doc as any;
               if (d.deleted) continue;
               if (!matchesMust(d, mustClauses)) continue;
+              // Exclude if doc matches any must_not clause
+              if (mustNotClauses.some((c) => matchesMust(d, [c]))) continue;
 
               const scriptScore = computeScriptScore(d, query);
               results.push({
@@ -1521,6 +1545,168 @@ describe("OpenSearchRelay", () => {
       assert.equal(results[0].id, event1.id);
       assert.equal(results[1].id, event2.id);
     });
+
+    it("should exclude events matching negative search tokens", async () => {
+      const { client, setScore } = createSortMockClient();
+      const relay = new OpenSearchRelay(client as unknown as Client, {
+        indexName: "test-index",
+        bulkMaxSize: 1,
+      });
+
+      const sk = generateSecretKey();
+      const now = Math.floor(Date.now() / 1000);
+
+      const event1 = finalizeEvent(
+        {
+          kind: 1,
+          created_at: now - 100,
+          tags: [],
+          content: "I love nostr and bitcoin",
+        },
+        sk,
+      );
+
+      const event2 = finalizeEvent(
+        {
+          kind: 1,
+          created_at: now - 200,
+          tags: [],
+          content: "I love nostr and ethereum",
+        },
+        sk,
+      );
+
+      const event3 = finalizeEvent(
+        {
+          kind: 1,
+          created_at: now - 300,
+          tags: [],
+          content: "I love nostr",
+        },
+        sk,
+      );
+
+      await relay.event(event1);
+      await relay.event(event2);
+      await relay.event(event3);
+
+      setScore(event1.id, { top_score: 3 });
+      setScore(event2.id, { top_score: 2 });
+      setScore(event3.id, { top_score: 1 });
+
+      // Negative token: exclude events containing "bitcoin"
+      const results = await relay.query([
+        { kinds: [1], search: "nostr -bitcoin sort:new" },
+      ]);
+
+      assert.equal(results.length, 2);
+      // event1 contains "bitcoin" and should be excluded
+      assert.ok(results.every((e) => e.id !== event1.id));
+      assert.equal(results[0].id, event2.id);
+      assert.equal(results[1].id, event3.id);
+    });
+
+    it("should support search with only negative tokens", async () => {
+      const { client, setScore } = createSortMockClient();
+      const relay = new OpenSearchRelay(client as unknown as Client, {
+        indexName: "test-index",
+        bulkMaxSize: 1,
+      });
+
+      const sk = generateSecretKey();
+      const now = Math.floor(Date.now() / 1000);
+
+      const event1 = finalizeEvent(
+        {
+          kind: 1,
+          created_at: now - 100,
+          tags: [],
+          content: "bitcoin is great",
+        },
+        sk,
+      );
+
+      const event2 = finalizeEvent(
+        {
+          kind: 1,
+          created_at: now - 200,
+          tags: [],
+          content: "nostr is great",
+        },
+        sk,
+      );
+
+      await relay.event(event1);
+      await relay.event(event2);
+
+      setScore(event1.id, { top_score: 1 });
+      setScore(event2.id, { top_score: 1 });
+
+      // Only negative tokens, no positive text
+      const results = await relay.query([
+        { kinds: [1], search: "-bitcoin sort:new" },
+      ]);
+
+      assert.equal(results.length, 1);
+      assert.equal(results[0].id, event2.id);
+    });
+
+    it("should support multiple negative search tokens", async () => {
+      const { client, setScore } = createSortMockClient();
+      const relay = new OpenSearchRelay(client as unknown as Client, {
+        indexName: "test-index",
+        bulkMaxSize: 1,
+      });
+
+      const sk = generateSecretKey();
+      const now = Math.floor(Date.now() / 1000);
+
+      const event1 = finalizeEvent(
+        {
+          kind: 1,
+          created_at: now - 100,
+          tags: [],
+          content: "bitcoin is great",
+        },
+        sk,
+      );
+
+      const event2 = finalizeEvent(
+        {
+          kind: 1,
+          created_at: now - 200,
+          tags: [],
+          content: "ethereum is great",
+        },
+        sk,
+      );
+
+      const event3 = finalizeEvent(
+        {
+          kind: 1,
+          created_at: now - 300,
+          tags: [],
+          content: "nostr is great",
+        },
+        sk,
+      );
+
+      await relay.event(event1);
+      await relay.event(event2);
+      await relay.event(event3);
+
+      setScore(event1.id, { top_score: 1 });
+      setScore(event2.id, { top_score: 1 });
+      setScore(event3.id, { top_score: 1 });
+
+      // Multiple negative tokens
+      const results = await relay.query([
+        { kinds: [1], search: "-bitcoin -ethereum sort:new" },
+      ]);
+
+      assert.equal(results.length, 1);
+      assert.equal(results[0].id, event3.id);
+    });
   });
 
   describe("NIP-50 sort: kind 0 (profile) queries", () => {
@@ -1545,6 +1731,27 @@ describe("OpenSearchRelay", () => {
         }
         return (
           ((query.bool as Record<string, unknown>)?.must as Array<
+            Record<string, unknown>
+          >) || []
+        );
+      };
+
+      /** Helper: extract the bool.must_not array from a query (unwrapping script_score). */
+      const extractMustNotClauses = (
+        query: Record<string, unknown>,
+      ): Array<Record<string, unknown>> => {
+        if (query.script_score) {
+          const inner = (
+            query.script_score as { query: Record<string, unknown> }
+          ).query;
+          return (
+            ((inner.bool as Record<string, unknown>)?.must_not as Array<
+              Record<string, unknown>
+            >) || []
+          );
+        }
+        return (
+          ((query.bool as Record<string, unknown>)?.must_not as Array<
             Record<string, unknown>
           >) || []
         );
@@ -1746,6 +1953,7 @@ describe("OpenSearchRelay", () => {
 
             // Filter documents against the query
             const mustClauses = extractMustClauses(query);
+            const mustNotClauses = extractMustNotClauses(query);
             const results: Array<{ _source: unknown; _score?: number }> = [];
 
             for (const [_id, doc] of documents.entries()) {
@@ -1753,6 +1961,8 @@ describe("OpenSearchRelay", () => {
               const d = doc as any;
               if (d.deleted) continue;
               if (!matchesMust(d, mustClauses)) continue;
+              // Exclude if doc matches any must_not clause
+              if (mustNotClauses.some((c) => matchesMust(d, [c]))) continue;
 
               const scriptScore = computeScriptScore(d, query);
               results.push({
