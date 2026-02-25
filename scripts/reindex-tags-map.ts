@@ -2,8 +2,8 @@
  * Reindex tags_map for all documents, applying the same validation as
  * buildTagsMap in opensearch.ts:
  *
- * - Only tag[1] (the first value) is stored per tag.
- * - Tag names must be alphanumeric (plus hyphens/underscores) and ≤ 15 chars.
+ * - Single-character tag names are always allowed.
+ * - Multi-character tag names must be in the NIP-defined whitelist.
  * - Tag values must be ≤ 255 characters.
  *
  * This corrects existing documents that may have been indexed with
@@ -49,17 +49,45 @@ async function main() {
   const client = new OpenSearchClient(clientOptions);
 
   // Painless script that rebuilds tags_map from ctx._source.tags.
-  // Mirrors the buildTagsMap validation logic:
-  // - Tag names must be alphanumeric (plus hyphens/underscores) and ≤ 15 chars.
+  // Mirrors the buildTagsMap / isIndexableTagName validation logic:
+  // - Single-character tag names are always allowed.
+  // - Multi-character tag names must be in the whitelist of NIP-defined tags.
   // - Tag values must be ≤ 255 characters.
   const painlessScript = `
-    Pattern tagNamePattern = /^[\\w-]{1,15}$/;
+    Set whitelist = new HashSet();
+    whitelist.add('alt'); whitelist.add('amount'); whitelist.add('amt');
+    whitelist.add('bond'); whitelist.add('branch-name');
+    whitelist.add('claim'); whitelist.add('client'); whitelist.add('clone');
+    whitelist.add('commit'); whitelist.add('content-warning');
+    whitelist.add('dep');
+    whitelist.add('emoji'); whitelist.add('end'); whitelist.add('end_tzid');
+    whitelist.add('endpoint'); whitelist.add('ends'); whitelist.add('expiration');
+    whitelist.add('expires_at'); whitelist.add('extension');
+    whitelist.add('fa'); whitelist.add('fb'); whitelist.add('file');
+    whitelist.add('goal');
+    whitelist.add('hand');
+    whitelist.add('image');
+    whitelist.add('layer'); whitelist.add('license'); whitelist.add('location');
+    whitelist.add('member'); whitelist.add('merge-base'); whitelist.add('merge-commit');
+    whitelist.add('modules');
+    whitelist.add('name'); whitelist.add('network'); whitelist.add('nuts');
+    whitelist.add('pinned'); whitelist.add('pm'); whitelist.add('premium');
+    whitelist.add('price'); whitelist.add('proxy'); whitelist.add('published_at');
+    whitelist.add('recording'); whitelist.add('relay'); whitelist.add('repo');
+    whitelist.add('room'); whitelist.add('runtime');
+    whitelist.add('server'); whitelist.add('service'); whitelist.add('source');
+    whitelist.add('start'); whitelist.add('start_tzid'); whitelist.add('starts');
+    whitelist.add('status'); whitelist.add('streaming'); whitelist.add('subject');
+    whitelist.add('summary');
+    whitelist.add('thumb'); whitelist.add('title'); whitelist.add('tracker');
+    whitelist.add('web');
+    whitelist.add('zap');
     Map tagsMap = new HashMap();
     if (ctx._source.tags != null) {
       for (def tag : ctx._source.tags) {
         if (tag != null && tag.size() >= 2) {
           String tagName = tag[0].toString();
-          if (!tagNamePattern.matcher(tagName).matches()) {
+          if (tagName.length() != 1 && !whitelist.contains(tagName)) {
             continue;
           }
           String value = tag[1].toString();

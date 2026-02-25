@@ -98,17 +98,137 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     return new OpenSearchRelay(client, { indexName: config.opensearchIndex });
   }
 
-  /** Tag name must be alphanumeric (plus hyphens and underscores) and at most 15 characters. */
-  private static TAG_NAME_RE = /^[\w-]{1,15}$/;
+  /**
+   * Single-character tag names are always indexable (any character).
+   * This covers all standard single-letter tags (a-z, A-Z) and special
+   * characters like `-` (NIP-70).
+   */
+  private static SINGLE_CHAR_TAG_RE = /^.$/;
+
+  /**
+   * Whitelist of multi-letter tag names that are defined in NIPs and whose
+   * values are useful to index (identifiers, timestamps, short strings).
+   *
+   * Excluded: tags with blob/binary values (bolt11, description, imeta,
+   * lnurl, nonce, preimage, relays, delegation, challenge, encrypted,
+   * request, rating, commit-pgp-sig, etc.) and tags with frequently
+   * changing counters (current_participants, total_participants).
+   */
+  static readonly MULTI_LETTER_TAG_WHITELIST: ReadonlySet<string> = new Set([
+    // NIP-31: alt
+    "alt",
+    // NIP-57: amount, zap
+    "amount",
+    "zap",
+    // NIP-69: amt, fa, pm, bond, premium, network, layer, source, expires_at
+    "amt",
+    "bond",
+    "expires_at",
+    "fa",
+    "layer",
+    "network",
+    "pm",
+    "premium",
+    "source",
+    // NIP-34: branch-name, clone, commit, merge-base, merge-commit, web
+    "branch-name",
+    "clone",
+    "commit",
+    "merge-base",
+    "merge-commit",
+    "web",
+    // NIP-43: claim, member
+    "claim",
+    "member",
+    // NIP-89: client
+    "client",
+    // NIP-36: content-warning
+    "content-warning",
+    // NIP-C0: dep, extension, license, repo, runtime
+    "dep",
+    "extension",
+    "license",
+    "repo",
+    "runtime",
+    // NIP-30: emoji
+    "emoji",
+    // NIP-53: endpoint, ends, hand, pinned, recording, room, service, starts, streaming
+    "endpoint",
+    "ends",
+    "hand",
+    "pinned",
+    "recording",
+    "room",
+    "service",
+    "starts",
+    "streaming",
+    // NIP-52: end, end_tzid, fb, start, start_tzid
+    "end",
+    "end_tzid",
+    "fb",
+    "start",
+    "start_tzid",
+    // NIP-40: expiration
+    "expiration",
+    // NIP-35: file, tracker
+    "file",
+    "tracker",
+    // NIP-75: goal
+    "goal",
+    // NIP-23, NIP-52, NIP-58: image
+    "image",
+    // NIP-52, NIP-99: location
+    "location",
+    // NIP-87: modules, nuts
+    "modules",
+    "nuts",
+    // NIP-34, NIP-58, NIP-72, NIP-C0: name
+    "name",
+    // NIP-99: price
+    "price",
+    // NIP-48: proxy
+    "proxy",
+    // NIP-23, NIP-B0: published_at
+    "published_at",
+    // NIP-42, NIP-17: relay
+    "relay",
+    // NIP-96: server
+    "server",
+    // NIP-52, NIP-53, NIP-69: status
+    "status",
+    // NIP-14, NIP-17, NIP-34: subject
+    "subject",
+    // NIP-23, NIP-52: summary
+    "summary",
+    // NIP-58: thumb
+    "thumb",
+    // NIP-23, NIP-B0: title
+    "title",
+  ]);
+
   /** Maximum length of a single tag value stored in tags_map. */
   private static TAG_VALUE_MAX_LENGTH = 255;
+
+  /**
+   * Check whether a tag name is indexable.
+   *
+   * - All single-character tag names are allowed (covers a-z, A-Z, `-`, etc.).
+   * - Multi-character tag names must appear in the whitelist of NIP-defined
+   *   tags whose values are useful to index.
+   */
+  static isIndexableTagName(tagName: string): boolean {
+    return (
+      OpenSearchRelay.SINGLE_CHAR_TAG_RE.test(tagName) ||
+      OpenSearchRelay.MULTI_LETTER_TAG_WHITELIST.has(tagName)
+    );
+  }
 
   /**
    * Build tags_map from tags array.
    *
    * Validates tag names and values:
-   * - Tag names must be alphanumeric (including hyphens) and ≤ 15 characters.
-   *   Names that don't match are omitted entirely.
+   * - Single-character tag names are always allowed.
+   * - Multi-character tag names must be in the whitelist of NIP-defined tags.
    * - Tag values must be ≤ 255 characters. Values that exceed the limit are
    *   skipped, but the tag name key is still created (with an empty array if
    *   no values pass).
@@ -120,7 +240,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
       if (tag.length >= 2) {
         const [tagName, value] = tag;
 
-        if (!OpenSearchRelay.TAG_NAME_RE.test(tagName)) {
+        if (!OpenSearchRelay.isIndexableTagName(tagName)) {
           continue;
         }
 

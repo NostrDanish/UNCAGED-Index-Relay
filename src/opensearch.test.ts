@@ -2690,7 +2690,7 @@ describe("OpenSearchRelay", () => {
       return doc.tags_map;
     };
 
-    it("should include valid alphanumeric tag names", async () => {
+    it("should include single-letter tag names", async () => {
       const tagsMap = await getTagsMap([
         ["e", "abc123"],
         ["p", "def456"],
@@ -2702,42 +2702,48 @@ describe("OpenSearchRelay", () => {
       assert.deepEqual(tagsMap.t, ["bitcoin"]);
     });
 
-    it("should allow hyphens in tag names", async () => {
-      const tagsMap = await getTagsMap([["content-warning", "nsfw"]]);
+    it("should allow whitelisted multi-letter tag names", async () => {
+      const tagsMap = await getTagsMap([
+        ["content-warning", "nsfw"],
+        ["expiration", "1700000000"],
+        ["title", "Hello World"],
+        ["proxy", "https://example.com/objects/123"],
+        ["subject", "Test Subject"],
+      ]);
 
       assert.deepEqual(tagsMap["content-warning"], ["nsfw"]);
+      assert.deepEqual(tagsMap.expiration, ["1700000000"]);
+      assert.deepEqual(tagsMap.title, ["Hello World"]);
+      assert.deepEqual(tagsMap.proxy, ["https://example.com/objects/123"]);
+      assert.deepEqual(tagsMap.subject, ["Test Subject"]);
     });
 
-    it("should allow underscores in tag names", async () => {
-      const tagsMap = await getTagsMap([["my_tag", "value"]]);
-
-      assert.deepEqual(tagsMap.my_tag, ["value"]);
-    });
-
-    it("should reject tag names with special characters", async () => {
+    it("should allow special single-character tag names", async () => {
       const tagsMap = await getTagsMap([
-        ["valid", "keep"],
-        ["tag.name", "dotted"],
-        ["tag name", "spaced"],
-        ["tag/name", "slashed"],
-        ["tag@name", "at-sign"],
+        ["-", ""],
+        ["_", "value"],
       ]);
 
-      assert.deepEqual(tagsMap.valid, ["keep"]);
-      assert.equal(tagsMap["tag.name"], undefined);
-      assert.equal(tagsMap["tag name"], undefined);
-      assert.equal(tagsMap["tag/name"], undefined);
-      assert.equal(tagsMap["tag@name"], undefined);
+      assert.deepEqual(tagsMap["-"], [""]);
+      assert.deepEqual(tagsMap["_"], ["value"]);
     });
 
-    it("should reject tag names longer than 15 characters", async () => {
+    it("should reject multi-letter tag names not in whitelist", async () => {
       const tagsMap = await getTagsMap([
-        ["abcdefghijklmno", "15-chars-ok"],
-        ["abcdefghijklmnop", "16-chars-rejected"],
+        ["t", "keep"],
+        ["bolt11", "lnbc..."],
+        ["imeta", "url https://example.com"],
+        ["relays", "wss://relay.example.com"],
+        ["nonce", "12345"],
+        ["my_custom_tag", "value"],
       ]);
 
-      assert.deepEqual(tagsMap.abcdefghijklmno, ["15-chars-ok"]);
-      assert.equal(tagsMap.abcdefghijklmnop, undefined);
+      assert.deepEqual(tagsMap.t, ["keep"]);
+      assert.equal(tagsMap.bolt11, undefined);
+      assert.equal(tagsMap.imeta, undefined);
+      assert.equal(tagsMap.relays, undefined);
+      assert.equal(tagsMap.nonce, undefined);
+      assert.equal(tagsMap.my_custom_tag, undefined);
     });
 
     it("should accept tag values up to 255 characters", async () => {
@@ -2777,10 +2783,10 @@ describe("OpenSearchRelay", () => {
       assert.deepEqual(tagsMap.t, []);
     });
 
-    it("should not create a key for invalid tag names even with valid values", async () => {
+    it("should not create a key for non-whitelisted multi-letter tag names", async () => {
       const tagsMap = await getTagsMap([
         ["invalid.name", "good-value"],
-        ["another bad!", "also-good"],
+        ["another_bad", "also-good"],
       ]);
 
       assert.equal(Object.keys(tagsMap).length, 0);

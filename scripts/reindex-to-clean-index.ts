@@ -3,7 +3,7 @@
  * clean mappings, then swap the alias.
  *
  * The Painless script:
- * - Rebuilds tags_map with validated tag names (^[\w-]{1,15}$) and values (≤255 chars)
+ * - Rebuilds tags_map with validated tag names (single-char or NIP whitelist) and values (≤255 chars)
  * - Strips the `language` field (to be re-detected by backfill-language.ts)
  * - Extracts `protocol` from proxy tags (NIP-48)
  * - Parses `amount_msats` from bolt11 invoices on kind 9735 zap receipts
@@ -120,7 +120,7 @@ async function main() {
     );
 
     // Step 2: Reindex with the Painless validation script
-    // Mirrors buildTagsMap: validate tag names and values
+    // Mirrors buildTagsMap / isIndexableTagName: validate tag names and values
     const painlessScript = `
       // Strip fields that don't belong in the new strict mapping
       ctx._source.remove('language');
@@ -128,13 +128,40 @@ async function main() {
       ctx._source.remove('relays');
       ctx._source.remove('_relays');
 
-      Pattern tagNamePattern = /^[\\w-]{1,15}$/;
+      Set whitelist = new HashSet();
+      whitelist.add('alt'); whitelist.add('amount'); whitelist.add('amt');
+      whitelist.add('bond'); whitelist.add('branch-name');
+      whitelist.add('claim'); whitelist.add('client'); whitelist.add('clone');
+      whitelist.add('commit'); whitelist.add('content-warning');
+      whitelist.add('dep');
+      whitelist.add('emoji'); whitelist.add('end'); whitelist.add('end_tzid');
+      whitelist.add('endpoint'); whitelist.add('ends'); whitelist.add('expiration');
+      whitelist.add('expires_at'); whitelist.add('extension');
+      whitelist.add('fa'); whitelist.add('fb'); whitelist.add('file');
+      whitelist.add('goal');
+      whitelist.add('hand');
+      whitelist.add('image');
+      whitelist.add('layer'); whitelist.add('license'); whitelist.add('location');
+      whitelist.add('member'); whitelist.add('merge-base'); whitelist.add('merge-commit');
+      whitelist.add('modules');
+      whitelist.add('name'); whitelist.add('network'); whitelist.add('nuts');
+      whitelist.add('pinned'); whitelist.add('pm'); whitelist.add('premium');
+      whitelist.add('price'); whitelist.add('proxy'); whitelist.add('published_at');
+      whitelist.add('recording'); whitelist.add('relay'); whitelist.add('repo');
+      whitelist.add('room'); whitelist.add('runtime');
+      whitelist.add('server'); whitelist.add('service'); whitelist.add('source');
+      whitelist.add('start'); whitelist.add('start_tzid'); whitelist.add('starts');
+      whitelist.add('status'); whitelist.add('streaming'); whitelist.add('subject');
+      whitelist.add('summary');
+      whitelist.add('thumb'); whitelist.add('title'); whitelist.add('tracker');
+      whitelist.add('web');
+      whitelist.add('zap');
       Map tagsMap = new HashMap();
       if (ctx._source.tags != null) {
         for (def tag : ctx._source.tags) {
           if (tag != null && tag.size() >= 2) {
             String tagName = tag[0].toString();
-            if (!tagNamePattern.matcher(tagName).matches()) {
+            if (tagName.length() != 1 && !whitelist.contains(tagName)) {
               continue;
             }
             String value = tag[1].toString();
