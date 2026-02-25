@@ -106,104 +106,24 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
   private static SINGLE_CHAR_TAG_RE = /^.$/;
 
   /**
-   * Whitelist of multi-letter tag names that are defined in NIPs and whose
-   * values are useful to index (identifiers, timestamps, short strings).
+   * Whitelist of multi-letter tag names whose values make sense as keyword
+   * fields (exact-match, terms queries, or existence checks).
    *
-   * Excluded: tags with blob/binary values (bolt11, description, imeta,
-   * lnurl, nonce, preimage, relays, delegation, challenge, encrypted,
-   * request, rating, commit-pgp-sig, etc.) and tags with frequently
-   * changing counters (current_participants, total_participants).
+   * Only tags whose values are identifiers, enum-like strings, or numeric
+   * strings used in range queries are included. Free-form text (alt, title,
+   * subject, summary, name, etc.), URLs (image, clone, streaming, relay,
+   * etc.), and niche protocol-specific tags are excluded since keyword
+   * fields treat the entire value as a single opaque token.
    */
   static readonly MULTI_LETTER_TAG_WHITELIST: ReadonlySet<string> = new Set([
-    // NIP-31: alt
-    "alt",
-    // NIP-57: amount, zap
-    "amount",
-    "zap",
-    // NIP-69: amt, fa, pm, bond, premium, network, layer, source, expires_at
-    "amt",
-    "bond",
-    "expires_at",
-    "fa",
-    "layer",
-    "network",
-    "pm",
-    "premium",
-    "source",
-    // NIP-34: branch-name, clone, commit, merge-base, merge-commit, web
-    "branch-name",
-    "clone",
-    "commit",
-    "merge-base",
-    "merge-commit",
-    "web",
-    // NIP-43: claim, member
-    "claim",
-    "member",
-    // NIP-89: client
-    "client",
-    // NIP-36: content-warning
-    "content-warning",
-    // NIP-C0: dep, extension, license, repo, runtime
-    "dep",
-    "extension",
-    "license",
-    "repo",
-    "runtime",
-    // NIP-30: emoji
-    "emoji",
-    // NIP-53: endpoint, ends, hand, pinned, recording, room, service, starts, streaming
-    "endpoint",
-    "ends",
-    "hand",
-    "pinned",
-    "recording",
-    "room",
-    "service",
-    "starts",
-    "streaming",
-    // NIP-52: end, end_tzid, fb, start, start_tzid
-    "end",
-    "end_tzid",
-    "fb",
-    "start",
-    "start_tzid",
-    // NIP-40: expiration
+    // NIP-40: unix timestamp string, used in range queries for event expiry
     "expiration",
-    // NIP-35: file, tracker
-    "file",
-    "tracker",
-    // NIP-75: goal
+    // NIP-75: event id hex, same referencing pattern as `e` tag
     "goal",
-    // NIP-23, NIP-52, NIP-58: image
-    "image",
-    // NIP-52, NIP-99: location
-    "location",
-    // NIP-87: modules, nuts
-    "modules",
-    "nuts",
-    // NIP-34, NIP-58, NIP-72, NIP-C0: name
-    "name",
-    // NIP-99: price
-    "price",
-    // NIP-48: proxy
+    // NIP-48: external ID, used for exists checks and protocol detection
     "proxy",
-    // NIP-23, NIP-B0: published_at
-    "published_at",
-    // NIP-42, NIP-17: relay
-    "relay",
-    // NIP-96: server
-    "server",
-    // NIP-52, NIP-53, NIP-69: status
+    // NIP-52, NIP-53, NIP-69: enum-like values (live/ended/pending/active/sold/etc)
     "status",
-    // NIP-14, NIP-17, NIP-34: subject
-    "subject",
-    // NIP-23, NIP-52: summary
-    "summary",
-    // NIP-58: thumb
-    "thumb",
-    // NIP-23, NIP-B0: title
-    "title",
   ]);
 
   /** Maximum length of a single tag value stored in tags_map. */

@@ -2704,18 +2704,16 @@ describe("OpenSearchRelay", () => {
 
     it("should allow whitelisted multi-letter tag names", async () => {
       const tagsMap = await getTagsMap([
-        ["content-warning", "nsfw"],
         ["expiration", "1700000000"],
-        ["title", "Hello World"],
+        ["goal", "abc123def456"],
         ["proxy", "https://example.com/objects/123"],
-        ["subject", "Test Subject"],
+        ["status", "live"],
       ]);
 
-      assert.deepEqual(tagsMap["content-warning"], ["nsfw"]);
       assert.deepEqual(tagsMap.expiration, ["1700000000"]);
-      assert.deepEqual(tagsMap.title, ["Hello World"]);
+      assert.deepEqual(tagsMap.goal, ["abc123def456"]);
       assert.deepEqual(tagsMap.proxy, ["https://example.com/objects/123"]);
-      assert.deepEqual(tagsMap.subject, ["Test Subject"]);
+      assert.deepEqual(tagsMap.status, ["live"]);
     });
 
     it("should allow special single-character tag names", async () => {
@@ -2736,6 +2734,12 @@ describe("OpenSearchRelay", () => {
         ["relays", "wss://relay.example.com"],
         ["nonce", "12345"],
         ["my_custom_tag", "value"],
+        // Previously allowed, now rejected (free-form text / URLs / niche):
+        ["alt", "reply"],
+        ["title", "Hello World"],
+        ["content-warning", "nsfw"],
+        ["image", "https://example.com/pic.jpg"],
+        ["name", "My Thing"],
       ]);
 
       assert.deepEqual(tagsMap.t, ["keep"]);
@@ -2744,6 +2748,11 @@ describe("OpenSearchRelay", () => {
       assert.equal(tagsMap.relays, undefined);
       assert.equal(tagsMap.nonce, undefined);
       assert.equal(tagsMap.my_custom_tag, undefined);
+      assert.equal(tagsMap.alt, undefined);
+      assert.equal(tagsMap.title, undefined);
+      assert.equal(tagsMap["content-warning"], undefined);
+      assert.equal(tagsMap.image, undefined);
+      assert.equal(tagsMap.name, undefined);
     });
 
     it("should accept tag values up to 255 characters", async () => {

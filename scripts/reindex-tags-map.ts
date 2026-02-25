@@ -51,37 +51,14 @@ async function main() {
   // Painless script that rebuilds tags_map from ctx._source.tags.
   // Mirrors the buildTagsMap / isIndexableTagName validation logic:
   // - Single-character tag names are always allowed.
-  // - Multi-character tag names must be in the whitelist of NIP-defined tags.
+  // - Multi-character tag names must be in the whitelist (expiration, goal, proxy, status).
   // - Tag values must be ≤ 255 characters.
   const painlessScript = `
     Set whitelist = new HashSet();
-    whitelist.add('alt'); whitelist.add('amount'); whitelist.add('amt');
-    whitelist.add('bond'); whitelist.add('branch-name');
-    whitelist.add('claim'); whitelist.add('client'); whitelist.add('clone');
-    whitelist.add('commit'); whitelist.add('content-warning');
-    whitelist.add('dep');
-    whitelist.add('emoji'); whitelist.add('end'); whitelist.add('end_tzid');
-    whitelist.add('endpoint'); whitelist.add('ends'); whitelist.add('expiration');
-    whitelist.add('expires_at'); whitelist.add('extension');
-    whitelist.add('fa'); whitelist.add('fb'); whitelist.add('file');
+    whitelist.add('expiration');
     whitelist.add('goal');
-    whitelist.add('hand');
-    whitelist.add('image');
-    whitelist.add('layer'); whitelist.add('license'); whitelist.add('location');
-    whitelist.add('member'); whitelist.add('merge-base'); whitelist.add('merge-commit');
-    whitelist.add('modules');
-    whitelist.add('name'); whitelist.add('network'); whitelist.add('nuts');
-    whitelist.add('pinned'); whitelist.add('pm'); whitelist.add('premium');
-    whitelist.add('price'); whitelist.add('proxy'); whitelist.add('published_at');
-    whitelist.add('recording'); whitelist.add('relay'); whitelist.add('repo');
-    whitelist.add('room'); whitelist.add('runtime');
-    whitelist.add('server'); whitelist.add('service'); whitelist.add('source');
-    whitelist.add('start'); whitelist.add('start_tzid'); whitelist.add('starts');
-    whitelist.add('status'); whitelist.add('streaming'); whitelist.add('subject');
-    whitelist.add('summary');
-    whitelist.add('thumb'); whitelist.add('title'); whitelist.add('tracker');
-    whitelist.add('web');
-    whitelist.add('zap');
+    whitelist.add('proxy');
+    whitelist.add('status');
     Map tagsMap = new HashMap();
     if (ctx._source.tags != null) {
       for (def tag : ctx._source.tags) {

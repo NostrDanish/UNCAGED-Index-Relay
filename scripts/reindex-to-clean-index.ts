@@ -3,13 +3,12 @@
  * clean mappings, then swap the alias.
  *
  * The Painless script:
- * - Rebuilds tags_map with validated tag names (single-char or NIP whitelist) and values (≤255 chars)
- * - Strips the `language` field (to be re-detected by backfill-language.ts)
+ * - Rebuilds tags_map with validated tag names (single-char or whitelist) and values (≤255 chars)
  * - Extracts `protocol` from proxy tags (NIP-48)
  * - Parses `amount_msats` from bolt11 invoices on kind 9735 zap receipts
  *
  * Steps:
- *   1. Create a new index (nostr-events-v4) with clean mappings
+ *   1. Create a new index (nostr-events-v5) with clean mappings
  *   2. Reindex from old to new with the processing script
  *   3. Swap the alias from old to new
  *
@@ -22,8 +21,8 @@ import type { ClientOptions } from "@opensearch-project/opensearch";
 import { Client as OpenSearchClient } from "@opensearch-project/opensearch";
 import { Config } from "../src/config.ts";
 
-const OLD_INDEX = "nostr-events-v3";
-const NEW_INDEX = "nostr-events-v4";
+const OLD_INDEX = "nostr-events-v4";
+const NEW_INDEX = "nostr-events-v5";
 
 async function main() {
   const config = new Config({
@@ -81,6 +80,23 @@ async function main() {
             number_of_replicas: 0, // No replicas during reindex for speed
             "index.max_result_window": 100000,
             "index.refresh_interval": "30s", // Less frequent refresh during reindex
+            analysis: {
+              analyzer: {
+                edge_ngram_analyzer: {
+                  type: "custom",
+                  tokenizer: "edge_ngram_tokenizer",
+                  filter: ["lowercase"],
+                },
+              },
+              tokenizer: {
+                edge_ngram_tokenizer: {
+                  type: "edge_ngram",
+                  min_gram: 2,
+                  max_gram: 20,
+                  token_chars: ["letter", "digit"],
+                },
+              },
+            },
           },
           mappings: {
             dynamic: "strict",
@@ -105,6 +121,32 @@ async function main() {
               protocol: { type: "keyword" },
               amount_msats: { type: "long" },
               language: { type: "keyword" },
+              sentiment: { type: "keyword" },
+              media: { type: "boolean" },
+              video: { type: "boolean" },
+              metadata: {
+                type: "object",
+                properties: {
+                  name: {
+                    type: "text",
+                    analyzer: "edge_ngram_analyzer",
+                    search_analyzer: "standard",
+                  },
+                  display_name: {
+                    type: "text",
+                    analyzer: "edge_ngram_analyzer",
+                    search_analyzer: "standard",
+                  },
+                  nip05: { type: "keyword" },
+                  about: { type: "text", analyzer: "standard" },
+                },
+              },
+              top_score: { type: "integer" },
+              reply_count: { type: "integer" },
+              reaction_count: { type: "integer" },
+              repost_count: { type: "integer" },
+              zap_amount_msats: { type: "long" },
+              scores_dirty: { type: "boolean" },
             },
           },
         },
@@ -123,39 +165,14 @@ async function main() {
     // Mirrors buildTagsMap / isIndexableTagName: validate tag names and values
     const painlessScript = `
       // Strip fields that don't belong in the new strict mapping
-      ctx._source.remove('language');
-      ctx._source.remove('metadata');
       ctx._source.remove('relays');
       ctx._source.remove('_relays');
 
       Set whitelist = new HashSet();
-      whitelist.add('alt'); whitelist.add('amount'); whitelist.add('amt');
-      whitelist.add('bond'); whitelist.add('branch-name');
-      whitelist.add('claim'); whitelist.add('client'); whitelist.add('clone');
-      whitelist.add('commit'); whitelist.add('content-warning');
-      whitelist.add('dep');
-      whitelist.add('emoji'); whitelist.add('end'); whitelist.add('end_tzid');
-      whitelist.add('endpoint'); whitelist.add('ends'); whitelist.add('expiration');
-      whitelist.add('expires_at'); whitelist.add('extension');
-      whitelist.add('fa'); whitelist.add('fb'); whitelist.add('file');
+      whitelist.add('expiration');
       whitelist.add('goal');
-      whitelist.add('hand');
-      whitelist.add('image');
-      whitelist.add('layer'); whitelist.add('license'); whitelist.add('location');
-      whitelist.add('member'); whitelist.add('merge-base'); whitelist.add('merge-commit');
-      whitelist.add('modules');
-      whitelist.add('name'); whitelist.add('network'); whitelist.add('nuts');
-      whitelist.add('pinned'); whitelist.add('pm'); whitelist.add('premium');
-      whitelist.add('price'); whitelist.add('proxy'); whitelist.add('published_at');
-      whitelist.add('recording'); whitelist.add('relay'); whitelist.add('repo');
-      whitelist.add('room'); whitelist.add('runtime');
-      whitelist.add('server'); whitelist.add('service'); whitelist.add('source');
-      whitelist.add('start'); whitelist.add('start_tzid'); whitelist.add('starts');
-      whitelist.add('status'); whitelist.add('streaming'); whitelist.add('subject');
-      whitelist.add('summary');
-      whitelist.add('thumb'); whitelist.add('title'); whitelist.add('tracker');
-      whitelist.add('web');
-      whitelist.add('zap');
+      whitelist.add('proxy');
+      whitelist.add('status');
       Map tagsMap = new HashMap();
       if (ctx._source.tags != null) {
         for (def tag : ctx._source.tags) {
