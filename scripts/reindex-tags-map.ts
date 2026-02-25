@@ -23,6 +23,7 @@ import process from "node:process";
 import type { ClientOptions } from "@opensearch-project/opensearch";
 import { Client as OpenSearchClient } from "@opensearch-project/opensearch";
 import { Config } from "../src/config.ts";
+import { OpenSearchRelay } from "../src/opensearch.ts";
 
 async function main() {
   console.log("Starting tags_map reindex\n");
@@ -49,36 +50,8 @@ async function main() {
   const client = new OpenSearchClient(clientOptions);
 
   // Painless script that rebuilds tags_map from ctx._source.tags.
-  // Mirrors the buildTagsMap / isIndexableTagName validation logic:
-  // - Single-character tag names are always allowed.
-  // - Multi-character tag names must be in the whitelist (expiration, goal, proxy, status).
-  // - Tag values must be ≤ 255 characters.
-  const painlessScript = `
-    Set whitelist = new HashSet();
-    whitelist.add('expiration');
-    whitelist.add('goal');
-    whitelist.add('proxy');
-    whitelist.add('status');
-    Map tagsMap = new HashMap();
-    if (ctx._source.tags != null) {
-      for (def tag : ctx._source.tags) {
-        if (tag != null && tag.size() >= 2) {
-          String tagName = tag[0].toString();
-          if (tagName.length() != 1 && !whitelist.contains(tagName)) {
-            continue;
-          }
-          String value = tag[1].toString();
-          if (!tagsMap.containsKey(tagName)) {
-            tagsMap.put(tagName, new ArrayList());
-          }
-          if (value.length() <= 255) {
-            tagsMap.get(tagName).add(value);
-          }
-        }
-      }
-    }
-    ctx._source.tags_map = tagsMap;
-  `;
+  // Generated from OpenSearchRelay so filtering rules stay in sync.
+  const painlessScript = OpenSearchRelay.buildTagsMapPainlessScript();
 
   try {
     // Get total count for context

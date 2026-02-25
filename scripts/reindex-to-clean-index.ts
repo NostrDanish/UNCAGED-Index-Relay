@@ -2,15 +2,20 @@
  * Reindex all documents from the current index into a fresh index with
  * clean mappings, then swap the alias.
  *
- * The Painless script:
- * - Rebuilds tags_map with validated tag names (single-char or whitelist) and values (≤255 chars)
- * - Extracts `protocol` from proxy tags (NIP-48)
- * - Parses `amount_msats` from bolt11 invoices on kind 9735 zap receipts
+ * This is the nuclear option for cleaning up index mapping bloat (e.g.
+ * too many tags_map.* fields). All document data (including enrichment
+ * fields like language, sentiment, media, scores, etc.) is carried over
+ * from the source index. The only transformation applied is rebuilding
+ * tags_map with the current whitelist rules.
+ *
+ * Index settings and mappings are imported from OpenSearchRelay so this
+ * script never drifts out of sync with the relay.
  *
  * Steps:
- *   1. Create a new index (nostr-events-v5) with clean mappings
- *   2. Reindex from old to new with the processing script
- *   3. Swap the alias from old to new
+ *   1. Resolve alias to find the concrete source index name
+ *   2. Create a new index with clean mappings
+ *   3. Reindex from old to new (only rebuilds tags_map)
+ *   4. Swap the alias from old to new
  *
  * Usage:
  *   bun run scripts/reindex-to-clean-index.ts
@@ -20,9 +25,7 @@ import process from "node:process";
 import type { ClientOptions } from "@opensearch-project/opensearch";
 import { Client as OpenSearchClient } from "@opensearch-project/opensearch";
 import { Config } from "../src/config.ts";
-
-const OLD_INDEX = "nostr-events-v4";
-const NEW_INDEX = "nostr-events-v5";
+import { OpenSearchRelay } from "../src/opensearch.ts";
 
 async function main() {
   const config = new Config({
@@ -33,9 +36,7 @@ async function main() {
 
   const alias = config.opensearchIndex;
   console.log(`OpenSearch Node: ${config.opensearchNode}`);
-  console.log(`Alias: ${alias}`);
-  console.log(`Source: ${OLD_INDEX}`);
-  console.log(`Destination: ${NEW_INDEX}\n`);
+  console.log(`Alias: ${alias}\n`);
 
   const clientOptions: ClientOptions = {
     node: config.opensearchNode,
@@ -51,52 +52,64 @@ async function main() {
   const client = new OpenSearchClient(clientOptions);
 
   try {
-    // Step 1: Check the source index exists
-    const oldExists = await client.indices.exists({ index: OLD_INDEX });
-    if (!oldExists.body) {
-      console.error(`Source index ${OLD_INDEX} does not exist`);
+    // Step 1: Resolve alias to the concrete index name
+    const aliasResp = await client.indices.getAlias({ name: alias });
+    const concreteIndices = Object.keys(
+      aliasResp.body as Record<string, unknown>,
+    );
+
+    if (concreteIndices.length === 0) {
+      // No alias — the index name itself is the concrete index
+      const exists = await client.indices.exists({ index: alias });
+      if (!exists.body) {
+        console.error(`Index or alias '${alias}' does not exist`);
+        process.exit(1);
+      }
+      concreteIndices.push(alias);
+    }
+
+    if (concreteIndices.length > 1) {
+      console.error(
+        `Alias '${alias}' points to multiple indices: ${concreteIndices.join(", ")}`,
+      );
+      console.error("Cannot determine source index. Please resolve manually.");
       process.exit(1);
     }
 
-    // Check if destination already exists (allow resuming)
-    const newExists = await client.indices.exists({ index: NEW_INDEX });
+    const oldIndex = concreteIndices[0];
+
+    // Derive the new index name by incrementing a version suffix, or
+    // appending -v2 if the source has no version suffix.
+    const versionMatch = oldIndex.match(/-v(\d+)$/);
+    const newIndex = versionMatch
+      ? oldIndex.replace(/-v(\d+)$/, `-v${Number(versionMatch[1]) + 1}`)
+      : `${oldIndex}-v2`;
+
+    console.log(`Source index: ${oldIndex}`);
+    console.log(`Destination index: ${newIndex}\n`);
+
+    // Step 2: Create the new index with clean mappings (from OpenSearchRelay)
+    const newExists = await client.indices.exists({ index: newIndex });
     if (newExists.body) {
-      const countResp = await client.count({ index: NEW_INDEX });
+      const countResp = await client.count({ index: newIndex });
       const count = (countResp.body as { count: number }).count;
       console.log(
-        `Destination index ${NEW_INDEX} already exists with ${count.toLocaleString()} documents.`,
+        `Destination index ${newIndex} already exists with ${count.toLocaleString()} documents.`,
       );
       console.log(
         `Reindex will continue (existing documents will be updated).\n`,
       );
     } else {
-      // Create the new index with clean mappings
-      console.log(`Creating index ${NEW_INDEX}...`);
+      console.log(`Creating index ${newIndex}...`);
       await client.indices.create({
-        index: NEW_INDEX,
+        index: newIndex,
         body: {
           settings: {
             number_of_shards: 3,
             number_of_replicas: 0, // No replicas during reindex for speed
             "index.max_result_window": 100000,
             "index.refresh_interval": "30s", // Less frequent refresh during reindex
-            analysis: {
-              analyzer: {
-                edge_ngram_analyzer: {
-                  type: "custom",
-                  tokenizer: "edge_ngram_tokenizer",
-                  filter: ["lowercase"],
-                },
-              },
-              tokenizer: {
-                edge_ngram_tokenizer: {
-                  type: "edge_ngram",
-                  min_gram: 2,
-                  max_gram: 20,
-                  token_chars: ["letter", "digit"],
-                },
-              },
-            },
+            ...OpenSearchRelay.ANALYZER_SETTINGS,
           },
           mappings: {
             dynamic: "strict",
@@ -108,130 +121,35 @@ async function main() {
                 },
               },
             ],
-            properties: {
-              id: { type: "keyword" },
-              pubkey: { type: "keyword" },
-              created_at: { type: "long" },
-              kind: { type: "integer" },
-              tags: { type: "object", enabled: false },
-              tags_map: { type: "object", dynamic: "true" },
-              content: { type: "text", analyzer: "standard" },
-              sig: { type: "keyword" },
-              deleted: { type: "boolean" },
-              protocol: { type: "keyword" },
-              amount_msats: { type: "long" },
-              language: { type: "keyword" },
-              sentiment: { type: "keyword" },
-              media: { type: "boolean" },
-              video: { type: "boolean" },
-              metadata: {
-                type: "object",
-                properties: {
-                  name: {
-                    type: "text",
-                    analyzer: "edge_ngram_analyzer",
-                    search_analyzer: "standard",
-                  },
-                  display_name: {
-                    type: "text",
-                    analyzer: "edge_ngram_analyzer",
-                    search_analyzer: "standard",
-                  },
-                  nip05: { type: "keyword" },
-                  about: { type: "text", analyzer: "standard" },
-                },
-              },
-              top_score: { type: "integer" },
-              reply_count: { type: "integer" },
-              reaction_count: { type: "integer" },
-              repost_count: { type: "integer" },
-              zap_amount_msats: { type: "long" },
-              scores_dirty: { type: "boolean" },
-            },
+            properties: OpenSearchRelay.MAPPING_PROPERTIES,
           },
         },
       });
-      console.log(`Created index ${NEW_INDEX}\n`);
+      console.log(`Created index ${newIndex}\n`);
     }
 
     // Get source doc count
-    const srcCount = await client.count({ index: OLD_INDEX });
+    const srcCount = await client.count({ index: oldIndex });
     const totalDocs = (srcCount.body as { count: number }).count;
     console.log(
       `Source index has ${totalDocs.toLocaleString()} documents to reindex.\n`,
     );
 
-    // Step 2: Reindex with the Painless validation script
-    // Mirrors buildTagsMap / isIndexableTagName: validate tag names and values
-    const painlessScript = `
-      // Strip fields that don't belong in the new strict mapping
-      ctx._source.remove('relays');
-      ctx._source.remove('_relays');
-
-      Set whitelist = new HashSet();
-      whitelist.add('expiration');
-      whitelist.add('goal');
-      whitelist.add('proxy');
-      whitelist.add('status');
-      Map tagsMap = new HashMap();
-      if (ctx._source.tags != null) {
-        for (def tag : ctx._source.tags) {
-          if (tag != null && tag.size() >= 2) {
-            String tagName = tag[0].toString();
-            if (tagName.length() != 1 && !whitelist.contains(tagName)) {
-              continue;
-            }
-            String value = tag[1].toString();
-            if (!tagsMap.containsKey(tagName)) {
-              tagsMap.put(tagName, new ArrayList());
-            }
-            if (value.length() <= 255) {
-              tagsMap.get(tagName).add(value);
-            }
-          }
-        }
-      }
-      ctx._source.tags_map = tagsMap;
-
-      // Extract protocol from proxy tag (NIP-48)
-      if (ctx._source.tags != null) {
-        for (def tag : ctx._source.tags) {
-          if (tag != null && tag.size() >= 3 && tag[0] == 'proxy') {
-            ctx._source.protocol = tag[2];
-            break;
-          }
-        }
-      }
-
-      // Parse amount_msats from bolt11 for kind 9735 (zap receipts)
-      if (ctx._source.kind == 9735 && ctx._source.tags != null) {
-        for (def tag : ctx._source.tags) {
-          if (tag != null && tag.size() >= 2 && tag[0] == 'bolt11') {
-            Matcher m = /^lnbc(\\d+)([munp])/.matcher(tag[1]);
-            if (m.find()) {
-              long num = Long.parseLong(m.group(1));
-              String unit = m.group(2);
-              if (unit.equals('m'))      { ctx._source.amount_msats = num * 100000000L; }
-              else if (unit.equals('u')) { ctx._source.amount_msats = num * 100000L; }
-              else if (unit.equals('n')) { ctx._source.amount_msats = num * 100L; }
-              else if (unit.equals('p')) { ctx._source.amount_msats = Math.round(num * 0.1); }
-            }
-            break;
-          }
-        }
-      }
-    `;
+    // Step 3: Reindex with Painless script that rebuilds tags_map.
+    // All other fields (language, sentiment, media, scores, etc.) are
+    // carried over from the source documents unchanged.
+    const painlessScript = OpenSearchRelay.buildTagsMapPainlessScript();
 
     console.log("Starting reindex (this will take a while)...\n");
 
     const taskResponse = await client.reindex({
       body: {
         source: {
-          index: OLD_INDEX,
+          index: oldIndex,
           size: 1000, // Scroll batch size
         },
         dest: {
-          index: NEW_INDEX,
+          index: newIndex,
         },
         script: {
           source: painlessScript,
@@ -312,10 +230,10 @@ async function main() {
       }
     }
 
-    // Step 3: Restore normal index settings
+    // Step 4: Restore normal index settings
     console.log("\nRestoring index settings...");
     await client.indices.putSettings({
-      index: NEW_INDEX,
+      index: newIndex,
       body: {
         "index.number_of_replicas": 1,
         "index.refresh_interval": "1s",
@@ -323,31 +241,36 @@ async function main() {
     });
 
     // Verify doc counts before swapping
-    const newCount = await client.count({ index: NEW_INDEX });
+    const newCount = await client.count({ index: newIndex });
     const newDocs = (newCount.body as { count: number }).count;
-    const oldCount2 = await client.count({ index: OLD_INDEX });
+    const oldCount2 = await client.count({ index: oldIndex });
     const oldDocs = (oldCount2.body as { count: number }).count;
     console.log(
       `\nDoc counts — Old: ${oldDocs.toLocaleString()}, New: ${newDocs.toLocaleString()}`,
     );
 
-    // Step 4: Swap alias atomically
+    // Step 5: Swap alias atomically
     console.log(
-      `\nSwapping alias '${alias}' from ${OLD_INDEX} to ${NEW_INDEX}...`,
+      `\nSwapping alias '${alias}' from ${oldIndex} to ${newIndex}...`,
     );
+
+    const actions: Array<Record<string, unknown>> = [
+      { add: { index: newIndex, alias } },
+    ];
+
+    // Only remove the old alias if it was actually an alias (not a bare index)
+    if (oldIndex !== alias) {
+      actions.unshift({ remove: { index: oldIndex, alias } });
+    }
+
     await client.indices.updateAliases({
-      body: {
-        actions: [
-          { remove: { index: OLD_INDEX, alias } },
-          { add: { index: NEW_INDEX, alias } },
-        ],
-      },
+      body: { actions },
     });
     console.log("Alias swapped.\n");
 
     // Check new mapping field count
-    const mappingResp = await client.indices.getMapping({ index: NEW_INDEX });
-    const newMapping = mappingResp.body[NEW_INDEX] as {
+    const mappingResp = await client.indices.getMapping({ index: newIndex });
+    const newMapping = mappingResp.body[newIndex] as {
       mappings: {
         properties: { tags_map?: { properties?: Record<string, unknown> } };
       };
@@ -358,9 +281,9 @@ async function main() {
     console.log(`New index has ${tagsMapFields} fields in tags_map`);
 
     console.log(
-      `\nDone! The old index ${OLD_INDEX} can be deleted once you're satisfied:`,
+      `\nDone! The old index ${oldIndex} can be deleted once you're satisfied:`,
     );
-    console.log(`  curl -XDELETE '.../${OLD_INDEX}'`);
+    console.log(`  curl -XDELETE '.../${oldIndex}'`);
   } catch (error) {
     console.error("\nReindex failed:");
     if (error && typeof error === "object" && "meta" in error) {

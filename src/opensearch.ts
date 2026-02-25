@@ -130,6 +130,41 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
   private static TAG_VALUE_MAX_LENGTH = 255;
 
   /**
+   * Generate the Painless script snippet that rebuilds `tags_map` from
+   * `ctx._source.tags`, mirroring the `buildTagsMap` / `isIndexableTagName`
+   * logic. Used by reindex and update-by-query scripts so the filtering
+   * rules stay in sync with the TypeScript implementation.
+   */
+  static buildTagsMapPainlessScript(): string {
+    const adds = [...OpenSearchRelay.MULTI_LETTER_TAG_WHITELIST]
+      .map((t) => `whitelist.add('${t}');`)
+      .join(" ");
+
+    return `
+    Set whitelist = new HashSet();
+    ${adds}
+    Map tagsMap = new HashMap();
+    if (ctx._source.tags != null) {
+      for (def tag : ctx._source.tags) {
+        if (tag != null && tag.size() >= 2) {
+          String tagName = tag[0].toString();
+          if (tagName.length() != 1 && !whitelist.contains(tagName)) {
+            continue;
+          }
+          String value = tag[1].toString();
+          if (!tagsMap.containsKey(tagName)) {
+            tagsMap.put(tagName, new ArrayList());
+          }
+          if (value.length() <= ${OpenSearchRelay.TAG_VALUE_MAX_LENGTH}) {
+            tagsMap.get(tagName).add(value);
+          }
+        }
+      }
+    }
+    ctx._source.tags_map = tagsMap;`;
+  }
+
+  /**
    * Check whether a tag name is indexable.
    *
    * - All single-character tag names are allowed (covers a-z, A-Z, `-`, etc.).
@@ -1542,7 +1577,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
 
   /** Custom analyzer settings for edge-ngram prefix matching on profile names. */
   // biome-ignore lint/suspicious/noExplicitAny: OpenSearch settings types are dynamic
-  private static ANALYZER_SETTINGS: Record<string, any> = {
+  static readonly ANALYZER_SETTINGS: Record<string, any> = {
     analysis: {
       analyzer: {
         edge_ngram_analyzer: {
@@ -1564,7 +1599,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
 
   /** Mapping properties for the Nostr events index. */
   // biome-ignore lint/suspicious/noExplicitAny: OpenSearch client types are overly strict for dynamic mappings
-  private static MAPPING_PROPERTIES: Record<string, any> = {
+  static readonly MAPPING_PROPERTIES: Record<string, any> = {
     id: { type: "keyword" },
     pubkey: { type: "keyword" },
     created_at: { type: "long" },
