@@ -301,6 +301,7 @@ export class Relay {
     }
 
     // Handle deletion events (kind 5) using NRelay's remove method
+    // The deletion event itself is still stored below so it remains queryable.
     if (event.kind === 5) {
       try {
         // Extract e and a tags for deletion
@@ -348,12 +349,6 @@ export class Relay {
         if (filters.length > 0 && this.storage.remove) {
           await this.storage.remove(filters);
         }
-
-        return {
-          eventId: event.id,
-          accepted: true,
-          message: "",
-        };
       } catch (error) {
         console.error("Failed to process deletion event:", error);
         return {
