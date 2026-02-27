@@ -1020,9 +1020,13 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
         (t) => typeof t === "object" && t.key === "protocol",
       );
       if (protocolToken && typeof protocolToken === "object") {
-        must.push({
-          term: { protocol: protocolToken.value },
-        });
+        if (protocolToken.value === "nostr") {
+          mustNot.push({ exists: { field: "protocol" } });
+        } else {
+          must.push({
+            term: { protocol: protocolToken.value },
+          });
+        }
       }
 
       // Handle language: extension (NIP-50)

@@ -2840,6 +2840,24 @@ describe("OpenSearchRelay", () => {
               }
             }
 
+            // Extract must_not clauses
+            const queryMustNot = (
+              (body.query as Record<string, unknown>)?.bool as Record<
+                string,
+                unknown
+              >
+            )?.must_not as Array<Record<string, unknown>> | undefined;
+
+            // Check if protocol existence is negated (protocol:false)
+            let excludeProtocol = false;
+            for (const clause of queryMustNot || []) {
+              if (
+                (clause.exists as Record<string, unknown>)?.field === "protocol"
+              ) {
+                excludeProtocol = true;
+              }
+            }
+
             for (const [_id, doc] of documents.entries()) {
               const docTyped = doc as NostrEvent & {
                 deleted?: boolean;
@@ -2853,6 +2871,11 @@ describe("OpenSearchRelay", () => {
 
               // Filter by protocol if specified
               if (protocolFilter && docTyped.protocol !== protocolFilter) {
+                continue;
+              }
+
+              // Exclude events with protocol if protocol:false
+              if (excludeProtocol && docTyped.protocol) {
                 continue;
               }
 
@@ -3018,6 +3041,73 @@ describe("OpenSearchRelay", () => {
       // Query without protocol filter should return all events
       const resultsAll = await relay.query([{ kinds: [1] }]);
       assert.equal(resultsAll.length, 3);
+    });
+
+    it("should return only native events with protocol:nostr", async () => {
+      const { client } = createProtocolMockClient();
+      const relay = new OpenSearchRelay(client as unknown as Client, {
+        indexName: "test-index",
+        bulkMaxSize: 1,
+      });
+
+      const sk = generateSecretKey();
+      const now = Math.floor(Date.now() / 1000);
+
+      // Event with activitypub protocol
+      const event1 = finalizeEvent(
+        {
+          kind: 1,
+          created_at: now,
+          tags: [
+            [
+              "proxy",
+              "https://gleasonator.com/objects/8f6fac53-4f66-4c6e-ac7d-92e5e78c3e79",
+              "activitypub",
+            ],
+          ],
+          content: "From ActivityPub",
+        },
+        sk,
+      );
+
+      // Event with atproto protocol
+      const event2 = finalizeEvent(
+        {
+          kind: 1,
+          created_at: now - 10,
+          tags: [
+            [
+              "proxy",
+              "at://did:plc:zhbjlbmir5dganqhueg7y4i3/app.bsky.feed.post/3jt5hlibeol2i",
+              "atproto",
+            ],
+          ],
+          content: "From ATProto",
+        },
+        sk,
+      );
+
+      // Native Nostr event (no protocol)
+      const event3 = finalizeEvent(
+        {
+          kind: 1,
+          created_at: now - 20,
+          tags: [],
+          content: "Native Nostr event",
+        },
+        sk,
+      );
+
+      await relay.event(event1);
+      await relay.event(event2);
+      await relay.event(event3);
+
+      // protocol:nostr should return only native events (no protocol)
+      const results = await relay.query([
+        { kinds: [1], search: "protocol:nostr" },
+      ]);
+      assert.equal(results.length, 1);
+      assert.equal(results[0].id, event3.id);
     });
 
     it("should handle events with multiple proxy tags correctly", async () => {
