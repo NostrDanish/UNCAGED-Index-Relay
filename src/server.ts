@@ -4,6 +4,7 @@ import { Client as OpenSearchClient } from "@opensearch-project/opensearch";
 import { serve } from "bun";
 
 import { AnalyzePool } from "./analyze-pool.ts";
+import { CommunityStats } from "./community-stats.ts";
 import { Config } from "./config.ts";
 import { Nip85 } from "./nip85.ts";
 import { OpenSearchRelay } from "./opensearch.ts";
@@ -54,8 +55,9 @@ const nip85 = new Nip85({
   signer,
 });
 
-// Wire up addressable event dirty tracking for kind 30384.
+// Wire up dirty tracking callbacks for NIP-85 kinds 30384 and 30385.
 opensearchRelay.onDirtyAddrs = (addrs) => nip85.addDirtyAddrs(addrs);
+opensearchRelay.onDirtyIdentifiers = (ids) => nip85.addDirtyIdentifiers(ids);
 
 // Initialize index on startup
 try {
@@ -150,6 +152,7 @@ setInterval(async () => {
       ]);
     }
     await nip85.flushAddrStats();
+    await nip85.flushIdentifierStats();
   } catch (err) {
     console.error("Score recomputation / NIP-85 failed:", err);
   }
@@ -164,6 +167,7 @@ if (trendsIntervalMs > 0) {
     relay: opensearchRelay,
   });
   const relayUrl = config.relayUrl;
+  const preferredLanguages = config.preferredLanguages;
 
   const updateAllTrends = async () => {
     console.log("Updating trends...");
@@ -172,6 +176,13 @@ if (trendsIntervalMs > 0) {
     await trends.updateTrendingPubkeys(signer, relayUrl);
     await trends.updateTrendingEvents(signer, relayUrl);
     await trends.updateTrendingZappedEvents(signer, relayUrl);
+    if (preferredLanguages.length > 0) {
+      await trends.updateTrendingEventsByLanguage(
+        signer,
+        relayUrl,
+        preferredLanguages,
+      );
+    }
     console.log("Trends updated.");
   };
 
@@ -181,7 +192,26 @@ if (trendsIntervalMs > 0) {
     );
   }, trendsIntervalMs);
 
+  const langInfo =
+    preferredLanguages.length > 0
+      ? ` + languages: ${preferredLanguages.join(", ")}`
+      : "";
   console.log(
-    `Trends scheduling enabled (every ${(trendsIntervalMs / 60_000).toFixed(0)} min)`,
+    `Trends scheduling enabled (every ${(trendsIntervalMs / 60_000).toFixed(0)} min${langInfo})`,
+  );
+}
+
+// Periodically compute and publish per-country community stats (kind 30385).
+const communityStatsIntervalMs = config.communityStatsIntervalMs;
+if (communityStatsIntervalMs > 0) {
+  const communityStats = new CommunityStats({
+    relay: opensearchRelay,
+    signer,
+    intervalMs: communityStatsIntervalMs,
+  });
+  communityStats.start();
+
+  console.log(
+    `Community stats enabled (every ${(communityStatsIntervalMs / 60_000).toFixed(0)} min)`,
   );
 }

@@ -55,6 +55,8 @@ export class Trends {
     filter: NostrFilter,
     /** If present, only these tag values are permitted to trend. */
     values?: string[],
+    /** If present, restrict to events with this language (OpenSearch `language` field). */
+    language?: string,
   ): Promise<TrendingTagValue[]> {
     const limit = filter.limit ?? 20;
 
@@ -72,6 +74,9 @@ export class Trends {
       if (typeof filter.since === "number") range.gte = filter.since;
       if (typeof filter.until === "number") range.lte = filter.until;
       must.push({ range: { created_at: range } });
+    }
+    if (language) {
+      must.push({ term: { language } });
     }
 
     // We need to run one aggregation per tag name (e.g. "e" and "q"), then
@@ -186,6 +191,8 @@ export class Trends {
     aliases?: string[],
     /** If present, only these tag values are permitted to trend. */
     values?: string[],
+    /** If present, restrict to events with this language. */
+    language?: string,
   ): Promise<void> {
     const signal = AbortSignal.timeout(1000);
 
@@ -198,6 +205,7 @@ export class Trends {
       tagNames,
       { kinds, since: yesterday, until: now, limit },
       values,
+      language,
     );
 
     if (trends.length === 0) {
@@ -252,7 +260,7 @@ export class Trends {
     );
   }
 
-  /** Update trending events (excluding language-specific trends). */
+  /** Update trending events (all languages). */
   updateTrendingEvents(signer: NostrSigner, relayUrl: string): Promise<void> {
     return this.updateTrendingTags(
       signer,
@@ -262,6 +270,35 @@ export class Trends {
       40,
       relayUrl,
       ["q"],
+    );
+  }
+
+  /**
+   * Update per-language trending events.
+   *
+   * For each language in the list, produces a kind 1985 event with label
+   * `#e.<language>` (e.g. `#e.pt`, `#e.en`) containing trending events
+   * filtered to that language.
+   */
+  async updateTrendingEventsByLanguage(
+    signer: NostrSigner,
+    relayUrl: string,
+    languages: string[],
+  ): Promise<void> {
+    await Promise.allSettled(
+      languages.map((lang) =>
+        this.updateTrendingTags(
+          signer,
+          `#e.${lang}`,
+          "e",
+          [1, 6, 7, 9735],
+          40,
+          relayUrl,
+          ["q"],
+          undefined,
+          lang,
+        ),
+      ),
     );
   }
 

@@ -97,6 +97,13 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
    */
   onDirtyAddrs?: (addrs: Set<string>) => void;
 
+  /**
+   * Optional callback invoked when engagement events reference external
+   * identifiers via `i` tags. Called with the set of `i` tag values
+   * (NIP-73 identifiers) that need NIP-85 stats updates.
+   */
+  onDirtyIdentifiers?: (identifiers: Set<string>) => void;
+
   constructor(
     client: Client,
     opts?: { indexName?: string; bulkMaxSize?: number; bulkFlushMs?: number },
@@ -1332,6 +1339,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     const referencedIds = new Set<string>();
     const followedPubkeys = new Set<string>();
     const referencedAddrs = new Set<string>();
+    const referencedIdentifiers = new Set<string>();
 
     for (const entry of entries) {
       // Engagement-referencing events: mark target events dirty by event id,
@@ -1342,6 +1350,8 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
             referencedIds.add(tag[1]);
           } else if (tag[0] === "a" && tag[1]) {
             referencedAddrs.add(tag[1]);
+          } else if (tag[0] === "i" && tag[1]) {
+            referencedIdentifiers.add(tag[1]);
           }
         }
       }
@@ -1414,6 +1424,11 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     // Notify NIP-85 publisher about dirty addressable event references.
     if (referencedAddrs.size > 0) {
       this.onDirtyAddrs?.(referencedAddrs);
+    }
+
+    // Notify NIP-85 publisher about dirty external identifier references.
+    if (referencedIdentifiers.size > 0) {
+      this.onDirtyIdentifiers?.(referencedIdentifiers);
     }
   }
 

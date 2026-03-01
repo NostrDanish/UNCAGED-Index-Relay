@@ -53,6 +53,29 @@ export class Config {
     return this.env.get("OPENSEARCH_PASSWORD");
   }
 
+  /** Interval in ms between community stats runs. 0 to disable. Default: 1 hour. */
+  get communityStatsIntervalMs(): number {
+    const value = this.env.get("COMMUNITY_STATS_INTERVAL_MS");
+    if (!value) return 3_600_000; // 1 hour
+    const ms = parseInt(value, 10);
+    if (Number.isNaN(ms) || ms < 0) {
+      throw new Error(
+        "COMMUNITY_STATS_INTERVAL_MS must be a non-negative integer.",
+      );
+    }
+    return ms;
+  }
+
+  /** Comma-separated list of ISO 639-1 language codes for per-language trends. */
+  get preferredLanguages(): string[] {
+    const value = this.env.get("DITTO_LANGUAGES");
+    if (!value) return [];
+    return value
+      .split(",")
+      .map((s) => s.trim())
+      .filter((s) => /^[a-z]{2}$/.test(s));
+  }
+
   /** Interval in ms between trend computations. 0 to disable. Default: 15 minutes. */
   get trendsIntervalMs(): number {
     const value = this.env.get("TRENDS_INTERVAL_MS");

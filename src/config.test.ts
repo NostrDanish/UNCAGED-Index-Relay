@@ -97,4 +97,66 @@ describe("Config", () => {
       assert.throws(() => config.nostrSigner, /must be a valid nsec/);
     });
   });
+
+  describe("trendsIntervalMs", () => {
+    it("should default to 900000 (15 minutes)", () => {
+      const config = new Config(new Map());
+      assert.equal(config.trendsIntervalMs, 900_000);
+    });
+
+    it("should parse from environment", () => {
+      const config = new Config(new Map([["TRENDS_INTERVAL_MS", "60000"]]));
+      assert.equal(config.trendsIntervalMs, 60_000);
+    });
+
+    it("should allow 0 to disable", () => {
+      const config = new Config(new Map([["TRENDS_INTERVAL_MS", "0"]]));
+      assert.equal(config.trendsIntervalMs, 0);
+    });
+  });
+
+  describe("communityStatsIntervalMs", () => {
+    it("should default to 3600000 (1 hour)", () => {
+      const config = new Config(new Map());
+      assert.equal(config.communityStatsIntervalMs, 3_600_000);
+    });
+
+    it("should parse from environment", () => {
+      const config = new Config(
+        new Map([["COMMUNITY_STATS_INTERVAL_MS", "1800000"]]),
+      );
+      assert.equal(config.communityStatsIntervalMs, 1_800_000);
+    });
+
+    it("should allow 0 to disable", () => {
+      const config = new Config(
+        new Map([["COMMUNITY_STATS_INTERVAL_MS", "0"]]),
+      );
+      assert.equal(config.communityStatsIntervalMs, 0);
+    });
+  });
+
+  describe("preferredLanguages", () => {
+    it("should return empty array when not set", () => {
+      const config = new Config(new Map());
+      assert.deepEqual(config.preferredLanguages, []);
+    });
+
+    it("should parse comma-separated language codes", () => {
+      const config = new Config(new Map([["DITTO_LANGUAGES", "en,pt,es"]]));
+      assert.deepEqual(config.preferredLanguages, ["en", "pt", "es"]);
+    });
+
+    it("should filter out invalid language codes", () => {
+      const config = new Config(
+        new Map([["DITTO_LANGUAGES", "en,xyz,pt,123"]]),
+      );
+      assert.deepEqual(config.preferredLanguages, ["en", "pt"]);
+    });
+
+    it("should handle whitespace", () => {
+      const config = new Config(new Map([["DITTO_LANGUAGES", "en , pt , es"]]));
+      assert.deepEqual(config.preferredLanguages, ["en", "pt", "es"]);
+    });
+  });
 });

@@ -646,4 +646,137 @@ describe("Nip85", () => {
       assert.equal(relay.events.length, 0);
     });
   });
+
+  describe("flushIdentifierStats", () => {
+    it("publishes kind 30385 with comment and reaction counts", async () => {
+      const { client, documents } = createMockClient();
+      const relay = createMockRelay();
+      const signer = createMockSigner();
+
+      const identifier = "https://example.com/article";
+
+      // Add comments (kind 1111) referencing the identifier.
+      for (let i = 0; i < 4; i++) {
+        documents.push(
+          makeDoc({
+            kind: 1111,
+            pubkey: `commenter_${i}`,
+            tags: [["i", identifier]],
+          }),
+        );
+      }
+
+      // Add reactions (kind 7) referencing the identifier.
+      for (let i = 0; i < 2; i++) {
+        documents.push(
+          makeDoc({
+            kind: 7,
+            pubkey: `reactor_${i}`,
+            tags: [["i", identifier]],
+          }),
+        );
+      }
+
+      const nip85 = new Nip85({
+        client,
+        indexName: "test",
+        relay,
+        signer,
+      });
+
+      nip85.addDirtyIdentifiers(new Set([identifier]));
+      await nip85.flushIdentifierStats();
+
+      assert.equal(relay.events.length, 1);
+      const event = relay.events[0];
+      assert.equal(event.kind, 30385);
+      assert.deepEqual(
+        event.tags.find((t) => t[0] === "d"),
+        ["d", identifier],
+      );
+      assert.deepEqual(
+        event.tags.find((t) => t[0] === "comment_cnt"),
+        ["comment_cnt", "4"],
+      );
+      assert.deepEqual(
+        event.tags.find((t) => t[0] === "reaction_cnt"),
+        ["reaction_cnt", "2"],
+      );
+    });
+
+    it("excludes iso3166: identifiers", async () => {
+      const { client, documents } = createMockClient();
+      const relay = createMockRelay();
+      const signer = createMockSigner();
+
+      // Add a comment referencing an iso3166 identifier.
+      documents.push(
+        makeDoc({
+          kind: 1111,
+          pubkey: "commenter",
+          tags: [["i", "iso3166:VE"]],
+        }),
+      );
+
+      const nip85 = new Nip85({
+        client,
+        indexName: "test",
+        relay,
+        signer,
+      });
+
+      nip85.addDirtyIdentifiers(new Set(["iso3166:VE"]));
+      await nip85.flushIdentifierStats();
+
+      // iso3166: identifiers should be filtered out by addDirtyIdentifiers.
+      assert.equal(relay.events.length, 0);
+    });
+
+    it("drains the dirty set after flush", async () => {
+      const { client, documents } = createMockClient();
+      const relay = createMockRelay();
+      const signer = createMockSigner();
+
+      const identifier = "isbn:9780765382030";
+      documents.push(
+        makeDoc({
+          kind: 1111,
+          pubkey: "commenter",
+          tags: [["i", identifier]],
+        }),
+      );
+
+      const nip85 = new Nip85({
+        client,
+        indexName: "test",
+        relay,
+        signer,
+      });
+
+      nip85.addDirtyIdentifiers(new Set([identifier]));
+      await nip85.flushIdentifierStats();
+      assert.equal(relay.events.length, 1);
+
+      // Second flush should be a no-op.
+      await nip85.flushIdentifierStats();
+      assert.equal(relay.events.length, 1);
+    });
+
+    it("skips identifiers with no engagement", async () => {
+      const { client } = createMockClient();
+      const relay = createMockRelay();
+      const signer = createMockSigner();
+
+      const nip85 = new Nip85({
+        client,
+        indexName: "test",
+        relay,
+        signer,
+      });
+
+      nip85.addDirtyIdentifiers(new Set(["https://example.com/nothing"]));
+      await nip85.flushIdentifierStats();
+      assert.equal(relay.events.length, 0);
+    });
+  });
 });

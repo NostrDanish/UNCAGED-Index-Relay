@@ -7,10 +7,11 @@
  * - Kind 30382: User stats (followers, post count)
  * - Kind 30383: Event stats (comments, reposts, reactions, zaps)
  * - Kind 30384: Addressable event stats (comments, reposts, reactions, zaps)
+ * - Kind 30385: External identifier stats (comments, reactions)
  *
  * For kinds 30382 and 30383, scores come directly from `recomputeScores()`.
- * For kind 30384, this class maintains its own dirty set of `a` tag values
- * (event addresses) and queries OpenSearch to compute stats on flush.
+ * For kinds 30384 and 30385, this class maintains its own dirty sets
+ * and queries OpenSearch to compute stats on flush.
  */
 
 import type { NostrSigner, NRelay } from "@nostrify/nostrify";
@@ -40,6 +41,8 @@ export class Nip85 {
 
   /** Addressable event addresses (`<kind>:<pubkey>:<d-tag>`) needing stats refresh. */
   private dirtyAddrs = new Set<string>();
+  /** NIP-73 external identifiers needing stats refresh. */
+  private dirtyIdentifiers = new Set<string>();
 
   constructor(opts: Nip85Opts) {
     this.client = opts.client;
@@ -176,6 +179,60 @@ export class Nip85 {
 
       const event = await this.signer.signEvent({
         kind: 30384,
+        content: "",
+        tags,
+        created_at: Math.floor(Date.now() / 1000),
+      });
+
+      await this.relay.event(event);
+    }
+  }
+
+  /**
+   * Accept dirty external identifiers for later stats computation.
+   * Called by the {@link OpenSearchRelay.onDirtyIdentifiers} callback.
+   *
+   * Identifiers starting with `iso3166:` are excluded — those are owned
+   * by the CommunityStats module.
+   */
+  addDirtyIdentifiers(identifiers: Set<string>): void {
+    for (const id of identifiers) {
+      if (!id.startsWith("iso3166:")) {
+        this.dirtyIdentifiers.add(id);
+      }
+    }
+  }
+
+  /**
+   * Flush dirty external identifiers: compute engagement stats via
+   * OpenSearch aggregation and publish kind 30385 assertion events.
+   *
+   * Stats published per identifier:
+   * - `comment_cnt`  -- kind 1111 referencing via `i` tag
+   * - `reaction_cnt` -- kind 7 referencing via `i` tag
+   */
+  async flushIdentifierStats(): Promise<void> {
+    // Atomically drain dirty set.
+    const identifiers = [...this.dirtyIdentifiers];
+    this.dirtyIdentifiers.clear();
+
+    if (identifiers.length === 0) return;
+
+    // Compute stats for all dirty identifiers in batch.
+    const identifierScores = await this.getIdentifierEngagement(identifiers);
+
+    for (const [identifier, scores] of identifierScores) {
+      const tags: string[][] = [["d", identifier]];
+      if (scores.comment_count > 0)
+        tags.push(["comment_cnt", scores.comment_count.toString()]);
+      if (scores.reaction_count > 0)
+        tags.push(["reaction_cnt", scores.reaction_count.toString()]);
+
+      // Only publish if we have actual stats.
+      if (tags.length <= 1) continue;
+
+      const event = await this.signer.signEvent({
+        kind: 30385,
         content: "",
         tags,
         created_at: Math.floor(Date.now() / 1000),
@@ -374,6 +431,88 @@ export class Nip85 {
       if (s) {
         s.zap_amount_msats = bucket.total_msats?.value ?? 0;
         s.zap_cnt = bucket.doc_count;
+      }
+    }
+
+    return scores;
+  }
+
+  /**
+   * Compute engagement stats for external identifiers (`i` tag values)
+   * using OpenSearch aggregations on `tags_map.i`.
+   *
+   * Only kind 1111 (comments) and kind 7 (reactions) are counted.
+   */
+  private async getIdentifierEngagement(
+    identifiers: string[],
+  ): Promise<Map<string, { comment_count: number; reaction_count: number }>> {
+    const scores = new Map<
+      string,
+      { comment_count: number; reaction_count: number }
+    >();
+    if (identifiers.length === 0) return scores;
+
+    // Initialize all identifiers with zeros.
+    for (const id of identifiers) {
+      scores.set(id, { comment_count: 0, reaction_count: 0 });
+    }
+
+    const response = await this.client.search({
+      index: this.indexName,
+      body: {
+        query: {
+          bool: {
+            must: [
+              { term: { deleted: false } },
+              { terms: { kind: [1111, 7] } },
+              { terms: { "tags_map.i": identifiers } },
+            ],
+          },
+        },
+        size: 0,
+        aggs: {
+          by_identifier: {
+            terms: {
+              field: "tags_map.i",
+              size: identifiers.length,
+              include: identifiers,
+            },
+            aggs: {
+              by_kind: {
+                terms: { field: "kind", size: 10 },
+              },
+            },
+          },
+        },
+      },
+    });
+
+    const buckets =
+      (
+        response.body.aggregations?.by_identifier as unknown as {
+          buckets?: Array<{
+            key: string;
+            doc_count: number;
+            by_kind?: {
+              buckets?: Array<{ key: number; doc_count: number }>;
+            };
+          }>;
+        }
+      )?.buckets || [];
+
+    for (const bucket of buckets) {
+      const s = scores.get(bucket.key);
+      if (!s) continue;
+
+      for (const kb of bucket.by_kind?.buckets || []) {
+        switch (kb.key) {
+          case 1111:
+            s.comment_count += kb.doc_count;
+            break;
+          case 7:
+            s.reaction_count += kb.doc_count;
+            break;
+        }
       }
     }
 
