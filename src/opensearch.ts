@@ -1325,7 +1325,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
   }
 
   /** Kinds whose `e`-tag references affect engagement scores. */
-  private static REFERENCING_KINDS = new Set([1, 6, 7, 16, 1111, 9735]);
+  private static REFERENCING_KINDS = new Set([1, 6, 7, 16, 17, 1111, 9735]);
 
   /**
    * After indexing referencing events, mark the target events they reference
@@ -1351,6 +1351,8 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
           } else if (tag[0] === "a" && tag[1]) {
             referencedAddrs.add(tag[1]);
           } else if (tag[0] === "i" && tag[1]) {
+            referencedIdentifiers.add(tag[1]);
+          } else if (tag[0] === "I" && tag[1] && entry.event.kind === 1111) {
             referencedIdentifiers.add(tag[1]);
           }
         }

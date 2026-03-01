@@ -4,7 +4,6 @@ import { Client as OpenSearchClient } from "@opensearch-project/opensearch";
 import { serve } from "bun";
 
 import { AnalyzePool } from "./analyze-pool.ts";
-import { CommunityStats } from "./community-stats.ts";
 import { Config } from "./config.ts";
 import { Nip85 } from "./nip85.ts";
 import { OpenSearchRelay } from "./opensearch.ts";
@@ -198,22 +197,5 @@ if (trendsIntervalMs > 0) {
       : "";
   console.log(
     `Trends scheduling enabled (every ${(trendsIntervalMs / 60_000).toFixed(0)} min${langInfo})`,
-  );
-}
-
-// Periodically compute and publish per-country community stats (kind 30385).
-const communityStatsIntervalMs = config.communityStatsIntervalMs;
-if (communityStatsIntervalMs > 0) {
-  const communityStats = new CommunityStats({
-    relay: opensearchRelay,
-    client: opensearchClient,
-    indexName: config.opensearchIndex,
-    signer,
-    intervalMs: communityStatsIntervalMs,
-  });
-  communityStats.start();
-
-  console.log(
-    `Community stats enabled (every ${(communityStatsIntervalMs / 60_000).toFixed(0)} min)`,
   );
 }

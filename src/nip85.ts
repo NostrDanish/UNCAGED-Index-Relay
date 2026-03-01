@@ -7,7 +7,7 @@
  * - Kind 30382: User stats (followers, post count)
  * - Kind 30383: Event stats (comments, reposts, reactions, zaps)
  * - Kind 30384: Addressable event stats (comments, reposts, reactions, zaps)
- * - Kind 30385: External identifier stats (comments, reactions)
+ * - Kind 30385: External identifier stats (comments, reactions, reposts)
  *
  * For kinds 30382 and 30383, scores come directly from `recomputeScores()`.
  * For kinds 30384 and 30385, this class maintains its own dirty sets
@@ -191,15 +191,10 @@ export class Nip85 {
   /**
    * Accept dirty external identifiers for later stats computation.
    * Called by the {@link OpenSearchRelay.onDirtyIdentifiers} callback.
-   *
-   * Identifiers starting with `iso3166:` are excluded — those are owned
-   * by the CommunityStats module.
    */
   addDirtyIdentifiers(identifiers: Set<string>): void {
     for (const id of identifiers) {
-      if (!id.startsWith("iso3166:")) {
-        this.dirtyIdentifiers.add(id);
-      }
+      this.dirtyIdentifiers.add(id);
     }
   }
 
@@ -208,8 +203,9 @@ export class Nip85 {
    * OpenSearch aggregation and publish kind 30385 assertion events.
    *
    * Stats published per identifier:
-   * - `comment_cnt`  -- kind 1111 referencing via `i` tag
-   * - `reaction_cnt` -- kind 7 referencing via `i` tag
+   * - `comment_cnt`  -- kind 1 / 1111 referencing via `i` or `I` tag
+   * - `reaction_cnt` -- kind 7 referencing via `i` or `I` tag
+   * - `repost_cnt`   -- kind 16 / 17 referencing via `i` or `I` tag
    */
   async flushIdentifierStats(): Promise<void> {
     // Atomically drain dirty set.
@@ -227,6 +223,8 @@ export class Nip85 {
         tags.push(["comment_cnt", scores.comment_count.toString()]);
       if (scores.reaction_count > 0)
         tags.push(["reaction_cnt", scores.reaction_count.toString()]);
+      if (scores.repost_count > 0)
+        tags.push(["repost_cnt", scores.repost_count.toString()]);
 
       // Only publish if we have actual stats.
       if (tags.length <= 1) continue;
@@ -438,23 +436,34 @@ export class Nip85 {
   }
 
   /**
-   * Compute engagement stats for external identifiers (`i` tag values)
-   * using OpenSearch aggregations on `tags_map.i`.
+   * Compute engagement stats for external identifiers (`i` and `I` tag values)
+   * using OpenSearch aggregations.
    *
-   * Only kind 1111 (comments) and kind 7 (reactions) are counted.
+   * Queries both `tags_map.i` and `tags_map.I` (kind 1111 uses uppercase `I`
+   * for inclusive identifier references) and merges the results.
+   *
+   * Engagement mapping:
+   * - kind 1, 1111 → comment_count
+   * - kind 7       → reaction_count
+   * - kind 16, 17  → repost_count
    */
   private async getIdentifierEngagement(
     identifiers: string[],
-  ): Promise<Map<string, { comment_count: number; reaction_count: number }>> {
+  ): Promise<
+    Map<
+      string,
+      { comment_count: number; reaction_count: number; repost_count: number }
+    >
+  > {
     const scores = new Map<
       string,
-      { comment_count: number; reaction_count: number }
+      { comment_count: number; reaction_count: number; repost_count: number }
     >();
     if (identifiers.length === 0) return scores;
 
     // Initialize all identifiers with zeros.
     for (const id of identifiers) {
-      scores.set(id, { comment_count: 0, reaction_count: 0 });
+      scores.set(id, { comment_count: 0, reaction_count: 0, repost_count: 0 });
     }
 
     const response = await this.client.search({
@@ -464,16 +473,32 @@ export class Nip85 {
           bool: {
             must: [
               { term: { deleted: false } },
-              { terms: { kind: [1111, 7] } },
-              { terms: { "tags_map.i": identifiers } },
+              { terms: { kind: [1, 7, 16, 17, 1111] } },
             ],
+            should: [
+              { terms: { "tags_map.i": identifiers } },
+              { terms: { "tags_map.I": identifiers } },
+            ],
+            minimum_should_match: 1,
           },
         },
         size: 0,
         aggs: {
-          by_identifier: {
+          by_i: {
             terms: {
               field: "tags_map.i",
+              size: identifiers.length,
+              include: identifiers,
+            },
+            aggs: {
+              by_kind: {
+                terms: { field: "kind", size: 10 },
+              },
+            },
+          },
+          by_I: {
+            terms: {
+              field: "tags_map.I",
               size: identifiers.length,
               include: identifiers,
             },
@@ -487,31 +512,39 @@ export class Nip85 {
       },
     });
 
-    const buckets =
-      (
-        response.body.aggregations?.by_identifier as unknown as {
-          buckets?: Array<{
-            key: string;
-            doc_count: number;
-            by_kind?: {
-              buckets?: Array<{ key: number; doc_count: number }>;
-            };
-          }>;
-        }
-      )?.buckets || [];
+    type KindBucket = { key: number; doc_count: number };
+    type IdentifierBucket = {
+      key: string;
+      doc_count: number;
+      by_kind?: { buckets?: KindBucket[] };
+    };
+    type AggResult = { buckets?: IdentifierBucket[] };
 
-    for (const bucket of buckets) {
-      const s = scores.get(bucket.key);
-      if (!s) continue;
+    const iBuckets =
+      (response.body.aggregations?.by_i as unknown as AggResult)?.buckets || [];
+    const IBuckets =
+      (response.body.aggregations?.by_I as unknown as AggResult)?.buckets || [];
 
-      for (const kb of bucket.by_kind?.buckets || []) {
-        switch (kb.key) {
-          case 1111:
-            s.comment_count += kb.doc_count;
-            break;
-          case 7:
-            s.reaction_count += kb.doc_count;
-            break;
+    // Accumulate counts from both tag fields.
+    for (const buckets of [iBuckets, IBuckets]) {
+      for (const bucket of buckets) {
+        const s = scores.get(bucket.key);
+        if (!s) continue;
+
+        for (const kb of bucket.by_kind?.buckets || []) {
+          switch (kb.key) {
+            case 1:
+            case 1111:
+              s.comment_count += kb.doc_count;
+              break;
+            case 7:
+              s.reaction_count += kb.doc_count;
+              break;
+            case 16:
+            case 17:
+              s.repost_count += kb.doc_count;
+              break;
+          }
         }
       }
     }

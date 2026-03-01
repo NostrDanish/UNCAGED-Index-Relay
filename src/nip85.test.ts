@@ -75,34 +75,58 @@ function buildTagsMap(tags: string[][]): Record<string, string[]> {
 function createMockClient() {
   const documents: MockDocument[] = [];
 
-  function matchesClauses(
+  function matchesClause(
     doc: MockDocument,
-    clauses: Array<Record<string, unknown>>,
+    clause: Record<string, unknown>,
   ): boolean {
-    for (const clause of clauses) {
-      if (clause.term) {
-        for (const [field, expected] of Object.entries(
-          clause.term as Record<string, unknown>,
-        )) {
-          if ((doc as unknown as Record<string, unknown>)[field] !== expected)
+    if (clause.term) {
+      for (const [field, expected] of Object.entries(
+        clause.term as Record<string, unknown>,
+      )) {
+        if ((doc as unknown as Record<string, unknown>)[field] !== expected)
+          return false;
+      }
+    }
+    if (clause.terms) {
+      for (const [field, allowed] of Object.entries(
+        clause.terms as Record<string, unknown[]>,
+      )) {
+        if (field.startsWith("tags_map.")) {
+          const tagName = field.slice("tags_map.".length);
+          const tagValues = doc.tags_map[tagName] ?? [];
+          if (!tagValues.some((v) => (allowed as string[]).includes(v)))
             return false;
+        } else {
+          const val = (doc as unknown as Record<string, unknown>)[field];
+          if (!(allowed as unknown[]).includes(val)) return false;
         }
       }
-      if (clause.terms) {
-        for (const [field, allowed] of Object.entries(
-          clause.terms as Record<string, unknown[]>,
-        )) {
-          if (field.startsWith("tags_map.")) {
-            const tagName = field.slice("tags_map.".length);
-            const tagValues = doc.tags_map[tagName] ?? [];
-            if (!tagValues.some((v) => (allowed as string[]).includes(v)))
-              return false;
-          } else {
-            const val = (doc as unknown as Record<string, unknown>)[field];
-            if (!(allowed as unknown[]).includes(val)) return false;
-          }
-        }
+    }
+    return true;
+  }
+
+  function matchesBool(
+    doc: MockDocument,
+    bool: {
+      must?: Array<Record<string, unknown>>;
+      should?: Array<Record<string, unknown>>;
+      minimum_should_match?: number;
+    },
+  ): boolean {
+    // All must clauses must match.
+    if (bool.must) {
+      for (const clause of bool.must) {
+        if (!matchesClause(doc, clause)) return false;
       }
+    }
+    // At least minimum_should_match (default 0) should clauses must match.
+    if (bool.should && bool.should.length > 0) {
+      const minMatch = bool.minimum_should_match ?? 0;
+      let matched = 0;
+      for (const clause of bool.should) {
+        if (matchesClause(doc, clause)) matched++;
+      }
+      if (matched < minMatch) return false;
     }
     return true;
   }
@@ -115,15 +139,17 @@ function createMockClient() {
       index?: string;
     }) => {
       const query = body.query as {
-        bool: { must: Array<Record<string, unknown>> };
+        bool: {
+          must?: Array<Record<string, unknown>>;
+          should?: Array<Record<string, unknown>>;
+          minimum_should_match?: number;
+        };
       };
       const aggs = body.aggs as
         | Record<string, Record<string, unknown>>
         | undefined;
 
-      const matched = documents.filter((doc) =>
-        matchesClauses(doc, query.bool.must),
-      );
+      const matched = documents.filter((doc) => matchesBool(doc, query.bool));
 
       if (!aggs) {
         return { body: { hits: { hits: [] }, aggregations: {} } };
@@ -704,7 +730,7 @@ describe("Nip85", () => {
       );
     });
 
-    it("excludes iso3166: identifiers", async () => {
+    it("processes iso3166: identifiers like any other", async () => {
       const { client, documents } = createMockClient();
       const relay = createMockRelay();
       const signer = createMockSigner();
@@ -728,8 +754,209 @@ describe("Nip85", () => {
       nip85.addDirtyIdentifiers(new Set(["iso3166:VE"]));
       await nip85.flushIdentifierStats();
 
-      // iso3166: identifiers should be filtered out by addDirtyIdentifiers.
-      assert.equal(relay.events.length, 0);
+      assert.equal(relay.events.length, 1);
+      const event = relay.events[0];
+      assert.equal(event.kind, 30385);
+      assert.deepEqual(
+        event.tags.find((t) => t[0] === "d"),
+        ["d", "iso3166:VE"],
+      );
+      assert.deepEqual(
+        event.tags.find((t) => t[0] === "comment_cnt"),
+        ["comment_cnt", "1"],
+      );
+    });
+
+    it("counts kind 1 as comment_cnt", async () => {
+      const { client, documents } = createMockClient();
+      const relay = createMockRelay();
+      const signer = createMockSigner();
+
+      const identifier = "https://example.com/page";
+
+      // Add kind 1 notes referencing the identifier.
+      for (let i = 0; i < 3; i++) {
+        documents.push(
+          makeDoc({
+            kind: 1,
+            pubkey: `author_${i}`,
+            tags: [["i", identifier]],
+          }),
+        );
+      }
+
+      const nip85 = new Nip85({
+        client,
+        indexName: "test",
+        relay,
+        signer,
+      });
+
+      nip85.addDirtyIdentifiers(new Set([identifier]));
+      await nip85.flushIdentifierStats();
+
+      assert.equal(relay.events.length, 1);
+      const event = relay.events[0];
+      assert.deepEqual(
+        event.tags.find((t) => t[0] === "comment_cnt"),
+        ["comment_cnt", "3"],
+      );
+    });
+
+    it("counts kind 16 and 17 as repost_cnt", async () => {
+      const { client, documents } = createMockClient();
+      const relay = createMockRelay();
+      const signer = createMockSigner();
+
+      const identifier = "https://example.com/reposted";
+
+      // Add kind 16 generic reposts.
+      documents.push(
+        makeDoc({
+          kind: 16,
+          pubkey: "reposter_0",
+          tags: [["i", identifier]],
+        }),
+      );
+      documents.push(
+        makeDoc({
+          kind: 16,
+          pubkey: "reposter_1",
+          tags: [["i", identifier]],
+        }),
+      );
+
+      // Add kind 17 repost.
+      documents.push(
+        makeDoc({
+          kind: 17,
+          pubkey: "reposter_2",
+          tags: [["i", identifier]],
+        }),
+      );
+
+      const nip85 = new Nip85({
+        client,
+        indexName: "test",
+        relay,
+        signer,
+      });
+
+      nip85.addDirtyIdentifiers(new Set([identifier]));
+      await nip85.flushIdentifierStats();
+
+      assert.equal(relay.events.length, 1);
+      const event = relay.events[0];
+      assert.deepEqual(
+        event.tags.find((t) => t[0] === "repost_cnt"),
+        ["repost_cnt", "3"],
+      );
+      // No comment or reaction tags expected.
+      assert.equal(
+        event.tags.find((t) => t[0] === "comment_cnt"),
+        undefined,
+      );
+      assert.equal(
+        event.tags.find((t) => t[0] === "reaction_cnt"),
+        undefined,
+      );
+    });
+
+    it("counts engagement from uppercase I tags", async () => {
+      const { client, documents } = createMockClient();
+      const relay = createMockRelay();
+      const signer = createMockSigner();
+
+      const identifier = "isbn:9780765382030";
+
+      // Kind 1111 with uppercase I tag (inclusive identifier reference).
+      documents.push(
+        makeDoc({
+          kind: 1111,
+          pubkey: "commenter_0",
+          tags: [["I", identifier]],
+        }),
+      );
+
+      // Kind 1111 with lowercase i tag.
+      documents.push(
+        makeDoc({
+          kind: 1111,
+          pubkey: "commenter_1",
+          tags: [["i", identifier]],
+        }),
+      );
+
+      const nip85 = new Nip85({
+        client,
+        indexName: "test",
+        relay,
+        signer,
+      });
+
+      nip85.addDirtyIdentifiers(new Set([identifier]));
+      await nip85.flushIdentifierStats();
+
+      assert.equal(relay.events.length, 1);
+      const event = relay.events[0];
+      assert.deepEqual(
+        event.tags.find((t) => t[0] === "comment_cnt"),
+        ["comment_cnt", "2"],
+      );
+    });
+
+    it("combines all engagement types in one event", async () => {
+      const { client, documents } = createMockClient();
+      const relay = createMockRelay();
+      const signer = createMockSigner();
+
+      const identifier = "https://example.com/full";
+
+      // comment (kind 1)
+      documents.push(
+        makeDoc({ kind: 1, pubkey: "a1", tags: [["i", identifier]] }),
+      );
+      // comment (kind 1111)
+      documents.push(
+        makeDoc({ kind: 1111, pubkey: "a2", tags: [["i", identifier]] }),
+      );
+      // reaction (kind 7)
+      documents.push(
+        makeDoc({ kind: 7, pubkey: "a3", tags: [["i", identifier]] }),
+      );
+      // repost (kind 16)
+      documents.push(
+        makeDoc({ kind: 16, pubkey: "a4", tags: [["i", identifier]] }),
+      );
+      // repost (kind 17)
+      documents.push(
+        makeDoc({ kind: 17, pubkey: "a5", tags: [["i", identifier]] }),
+      );
+
+      const nip85 = new Nip85({
+        client,
+        indexName: "test",
+        relay,
+        signer,
+      });
+
+      nip85.addDirtyIdentifiers(new Set([identifier]));
+      await nip85.flushIdentifierStats();
+
+      assert.equal(relay.events.length, 1);
+      const event = relay.events[0];
+      assert.deepEqual(
+        event.tags.find((t) => t[0] === "comment_cnt"),
+        ["comment_cnt", "2"],
+      );
+      assert.deepEqual(
+        event.tags.find((t) => t[0] === "reaction_cnt"),
+        ["reaction_cnt", "1"],
+      );
+      assert.deepEqual(
+        event.tags.find((t) => t[0] === "repost_cnt"),
+        ["repost_cnt", "2"],
+      );
     });
 
     it("drains the dirty set after flush", async () => {
