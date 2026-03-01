@@ -1,4 +1,9 @@
-import type { NostrFilter, NostrSigner, NRelay } from "@nostrify/nostrify";
+import type {
+  NostrEvent,
+  NostrFilter,
+  NostrSigner,
+  NRelay,
+} from "@nostrify/nostrify";
 import type { Client } from "@opensearch-project/opensearch";
 
 /** A single trending tag value with engagement metrics. */
@@ -19,6 +24,8 @@ export interface TrendsOpts {
   indexName: string;
   /** Relay instance used to publish trending label events. */
   relay: NRelay;
+  /** Optional callback to broadcast events to connected WebSocket subscribers. */
+  broadcast?: (event: NostrEvent) => void;
 }
 
 /**
@@ -30,11 +37,13 @@ export class Trends {
   private client: Client;
   private indexName: string;
   private relay: NRelay;
+  private broadcast?: (event: NostrEvent) => void;
 
   constructor(opts: TrendsOpts) {
     this.client = opts.client;
     this.indexName = opts.indexName;
     this.relay = opts.relay;
+    this.broadcast = opts.broadcast;
   }
 
   /**
@@ -230,6 +239,7 @@ export class Trends {
     });
 
     await this.relay.event(label, { signal });
+    this.broadcast?.(label);
   }
 
   /** Update trending pubkeys. */

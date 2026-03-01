@@ -52,6 +52,7 @@ const nip85 = new Nip85({
   indexName: config.opensearchIndex,
   relay: opensearchRelay,
   signer,
+  broadcast: (event) => relay.broadcast(event),
 });
 
 // Wire up dirty tracking callbacks for NIP-85 kinds 30384 and 30385.
@@ -164,6 +165,7 @@ if (trendsIntervalMs > 0) {
     client: opensearchClient,
     indexName: config.opensearchIndex,
     relay: opensearchRelay,
+    broadcast: (event) => relay.broadcast(event),
   });
   const relayUrl = config.relayUrl;
   const preferredLanguages = config.preferredLanguages;

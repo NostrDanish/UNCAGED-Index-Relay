@@ -14,7 +14,7 @@
  * and queries OpenSearch to compute stats on flush.
  */
 
-import type { NostrSigner, NRelay } from "@nostrify/nostrify";
+import type { NostrEvent, NostrSigner, NRelay } from "@nostrify/nostrify";
 import type { Client } from "@opensearch-project/opensearch";
 import type { EventScores } from "./opensearch.ts";
 
@@ -24,10 +24,12 @@ export interface Nip85Opts {
   client: Client;
   /** OpenSearch index name. */
   indexName: string;
-  /** Relay instance for publishing NIP-85 events. */
+  /** Relay instance for storing NIP-85 events. */
   relay: NRelay;
   /** Signer for signing NIP-85 events. */
   signer: NostrSigner;
+  /** Optional callback to broadcast events to connected WebSocket subscribers. */
+  broadcast?: (event: NostrEvent) => void;
 }
 
 /**
@@ -38,6 +40,7 @@ export class Nip85 {
   private indexName: string;
   private relay: NRelay;
   private signer: NostrSigner;
+  private broadcast?: (event: NostrEvent) => void;
 
   /** Addressable event addresses (`<kind>:<pubkey>:<d-tag>`) needing stats refresh. */
   private dirtyAddrs = new Set<string>();
@@ -49,6 +52,7 @@ export class Nip85 {
     this.indexName = opts.indexName;
     this.relay = opts.relay;
     this.signer = opts.signer;
+    this.broadcast = opts.broadcast;
   }
 
   /**
@@ -87,6 +91,7 @@ export class Nip85 {
       });
 
       await this.relay.event(event);
+      this.broadcast?.(event);
     }
   }
 
@@ -127,6 +132,7 @@ export class Nip85 {
       });
 
       await this.relay.event(event);
+      this.broadcast?.(event);
     }
   }
 
@@ -185,6 +191,7 @@ export class Nip85 {
       });
 
       await this.relay.event(event);
+      this.broadcast?.(event);
     }
   }
 
@@ -237,6 +244,7 @@ export class Nip85 {
       });
 
       await this.relay.event(event);
+      this.broadcast?.(event);
     }
   }
 

@@ -199,7 +199,7 @@ export class Relay {
    * Deduplicates so each (connection, subscriptionId) pair receives the event at most once,
    * even if multiple filters within the subscription match.
    */
-  private broadcast(event: NostrEvent): void {
+  broadcast(event: NostrEvent): void {
     // NIP-40: Don't broadcast expired events
     if (this.isExpired(event)) return;
 
