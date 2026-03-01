@@ -989,11 +989,11 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
           });
         } else {
           must.push({
-            match: {
-              content: {
-                query: positiveTerms,
-                operator: "and",
-              },
+            multi_match: {
+              query: positiveTerms,
+              fields: ["content", "content.url"],
+              operator: "and",
+              type: "best_fields",
             },
           });
         }
@@ -1010,7 +1010,10 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
           });
         } else {
           mustNot.push({
-            match: { content: term },
+            multi_match: {
+              query: term,
+              fields: ["content", "content.url"],
+            },
           });
         }
       }
@@ -1589,6 +1592,11 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
           tokenizer: "edge_ngram_tokenizer",
           filter: ["lowercase"],
         },
+        url_analyzer: {
+          type: "custom",
+          tokenizer: "uax_url_email",
+          filter: ["lowercase"],
+        },
       },
       tokenizer: {
         edge_ngram_tokenizer: {
@@ -1619,6 +1627,12 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     content: {
       type: "text",
       analyzer: "standard",
+      fields: {
+        url: {
+          type: "text",
+          analyzer: "url_analyzer",
+        },
+      },
     },
     sig: { type: "keyword" },
     deleted: { type: "boolean" },
