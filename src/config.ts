@@ -53,6 +53,17 @@ export class Config {
     return this.env.get("OPENSEARCH_PASSWORD");
   }
 
+  /** Interval in ms between trend computations. 0 to disable. Default: 15 minutes. */
+  get trendsIntervalMs(): number {
+    const value = this.env.get("TRENDS_INTERVAL_MS");
+    if (!value) return 900_000; // 15 minutes
+    const ms = parseInt(value, 10);
+    if (Number.isNaN(ms) || ms < 0) {
+      throw new Error("TRENDS_INTERVAL_MS must be a non-negative integer.");
+    }
+    return ms;
+  }
+
   get nostrSigner(): NostrSigner {
     const value = this.env.get("NOSTR_NSEC");
     if (!value) {

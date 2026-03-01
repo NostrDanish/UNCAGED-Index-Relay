@@ -1,10 +1,14 @@
 import process from "node:process";
+import type { ClientOptions } from "@opensearch-project/opensearch";
+import { Client as OpenSearchClient } from "@opensearch-project/opensearch";
 import { serve } from "bun";
 
 import { AnalyzePool } from "./analyze-pool.ts";
 import { Config } from "./config.ts";
+import { Nip85 } from "./nip85.ts";
 import { OpenSearchRelay } from "./opensearch.ts";
 import { Relay, type WebSocketData } from "./relay.ts";
+import { Trends } from "./trends.ts";
 
 const config = new Config({
   get(key) {
@@ -15,8 +19,23 @@ const config = new Config({
 // Initialize analysis worker pool (signature verification, language & sentiment detection)
 const analyzePool = new AnalyzePool();
 
+// Construct OpenSearch client (shared between relay, NIP-85, and trends).
+const opensearchClientOptions: ClientOptions = {
+  node: config.opensearchNode,
+};
+if (config.opensearchUsername && config.opensearchPassword) {
+  opensearchClientOptions.auth = {
+    username: config.opensearchUsername,
+    password: config.opensearchPassword,
+  };
+}
+const opensearchClient = new OpenSearchClient(opensearchClientOptions);
+
 // Initialize OpenSearch relay
-const opensearchRelay = OpenSearchRelay.fromConfig(config);
+const opensearchRelay = new OpenSearchRelay(opensearchClient, {
+  indexName: config.opensearchIndex,
+});
+
 const relay = new Relay(opensearchRelay, {
   analyze: (event) => analyzePool.analyze(event),
   relayUrl: config.relayUrl,
@@ -25,6 +44,18 @@ const relay = new Relay(opensearchRelay, {
     contact: config.relayContact,
   },
 });
+
+// Initialize NIP-85 publisher.
+const signer = config.nostrSigner;
+const nip85 = new Nip85({
+  client: opensearchClient,
+  indexName: config.opensearchIndex,
+  relay: opensearchRelay,
+  signer,
+});
+
+// Wire up addressable event dirty tracking for kind 30384.
+opensearchRelay.onDirtyAddrs = (addrs) => nip85.addDirtyAddrs(addrs);
 
 // Initialize index on startup
 try {
@@ -102,11 +133,55 @@ const server = serve<WebSocketData>({
 
 console.log(`Nostr relay listening on ws://localhost:${server.port}`);
 
-// Background job: recompute engagement scores for dirty events.
-// Runs every 5s during backfill, effectively no-ops when no dirty events remain.
+// ---------------------------------------------------------------------------
+// Background jobs
+// ---------------------------------------------------------------------------
+
+// Recompute engagement scores for dirty events and publish NIP-85 assertions.
+// Runs every 5s; effectively no-ops when no dirty events remain.
 const SCORE_RECOMPUTE_INTERVAL_MS = 5_000;
-setInterval(() => {
-  opensearchRelay.recomputeScores().catch((err) => {
-    console.error("Score recomputation failed:", err);
-  });
+setInterval(async () => {
+  try {
+    const result = await opensearchRelay.recomputeScores();
+    if (result.count > 0) {
+      await Promise.all([
+        nip85.publishUserStats(result.userScores),
+        nip85.publishEventStats(result.eventScores),
+      ]);
+    }
+    await nip85.flushAddrStats();
+  } catch (err) {
+    console.error("Score recomputation / NIP-85 failed:", err);
+  }
 }, SCORE_RECOMPUTE_INTERVAL_MS);
+
+// Periodically compute and publish trending events (kind 1985).
+const trendsIntervalMs = config.trendsIntervalMs;
+if (trendsIntervalMs > 0) {
+  const trends = new Trends({
+    client: opensearchClient,
+    indexName: config.opensearchIndex,
+    relay: opensearchRelay,
+  });
+  const relayUrl = config.relayUrl;
+
+  const updateAllTrends = async () => {
+    console.log("Updating trends...");
+    await trends.updateTrendingHashtags(signer);
+    await trends.updateTrendingLinks(signer);
+    await trends.updateTrendingPubkeys(signer, relayUrl);
+    await trends.updateTrendingEvents(signer, relayUrl);
+    await trends.updateTrendingZappedEvents(signer, relayUrl);
+    console.log("Trends updated.");
+  };
+
+  setInterval(() => {
+    updateAllTrends().catch((err) =>
+      console.error("Trends update failed:", err),
+    );
+  }, trendsIntervalMs);
+
+  console.log(
+    `Trends scheduling enabled (every ${(trendsIntervalMs / 60_000).toFixed(0)} min)`,
+  );
+}

@@ -4252,6 +4252,7 @@ describe("OpenSearchRelay", () => {
         "reaction_count",
         "repost_count",
         "zap_amount_msats",
+        "zap_cnt",
         "scores_dirty",
       ]);
 

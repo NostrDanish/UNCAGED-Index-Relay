@@ -42,8 +42,29 @@ interface NostrEventDocument extends NostrEvent {
   repost_count: number;
   /** Sum of amount_msats from kind 9735 zap receipts referencing this event. */
   zap_amount_msats: number;
+  /** Count of kind 9735 zap receipts referencing this event. */
+  zap_cnt: number;
   /** Whether engagement scores need recomputation. */
   scores_dirty: boolean;
+}
+
+/** Scores computed for a non-kind-0 event by {@link OpenSearchRelay.recomputeScores}. */
+export interface EventScores {
+  reply_count: number;
+  reaction_count: number;
+  repost_count: number;
+  zap_amount_msats: number;
+  zap_cnt: number;
+}
+
+/** Result returned by {@link OpenSearchRelay.recomputeScores}. */
+export interface RecomputeResult {
+  /** Total number of dirty events processed. */
+  count: number;
+  /** Pubkey -> follower count (top_score) for dirty kind 0 events. */
+  userScores: Map<string, { top_score: number }>;
+  /** Event ID -> engagement scores for dirty non-kind-0 events. */
+  eventScores: Map<string, EventScores>;
 }
 
 /** Pending bulk operation for an event. */
@@ -68,6 +89,13 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
   private bulkTimer: ReturnType<typeof setTimeout> | null = null;
   private bulkMaxSize: number;
   private bulkFlushMs: number;
+
+  /**
+   * Optional callback invoked when engagement events reference addressable
+   * events via `a` tags. Called with the set of `a` tag values (event
+   * addresses like `30023:pubkey:slug`) that need NIP-85 stats updates.
+   */
+  onDirtyAddrs?: (addrs: Set<string>) => void;
 
   constructor(
     client: Client,
@@ -363,6 +391,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
       reaction_count: 0,
       repost_count: 0,
       zap_amount_msats: 0,
+      zap_cnt: 0,
       scores_dirty: false,
     };
   }
@@ -1209,12 +1238,14 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
         def old_reaction_count = ctx._source.reaction_count;
         def old_repost_count = ctx._source.repost_count;
         def old_zap_amount_msats = ctx._source.zap_amount_msats;
+        def old_zap_cnt = ctx._source.containsKey('zap_cnt') ? ctx._source.zap_cnt : 0;
         ctx._source = params.event;
         ctx._source.top_score = old_top_score;
         ctx._source.reply_count = old_reply_count;
         ctx._source.reaction_count = old_reaction_count;
         ctx._source.repost_count = old_repost_count;
         ctx._source.zap_amount_msats = old_zap_amount_msats;
+        ctx._source.zap_cnt = old_zap_cnt;
       } else {
         ctx.op = 'none';
       }
@@ -1300,13 +1331,17 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
   private async markReferencedEventsDirty(entries: BulkEntry[]): Promise<void> {
     const referencedIds = new Set<string>();
     const followedPubkeys = new Set<string>();
+    const referencedAddrs = new Set<string>();
 
     for (const entry of entries) {
-      // Engagement-referencing events: mark target events dirty by event id.
+      // Engagement-referencing events: mark target events dirty by event id,
+      // and collect addressable event references via `a` tags.
       if (OpenSearchRelay.REFERENCING_KINDS.has(entry.event.kind)) {
         for (const tag of entry.event.tags) {
           if (tag[0] === "e" && tag[1]) {
             referencedIds.add(tag[1]);
+          } else if (tag[0] === "a" && tag[1]) {
+            referencedAddrs.add(tag[1]);
           }
         }
       }
@@ -1375,6 +1410,11 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     }
 
     await Promise.all(promises);
+
+    // Notify NIP-85 publisher about dirty addressable event references.
+    if (referencedAddrs.size > 0) {
+      this.onDirtyAddrs?.(referencedAddrs);
+    }
   }
 
   /**
@@ -1650,6 +1690,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     reaction_count: { type: "integer" },
     repost_count: { type: "integer" },
     zap_amount_msats: { type: "long" },
+    zap_cnt: { type: "integer" },
     scores_dirty: { type: "boolean" },
   };
 
@@ -1750,9 +1791,9 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
    * include this profile's pubkey.
    *
    * Designed to be called periodically (e.g. via setInterval).
-   * Returns the number of events whose scores were updated.
+   * Returns the computed scores so callers (e.g. NIP-85) can publish them.
    */
-  async recomputeScores(batchSize = 5000): Promise<number> {
+  async recomputeScores(batchSize = 5000): Promise<RecomputeResult> {
     // Phase 1: Find dirty events (need id, kind, and pubkey).
     const dirtyResponse = await this.client.search({
       index: this.indexName,
@@ -1770,7 +1811,9 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     const dirtyHits = dirtyResponse.body.hits.hits as unknown as Array<{
       _source?: { id: string; kind: number; pubkey: string };
     }>;
-    if (dirtyHits.length === 0) return 0;
+    if (dirtyHits.length === 0) {
+      return { count: 0, userScores: new Map(), eventScores: new Map() };
+    }
 
     // Separate dirty events into kind 0 (profiles) and non-kind-0.
     const dirtyKind0: Array<{ id: string; pubkey: string }> = [];
@@ -1796,6 +1839,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
         reaction_count: number;
         repost_count: number;
         zap_amount_msats: number;
+        zap_cnt: number;
       }
     >();
 
@@ -1806,6 +1850,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
         reaction_count: 0,
         repost_count: 0,
         zap_amount_msats: 0,
+        zap_cnt: 0,
       });
     }
 
@@ -1980,6 +2025,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
         const s = scores.get(bucket.key);
         if (s) {
           s.zap_amount_msats = bucket.total_msats?.value ?? 0;
+          s.zap_cnt = bucket.doc_count;
         }
       }
     }
@@ -2001,6 +2047,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
           reaction_count: s.reaction_count,
           repost_count: s.repost_count,
           zap_amount_msats: s.zap_amount_msats,
+          zap_cnt: s.zap_cnt,
           scores_dirty: false,
         },
       });
@@ -2038,6 +2085,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
               reaction_count: number;
               repost_count: number;
               zap_amount_msats: number;
+              zap_cnt: number;
             }
           > = {};
           for (const id of failedIds) {
@@ -2058,6 +2106,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
                     ctx._source.reaction_count = s.reaction_count;
                     ctx._source.repost_count = s.repost_count;
                     ctx._source.zap_amount_msats = s.zap_amount_msats;
+                    ctx._source.zap_cnt = s.zap_cnt;
                     ctx._source.scores_dirty = false;
                   }
                 `,
@@ -2078,7 +2127,30 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
       `Recomputed scores for ${allDirtyIds.length} events (${kind0Count} profiles, ${nonKind0Count} engagement)`,
     );
 
-    return allDirtyIds.length;
+    // Build result maps for callers (e.g. NIP-85 publisher).
+    const userScores = new Map<string, { top_score: number }>();
+    for (const { id, pubkey } of dirtyKind0) {
+      const s = scores.get(id);
+      if (s) {
+        userScores.set(pubkey, { top_score: s.top_score });
+      }
+    }
+
+    const eventScores = new Map<string, EventScores>();
+    for (const id of dirtyNonKind0Ids) {
+      const s = scores.get(id);
+      if (s) {
+        eventScores.set(id, {
+          reply_count: s.reply_count,
+          reaction_count: s.reaction_count,
+          repost_count: s.repost_count,
+          zap_amount_msats: s.zap_amount_msats,
+          zap_cnt: s.zap_cnt,
+        });
+      }
+    }
+
+    return { count: allDirtyIds.length, userScores, eventScores };
   }
 
   /**
