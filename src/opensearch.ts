@@ -982,11 +982,13 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
       must.push({ terms: { kind: filter.kinds } });
     }
 
-    // Time range filters
+    // Time range filters (clamp to safe range for OpenSearch long type)
     if (filter.since || filter.until) {
       const range: Record<string, number> = {};
-      if (filter.since) range.gte = filter.since;
-      if (filter.until) range.lte = filter.until;
+      if (filter.since)
+        range.gte = Math.min(filter.since, Number.MAX_SAFE_INTEGER);
+      if (filter.until)
+        range.lte = Math.min(filter.until, Number.MAX_SAFE_INTEGER);
       must.push({ range: { created_at: range } });
     }
 
