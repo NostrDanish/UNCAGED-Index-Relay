@@ -206,6 +206,8 @@ const communityStatsIntervalMs = config.communityStatsIntervalMs;
 if (communityStatsIntervalMs > 0) {
   const communityStats = new CommunityStats({
     relay: opensearchRelay,
+    client: opensearchClient,
+    indexName: config.opensearchIndex,
     signer,
     intervalMs: communityStatsIntervalMs,
   });

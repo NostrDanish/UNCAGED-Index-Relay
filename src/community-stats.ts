@@ -19,6 +19,7 @@ import type {
   NostrSigner,
   NRelay,
 } from "@nostrify/nostrify";
+import type { Client } from "@opensearch-project/opensearch";
 import countries from "i18n-iso-countries";
 import en from "i18n-iso-countries/langs/en.json";
 import { iso31662 } from "iso-3166";
@@ -54,12 +55,6 @@ const LEADERBOARD_LIMIT = 10;
 /** Pagination batch size for fetching events. */
 const FETCH_PAGE_SIZE = 500;
 
-/** Number of pubkeys per zap fetch chunk. */
-const ZAP_CHUNK_SIZE = 50;
-
-/** Number of concurrent zap fetch requests. */
-const ZAP_CONCURRENCY = 5;
-
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -76,6 +71,10 @@ type CountRelay = NRelay & {
 export interface CommunityStatsOpts {
   /** Relay used for COUNT queries (should support Ditto search extensions). */
   relay: CountRelay;
+  /** OpenSearch client for direct aggregation queries. */
+  client: Client;
+  /** OpenSearch index name. */
+  indexName: string;
   /** Signer used to sign published events. */
   signer: NostrSigner;
   /** How often (ms) to run the community stats pipeline. Default: 3600000 (1 hour). */
@@ -89,7 +88,7 @@ interface CountryStats {
   tags: string[][];
 }
 
-interface ZapAggregation {
+export interface ZapAggregation {
   zapAmount: number;
   zapCnt: number;
   donors: Map<string, { totalSats: number; zapCount: number }>;
@@ -103,8 +102,9 @@ interface ZapAggregation {
 /**
  * Extract sats from a BOLT11 invoice string.
  * Fallback for zap receipts that have a bolt11 tag but no amount tag.
+ * @internal Exported for testing.
  */
-function extractAmountFromBolt11(bolt11: string): number {
+export function extractAmountFromBolt11(bolt11: string): number {
   try {
     const match = bolt11.match(/^ln(bc|tb)(\d+)([munp]?)/i);
     if (!match) return 0;
@@ -134,8 +134,11 @@ function extractAmountFromBolt11(bolt11: string): number {
   }
 }
 
-/** Extract sats from a zap receipt event. Tries amount tag first, then bolt11. */
-function extractZapSats(zap: NostrEvent): number {
+/**
+ * Extract sats from a zap receipt event. Tries amount tag first, then bolt11.
+ * @internal Exported for testing.
+ */
+export function extractZapSats(zap: NostrEvent): number {
   const amountTag = zap.tags.find(([n]) => n === "amount");
   if (amountTag?.[1]) {
     const sats = Math.floor(parseInt(amountTag[1], 10) / 1000);
@@ -152,8 +155,11 @@ function extractZapSats(zap: NostrEvent): number {
 // Aggregation helpers
 // ---------------------------------------------------------------------------
 
-/** Count posts per author. */
-function countByAuthor(posts: NostrEvent[]): Map<string, number> {
+/**
+ * Count posts per author.
+ * @internal Exported for testing.
+ */
+export function countByAuthor(posts: NostrEvent[]): Map<string, number> {
   const counts = new Map<string, number>();
   for (const post of posts) {
     counts.set(post.pubkey, (counts.get(post.pubkey) || 0) + 1);
@@ -161,8 +167,11 @@ function countByAuthor(posts: NostrEvent[]): Map<string, number> {
   return counts;
 }
 
-/** Count hashtag usage, excluding app-specific tags. */
-function countHashtags(posts: NostrEvent[]): Map<string, number> {
+/**
+ * Count hashtag usage, excluding app-specific tags.
+ * @internal Exported for testing.
+ */
+export function countHashtags(posts: NostrEvent[]): Map<string, number> {
   const counts = new Map<string, number>();
   for (const post of posts) {
     for (const tag of post.tags) {
@@ -180,7 +189,7 @@ function countHashtags(posts: NostrEvent[]): Map<string, number> {
  * Contributors are identified by the `p` (lowercase) tag -- the zap recipient.
  * Donors are identified by the `P` (uppercase) tag -- the zap sender.
  */
-function aggregateZaps(zaps: NostrEvent[]): ZapAggregation {
+export function aggregateZaps(zaps: NostrEvent[]): ZapAggregation {
   const donors = new Map<string, { totalSats: number; zapCount: number }>();
   const contributors = new Map<
     string,
@@ -224,7 +233,8 @@ function aggregateZaps(zaps: NostrEvent[]): ZapAggregation {
 /**
  * Aggregate zap receipts for action submissions, per-action, per-timeframe.
  */
-function aggregateActionZaps(
+/** @internal Exported for testing. */
+export function aggregateActionZaps(
   allZapReceipts: NostrEvent[],
   actionSubmissions: Map<string, NostrEvent[]>,
   now: number,
@@ -295,7 +305,8 @@ function aggregateActionZaps(
  * Generate windowed tags from a Record<Timeframe, number>.
  * Produces: ["base", all], ["base_7d", 7d], ["base_30d", 30d], ["base_90d", 90d]
  */
-function windowedTags(
+/** @internal Exported for testing. */
+export function windowedTags(
   base: string,
   values: Record<Timeframe, number>,
 ): string[][] {
@@ -334,7 +345,8 @@ function sumTagWindowed(
  * Sums the primary metric (value at `metricIndex`) for entries with the same key
  * (value at index 1), then returns the top N sorted by that metric.
  */
-function mergeLeaderboard(
+/** @internal Exported for testing. */
+export function mergeLeaderboard(
   allTags: string[][][],
   tagName: string,
   metricIndex: number,
@@ -413,6 +425,8 @@ async function mapConcurrent<T, R>(
  */
 export class CommunityStats {
   private relay: CountRelay;
+  private client: Client;
+  private indexName: string;
   private signer: NostrSigner;
   private intervalMs: number;
   private concurrency: number;
@@ -422,6 +436,8 @@ export class CommunityStats {
 
   constructor(opts: CommunityStatsOpts) {
     this.relay = opts.relay;
+    this.client = opts.client;
+    this.indexName = opts.indexName;
     this.signer = opts.signer;
     this.intervalMs = opts.intervalMs ?? 3_600_000; // 1 hour
     this.concurrency = opts.concurrency ?? 5;
@@ -619,40 +635,6 @@ export class CommunityStats {
     return Array.from(seen.values());
   }
 
-  /**
-   * Fetch zap receipts by recipient pubkeys (`#p` tag) in parallel batches.
-   */
-  private async fetchZapsByRecipients(
-    pubkeys: string[],
-  ): Promise<NostrEvent[]> {
-    if (pubkeys.length === 0) return [];
-
-    const chunks: string[][] = [];
-    for (let i = 0; i < pubkeys.length; i += ZAP_CHUNK_SIZE) {
-      chunks.push(pubkeys.slice(i, i + ZAP_CHUNK_SIZE));
-    }
-
-    const seen = new Map<string, NostrEvent>();
-
-    for (let i = 0; i < chunks.length; i += ZAP_CONCURRENCY) {
-      const batch = chunks.slice(i, i + ZAP_CONCURRENCY);
-      const results = await Promise.all(
-        batch.map((chunk) =>
-          this.fetchAllPaginated({ kinds: [9735], "#p": chunk }),
-        ),
-      );
-      for (const events of results) {
-        for (const event of events) {
-          if (!seen.has(event.id)) {
-            seen.set(event.id, event);
-          }
-        }
-      }
-    }
-
-    return Array.from(seen.values());
-  }
-
   // ---------------------------------------------------------------------------
   // Activity detection
   // ---------------------------------------------------------------------------
@@ -734,7 +716,7 @@ export class CommunityStats {
     const iTag = `iso3166:${countryCode}`;
     const now = Math.floor(Date.now() / 1000);
 
-    // Aggregate COUNT queries
+    // Aggregate COUNT queries (efficient -- single count per query)
     const [authorCnts, commentCnts] = await Promise.all([
       this.countWindowed(
         {
@@ -747,34 +729,59 @@ export class CommunityStats {
       this.countWindowed({ kinds: [1111], "#i": [iTag] }, now),
     ]);
 
-    // Fetch all posts using pagination
-    const allPosts = await this.fetchAllPaginated({
-      kinds: [1111],
-      "#i": [iTag],
-    });
+    // Use OpenSearch aggregations for leaderboards (top posters, hashtags,
+    // zaps) instead of fetching all events into memory.
+    const allTimeframes: Array<{ tf: Timeframe; since?: number }> = [
+      { tf: "all" },
+      ...WINDOWS.map((w) => ({
+        tf: w.key as Timeframe,
+        since: now - w.seconds,
+      })),
+    ];
 
-    // Fetch zap receipts by contributor pubkeys
-    const contributorPubkeys = Array.from(
-      new Set(allPosts.map((p) => p.pubkey)),
-    );
-    const allZapReceipts = await this.fetchZapsByRecipients(contributorPubkeys);
+    // Run all timeframe aggregations in parallel.
+    const [posterResults, hashtagResults, zapResults] = await Promise.all([
+      // Top posters per timeframe
+      Promise.all(
+        allTimeframes.map(({ since }) =>
+          this.aggTopPosters(iTag, LEADERBOARD_LIMIT, since),
+        ),
+      ),
+      // Trending hashtags per timeframe
+      Promise.all(
+        allTimeframes.map(({ since }) =>
+          this.aggTopHashtags(iTag, LEADERBOARD_LIMIT, since),
+        ),
+      ),
+      // Zap stats per timeframe (totals + top contributors + top donors)
+      Promise.all(
+        allTimeframes.map(({ since }) =>
+          this.aggZapStats(iTag, LEADERBOARD_LIMIT, since),
+        ),
+      ),
+    ]);
 
-    // Build per-timeframe post and zap subsets
-    const postSets: Record<Timeframe, NostrEvent[]> = {
-      all: allPosts,
-    } as Record<Timeframe, NostrEvent[]>;
-    const zapAggs: Record<Timeframe, ZapAggregation> = {
-      all: aggregateZaps(allZapReceipts),
-    } as Record<Timeframe, ZapAggregation>;
-    for (const w of WINDOWS) {
-      const since = now - w.seconds;
-      postSets[w.key] = allPosts.filter((e) => e.created_at >= since);
-      zapAggs[w.key] = aggregateZaps(
-        allZapReceipts.filter((z) => z.created_at >= since),
-      );
+    // Build windowed zap totals
+    const zapAmountByTf: Record<Timeframe, number> = {
+      all: 0,
+      "7d": 0,
+      "30d": 0,
+      "90d": 0,
+    };
+    const zapCntByTf: Record<Timeframe, number> = {
+      all: 0,
+      "7d": 0,
+      "30d": 0,
+      "90d": 0,
+    };
+    for (let i = 0; i < allTimeframes.length; i++) {
+      const tf = allTimeframes[i].tf;
+      zapAmountByTf[tf] = zapResults[i].totalSats;
+      zapCntByTf[tf] = zapResults[i].totalCount;
     }
 
-    // Fetch actions for this country (both new and legacy schemas)
+    // Fetch actions for this country (both new and legacy schemas).
+    // Actions are a small dataset — fetching full events is fine.
     const [newActions, legacyActions] = await Promise.all([
       this.fetchAllPaginated({ kinds: [36639], "#i": [iTag] }),
       this.fetchAllPaginated({ kinds: [36639], "#t": ["pathos-challenge"] }),
@@ -851,9 +858,23 @@ export class CommunityStats {
       }),
     );
 
-    // Aggregate zaps for all actions
+    // Aggregate zaps for actions. Still needs full zap events for attribution
+    // to specific submissions. Fetch only zaps for the known submission IDs.
+    const allSubmissionIds = new Set<string>();
+    for (const [, submissions] of actionSubmissionEvents) {
+      for (const sub of submissions) {
+        allSubmissionIds.add(sub.id);
+      }
+    }
+    let actionZapReceipts: NostrEvent[] = [];
+    if (allSubmissionIds.size > 0) {
+      actionZapReceipts = await this.fetchAllPaginated({
+        kinds: [9735],
+        "#e": [...allSubmissionIds],
+      });
+    }
     const actionZapAggs = aggregateActionZaps(
-      allZapReceipts,
+      actionZapReceipts,
       actionSubmissionEvents,
       now,
     );
@@ -871,24 +892,6 @@ export class CommunityStats {
       }
     }
 
-    // Build zap windowed records
-    const zapAmountByTf: Record<Timeframe, number> = {
-      all: 0,
-      "7d": 0,
-      "30d": 0,
-      "90d": 0,
-    };
-    const zapCntByTf: Record<Timeframe, number> = {
-      all: 0,
-      "7d": 0,
-      "30d": 0,
-      "90d": 0,
-    };
-    for (const tf of TIMEFRAMES) {
-      zapAmountByTf[tf] = zapAggs[tf].zapAmount;
-      zapCntByTf[tf] = zapAggs[tf].zapCnt;
-    }
-
     // Build tags
     const tags: string[][] = [
       ["d", `iso3166:${countryCode}`],
@@ -901,61 +904,49 @@ export class CommunityStats {
     ];
 
     // Leaderboard tags per timeframe
-    for (const tf of TIMEFRAMES) {
-      const tfPosts = postSets[tf];
-      const tfZapAgg = zapAggs[tf];
+    for (let i = 0; i < allTimeframes.length; i++) {
+      const tf = allTimeframes[i].tf;
       const suffix = tf === "all" ? "" : `_${tf}`;
 
-      // top_poster
-      const posterCounts = countByAuthor(tfPosts);
-      const topPosters = Array.from(posterCounts.entries())
-        .sort((a, b) => b[1] - a[1])
-        .slice(0, LEADERBOARD_LIMIT);
-      for (const [pubkey, count] of topPosters) {
+      // top_poster (from aggregation)
+      const posterMap = posterResults[i];
+      for (const [pubkey, count] of posterMap) {
         tags.push([`top_poster${suffix}`, pubkey, String(count)]);
       }
 
-      // trending_hashtag
-      const hashtagCounts = countHashtags(tfPosts);
-      const topHashtags = Array.from(hashtagCounts.entries())
-        .sort((a, b) => b[1] - a[1])
-        .slice(0, LEADERBOARD_LIMIT);
-      for (const [hashtag, count] of topHashtags) {
+      // trending_hashtag (from aggregation, already excludes app hashtags)
+      const hashtagMap = hashtagResults[i];
+      for (const [hashtag, count] of hashtagMap) {
         tags.push([`trending_hashtag${suffix}`, hashtag, String(count)]);
       }
 
-      // top_zapped
-      const topContributors = Array.from(tfZapAgg.contributors.entries())
-        .sort((a, b) => b[1].totalSats - a[1].totalSats)
-        .slice(0, LEADERBOARD_LIMIT);
-      for (const [pubkey, data] of topContributors) {
-        const postCount = posterCounts.get(pubkey) || 0;
+      // top_zapped (from aggregation)
+      const zap = zapResults[i];
+      for (const c of zap.topContributors) {
+        const postCount = posterMap.get(c.pubkey) || 0;
         const avgSats =
-          data.zapCount > 0 ? Math.floor(data.totalSats / data.zapCount) : 0;
+          c.zapCount > 0 ? Math.floor(c.totalSats / c.zapCount) : 0;
         tags.push([
           `top_zapped${suffix}`,
-          pubkey,
-          String(data.totalSats),
+          c.pubkey,
+          String(c.totalSats),
           String(postCount),
           String(avgSats),
-          String(data.zapCount),
+          String(c.zapCount),
         ]);
       }
 
-      // top_donor
-      const topDonors = Array.from(tfZapAgg.donors.entries())
-        .sort((a, b) => b[1].totalSats - a[1].totalSats)
-        .slice(0, LEADERBOARD_LIMIT);
-      for (const [pubkey, data] of topDonors) {
+      // top_donor (from aggregation)
+      for (const d of zap.topDonors) {
         tags.push([
           `top_donor${suffix}`,
-          pubkey,
-          String(data.totalSats),
-          String(data.zapCount),
+          d.pubkey,
+          String(d.totalSats),
+          String(d.zapCount),
         ]);
       }
 
-      // top_action
+      // top_action (unchanged -- uses COUNT data)
       const tfActions = actionInfos
         .map((a) => ({
           ...a,
@@ -978,6 +969,245 @@ export class CommunityStats {
     }
 
     return { countryCode, tags };
+  }
+
+  // ---------------------------------------------------------------------------
+  // OpenSearch aggregation helpers
+  // ---------------------------------------------------------------------------
+
+  /** Get top posters (by post count) for a country via OpenSearch aggregation. */
+  private async aggTopPosters(
+    iTag: string,
+    limit: number,
+    since?: number,
+  ): Promise<Map<string, number>> {
+    const must: Record<string, unknown>[] = [
+      { term: { deleted: false } },
+      { term: { kind: 1111 } },
+      { terms: { "tags_map.i": [iTag] } },
+    ];
+    if (since !== undefined) {
+      must.push({ range: { created_at: { gte: since } } });
+    }
+
+    const response = await this.client.search({
+      index: this.indexName,
+      body: {
+        query: { bool: { must } },
+        size: 0,
+        aggs: {
+          by_author: {
+            terms: { field: "pubkey", size: limit },
+          },
+        },
+      },
+    });
+
+    const buckets =
+      (
+        response.body.aggregations?.by_author as unknown as {
+          buckets?: Array<{ key: string; doc_count: number }>;
+        }
+      )?.buckets || [];
+
+    const result = new Map<string, number>();
+    for (const bucket of buckets) {
+      result.set(bucket.key, bucket.doc_count);
+    }
+    return result;
+  }
+
+  /** Get top hashtags for a country via OpenSearch aggregation. */
+  private async aggTopHashtags(
+    iTag: string,
+    limit: number,
+    since?: number,
+  ): Promise<Map<string, number>> {
+    const must: Record<string, unknown>[] = [
+      { term: { deleted: false } },
+      { term: { kind: 1111 } },
+      { terms: { "tags_map.i": [iTag] } },
+    ];
+    if (since !== undefined) {
+      must.push({ range: { created_at: { gte: since } } });
+    }
+
+    // Over-fetch to allow filtering out app hashtags.
+    const fetchSize = limit + APP_HASHTAGS.size;
+
+    const response = await this.client.search({
+      index: this.indexName,
+      body: {
+        query: { bool: { must } },
+        size: 0,
+        aggs: {
+          by_hashtag: {
+            terms: { field: "tags_map.t", size: fetchSize },
+          },
+        },
+      },
+    });
+
+    const buckets =
+      (
+        response.body.aggregations?.by_hashtag as unknown as {
+          buckets?: Array<{ key: string; doc_count: number }>;
+        }
+      )?.buckets || [];
+
+    const result = new Map<string, number>();
+    for (const bucket of buckets) {
+      if (APP_HASHTAGS.has(bucket.key.toLowerCase())) continue;
+      if (result.size >= limit) break;
+      result.set(bucket.key, bucket.doc_count);
+    }
+    return result;
+  }
+
+  /** Aggregated zap stats for a country. */
+  private async aggZapStats(
+    iTag: string,
+    limit: number,
+    since?: number,
+  ): Promise<{
+    totalSats: number;
+    totalCount: number;
+    topContributors: Array<{
+      pubkey: string;
+      totalSats: number;
+      zapCount: number;
+    }>;
+    topDonors: Array<{
+      pubkey: string;
+      totalSats: number;
+      zapCount: number;
+    }>;
+  }> {
+    // First, get the pubkeys of contributors for this country.
+    // Contributors are authors of kind 1111 posts tagged with this country.
+    const contributorPubkeys = await this.aggContributorPubkeys(iTag);
+    if (contributorPubkeys.length === 0) {
+      return {
+        totalSats: 0,
+        totalCount: 0,
+        topContributors: [],
+        topDonors: [],
+      };
+    }
+
+    // Query kind 9735 zaps where `p` tag matches contributor pubkeys.
+    const must: Record<string, unknown>[] = [
+      { term: { deleted: false } },
+      { term: { kind: 9735 } },
+      { terms: { "tags_map.p": contributorPubkeys } },
+    ];
+    if (since !== undefined) {
+      must.push({ range: { created_at: { gte: since } } });
+    }
+
+    const response = await this.client.search({
+      index: this.indexName,
+      body: {
+        query: { bool: { must } },
+        size: 0,
+        aggs: {
+          total_msats: { sum: { field: "amount_msats" } },
+          // Top contributors: group by p tag (recipient)
+          by_recipient: {
+            terms: { field: "tags_map.p", size: limit },
+            aggs: {
+              total_msats: { sum: { field: "amount_msats" } },
+            },
+          },
+          // Top donors: group by P tag (sender)
+          by_sender: {
+            terms: { field: "tags_map.P", size: limit },
+            aggs: {
+              total_msats: { sum: { field: "amount_msats" } },
+            },
+          },
+        },
+      },
+    });
+
+    const totalMsats =
+      (response.body.aggregations?.total_msats as { value?: number })?.value ??
+      0;
+    const hitsTotal = response.body.hits?.total;
+    const totalCount =
+      typeof hitsTotal === "number"
+        ? hitsTotal
+        : ((hitsTotal as { value?: number })?.value ?? 0);
+
+    const recipientBuckets =
+      (
+        response.body.aggregations?.by_recipient as unknown as {
+          buckets?: Array<{
+            key: string;
+            doc_count: number;
+            total_msats?: { value: number };
+          }>;
+        }
+      )?.buckets || [];
+
+    const senderBuckets =
+      (
+        response.body.aggregations?.by_sender as unknown as {
+          buckets?: Array<{
+            key: string;
+            doc_count: number;
+            total_msats?: { value: number };
+          }>;
+        }
+      )?.buckets || [];
+
+    return {
+      totalSats: Math.floor(totalMsats / 1000),
+      totalCount,
+      topContributors: recipientBuckets.map((b) => ({
+        pubkey: b.key,
+        totalSats: Math.floor((b.total_msats?.value ?? 0) / 1000),
+        zapCount: b.doc_count,
+      })),
+      topDonors: senderBuckets.map((b) => ({
+        pubkey: b.key,
+        totalSats: Math.floor((b.total_msats?.value ?? 0) / 1000),
+        zapCount: b.doc_count,
+      })),
+    };
+  }
+
+  /** Get distinct contributor pubkeys for a country (authors of kind 1111 posts). */
+  private async aggContributorPubkeys(iTag: string): Promise<string[]> {
+    const response = await this.client.search({
+      index: this.indexName,
+      body: {
+        query: {
+          bool: {
+            must: [
+              { term: { deleted: false } },
+              { term: { kind: 1111 } },
+              { terms: { "tags_map.i": [iTag] } },
+            ],
+          },
+        },
+        size: 0,
+        aggs: {
+          authors: {
+            terms: { field: "pubkey", size: 10_000 },
+          },
+        },
+      },
+    });
+
+    const buckets =
+      (
+        response.body.aggregations?.authors as unknown as {
+          buckets?: Array<{ key: string }>;
+        }
+      )?.buckets || [];
+
+    return buckets.map((b) => b.key);
   }
 
   // ---------------------------------------------------------------------------
