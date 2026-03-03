@@ -203,7 +203,12 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
         }
       }
     }
-    ctx._source.tags_map = tagsMap;`;
+    ctx._source.tags_map = tagsMap;
+    // NIP-25: For kind 7 reactions, only keep the last e tag value.
+    if (ctx._source.kind == 7 && tagsMap.containsKey('e') && tagsMap.get('e').size() > 1) {
+      def last = tagsMap.get('e').get(tagsMap.get('e').size() - 1);
+      tagsMap.put('e', [last]);
+    }`;
   }
 
   /**
@@ -230,7 +235,10 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
    *   skipped, but the tag name key is still created (with an empty array if
    *   no values pass).
    */
-  private buildTagsMap(tags: string[][]): Record<string, string[]> {
+  private buildTagsMap(
+    tags: string[][],
+    kind: number,
+  ): Record<string, string[]> {
     const tagsMap: Record<string, string[]> = {};
 
     for (const tag of tags) {
@@ -249,6 +257,12 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
           tagsMap[tagName].push(value);
         }
       }
+    }
+
+    // NIP-25: For kind 7 reactions, the target event is the *last* e tag.
+    // Only index the last value to avoid inflating stats for intermediate refs.
+    if (kind === 7 && tagsMap["e"]?.length > 1) {
+      tagsMap["e"] = [tagsMap["e"][tagsMap["e"].length - 1]];
     }
 
     return tagsMap;
@@ -358,7 +372,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
       video?: boolean;
     },
   ): NostrEventDocument {
-    const tagsMap = this.buildTagsMap(event.tags);
+    const tagsMap = this.buildTagsMap(event.tags, event.kind);
 
     // Extract protocol from proxy tag (NIP-48)
     // Format: ["proxy", <id>, <protocol>]
@@ -1377,8 +1391,18 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
       // Engagement-referencing events: mark target events dirty by event id,
       // and collect addressable event references via `a` tags.
       if (OpenSearchRelay.REFERENCING_KINDS.has(entry.event.kind)) {
+        // NIP-25: For kind 7 reactions, only the last e tag is the target.
+        if (entry.event.kind === 7) {
+          for (let i = entry.event.tags.length - 1; i >= 0; i--) {
+            if (entry.event.tags[i][0] === "e" && entry.event.tags[i][1]) {
+              referencedIds.add(entry.event.tags[i][1]);
+              break;
+            }
+          }
+        }
+
         for (const tag of entry.event.tags) {
-          if (tag[0] === "e" && tag[1]) {
+          if (tag[0] === "e" && tag[1] && entry.event.kind !== 7) {
             referencedIds.add(tag[1]);
           } else if (tag[0] === "a" && tag[1]) {
             referencedAddrs.add(tag[1]);
