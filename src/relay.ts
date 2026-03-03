@@ -7,6 +7,11 @@ import type { Filter, NostrEvent } from "nostr-tools";
 import { matchFilter, verifyEvent } from "nostr-tools";
 
 import type { AnalyzeResult } from "./analyze-pool.ts";
+import {
+  relayConnectionsGauge,
+  relayEventsCounter,
+  relayMessagesCounter,
+} from "./metrics.ts";
 
 /** Pre-computed analysis data that can be passed alongside an event to avoid redundant work. */
 export interface EventAnalysis {
@@ -546,6 +551,7 @@ export class Relay {
 
   // Handle EVENT message
   async handleEvent(ws: ServerWebSocket<WebSocketData>, event: NostrEvent) {
+    relayEventsCounter.inc({ kind: event.kind });
     try {
       const result = await this.handleEventMessage(event, ws);
       this.sendMessage(ws, [
@@ -791,6 +797,7 @@ export class Relay {
 
       switch (type) {
         case "EVENT":
+          relayMessagesCounter.inc({ verb: "EVENT" });
           if (params.length !== 1) {
             this.sendMessage(ws, [
               "NOTICE",
@@ -802,6 +809,7 @@ export class Relay {
           break;
 
         case "REQ": {
+          relayMessagesCounter.inc({ verb: "REQ" });
           if (params.length < 2) {
             this.sendMessage(ws, [
               "NOTICE",
@@ -815,6 +823,7 @@ export class Relay {
         }
 
         case "COUNT": {
+          relayMessagesCounter.inc({ verb: "COUNT" });
           if (params.length < 2) {
             this.sendMessage(ws, [
               "NOTICE",
@@ -832,6 +841,7 @@ export class Relay {
         }
 
         case "AUTH":
+          relayMessagesCounter.inc({ verb: "AUTH" });
           if (params.length !== 1) {
             this.sendMessage(ws, [
               "NOTICE",
@@ -843,6 +853,7 @@ export class Relay {
           break;
 
         case "CLOSE":
+          relayMessagesCounter.inc({ verb: "CLOSE" });
           if (params.length !== 1) {
             this.sendMessage(ws, [
               "NOTICE",
@@ -868,6 +879,7 @@ export class Relay {
   // Handle WebSocket open
   handleOpen(ws: ServerWebSocket<WebSocketData>) {
     this.connections.add(ws);
+    relayConnectionsGauge.set(this.connections.size);
     // Generate and send NIP-42 AUTH challenge
     const challenge = this.generateChallenge();
     ws.data.challenge = challenge;
@@ -879,6 +891,7 @@ export class Relay {
   handleCloseConnection(ws: ServerWebSocket<WebSocketData>) {
     console.log("WebSocket connection closed");
     this.connections.delete(ws);
+    relayConnectionsGauge.set(this.connections.size);
     this.removeFromIndex(ws);
     ws.data?.subscriptions.clear();
   }

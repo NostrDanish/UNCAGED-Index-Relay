@@ -12,6 +12,13 @@ import { Client as OpenSearchClient } from "@opensearch-project/opensearch";
 import { naddrEncode, noteEncode } from "nostr-tools/nip19";
 import type { Config } from "./config.ts";
 import { detectMedia } from "./media.ts";
+import {
+  opensearchBulkQueueGauge,
+  opensearchEventsCounter,
+  opensearchFlushDurationHistogram,
+  opensearchQueriesCounter,
+  opensearchQueryDurationHistogram,
+} from "./metrics.ts";
 
 /**
  * OpenSearch document structure for Nostr events
@@ -1152,7 +1159,16 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     }
 
     if (sortMode) {
-      return this.querySortedEvents(filter, sortMode, limit);
+      opensearchQueriesCounter.inc();
+      const sortEnd = opensearchQueryDurationHistogram.startTimer();
+      try {
+        const result = await this.querySortedEvents(filter, sortMode, limit);
+        sortEnd();
+        return result;
+      } catch (error) {
+        sortEnd();
+        throw error;
+      }
     }
 
     const query = this.buildQuery(filter);
@@ -1161,6 +1177,8 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     // Sort by created_at (newest first)
     const sort = [{ created_at: { order: "desc" as const } }];
 
+    opensearchQueriesCounter.inc();
+    const queryEnd = opensearchQueryDurationHistogram.startTimer();
     try {
       const searchBody: Record<string, unknown> = {
         query,
@@ -1180,12 +1198,14 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
         index: this.indexName,
         body: searchBody,
       });
+      queryEnd();
 
       const hits = response.body.hits.hits;
       return hits
         .filter((hit) => hit._source !== undefined)
         .map((hit) => this.documentToEvent(hit._source as NostrEventDocument));
     } catch (error) {
+      queryEnd();
       console.error("OpenSearch query failed:", error);
       throw error;
     }
@@ -1216,6 +1236,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
 
     return new Promise<void>((resolve, reject) => {
       this.bulkQueue.push({ event, doc, docId, resolve, reject });
+      opensearchBulkQueueGauge.set(this.bulkQueue.length);
 
       if (this.bulkQueue.length >= this.bulkMaxSize) {
         this.flush();
@@ -1237,6 +1258,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     if (this.bulkQueue.length === 0) return;
 
     const entries = this.bulkQueue.splice(0);
+    opensearchBulkQueueGauge.set(this.bulkQueue.length);
     const body: Array<Record<string, unknown>> = [];
 
     const replaceable_upsert_script = `
@@ -1289,8 +1311,10 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
       }
     }
 
+    const flushEnd = opensearchFlushDurationHistogram.startTimer();
     try {
       const response = await this.client.bulk({ body, refresh: false });
+      flushEnd();
 
       if (response.body.errors) {
         // Resolve/reject individual entries based on per-item results
@@ -1306,11 +1330,13 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
               new Error(`Bulk index failed: ${JSON.stringify(result.error)}`),
             );
           } else {
+            opensearchEventsCounter.inc({ kind: entries[i].event.kind });
             entries[i].resolve();
           }
         }
       } else {
         for (const entry of entries) {
+          opensearchEventsCounter.inc({ kind: entry.event.kind });
           entry.resolve();
         }
       }
@@ -1321,6 +1347,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
         console.error("Failed to mark referenced events dirty:", err);
       });
     } catch (error) {
+      flushEnd();
       // Entire bulk request failed — reject all entries
       const err = error instanceof Error ? error : new Error(String(error));
       for (const entry of entries) {

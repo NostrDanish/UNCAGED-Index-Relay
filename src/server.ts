@@ -5,6 +5,7 @@ import { serve } from "bun";
 
 import { AnalyzePool } from "./analyze-pool.ts";
 import { Config } from "./config.ts";
+import { register } from "./metrics.ts";
 import { Nip85 } from "./nip85.ts";
 import { OpenSearchRelay } from "./opensearch.ts";
 import { Relay, type WebSocketData } from "./relay.ts";
@@ -72,7 +73,7 @@ try {
 // Create Bun server with WebSocket support
 const server = serve<WebSocketData>({
   port: config.port,
-  fetch(req, server) {
+  async fetch(req, server) {
     const url = new URL(req.url);
 
     // Handle WebSocket upgrade
@@ -113,6 +114,14 @@ const server = serve<WebSocketData>({
           },
         },
       );
+    }
+
+    // Prometheus metrics endpoint
+    if (url.pathname === "/metrics" && req.method === "GET") {
+      const metrics = await register.metrics();
+      return new Response(metrics, {
+        headers: { "Content-Type": register.contentType },
+      });
     }
 
     return new Response("Not Found", { status: 404 });

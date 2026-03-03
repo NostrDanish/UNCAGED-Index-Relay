@@ -1,4 +1,5 @@
 import type { NostrEvent } from "nostr-tools";
+import { analyzePendingGauge } from "./metrics.ts";
 
 /** Result of analyzing a Nostr event off the main thread. */
 export interface AnalyzeResult {
@@ -39,6 +40,7 @@ export class AnalyzePool {
         const request = this.pending.get(id);
         if (request) {
           this.pending.delete(id);
+          analyzePendingGauge.set(this.pending.size);
           request.resolve({
             verified,
             ...(language && { language }),
@@ -64,6 +66,7 @@ export class AnalyzePool {
 
     return new Promise<AnalyzeResult>((resolve, reject) => {
       this.pending.set(`${event.id}:${event.sig}`, { resolve, reject });
+      analyzePendingGauge.set(this.pending.size);
       worker.postMessage(event);
     });
   }
