@@ -98,15 +98,17 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
   private bulkFlushMs: number;
 
   /**
-   * In-memory sets of event IDs and pubkeys that need their `scores_dirty`
-   * flag set to `true`. Accumulated by {@link markReferencedEventsDirty} and
-   * flushed at the start of {@link recomputeScores}.
+   * In-memory sets of event IDs and pubkeys that need score recomputation.
+   * Accumulated by {@link collectDirtyReferences} during bulk flushes and
+   * drained by {@link recomputeScores} which fetches and processes them
+   * directly — no intermediate `scores_dirty` flag is set in OpenSearch.
    *
-   * This deferred approach avoids a race condition where a referencing event
-   * (e.g. a repost) and the event it references arrive in the same bulk
-   * batch. Because the bulk flush uses `refresh: false`, the target event
-   * may not yet be searchable when an immediate `updateByQuery` runs,
-   * causing it to silently match 0 documents.
+   * This avoids a race condition where a referencing event (e.g. a repost)
+   * and the event it references arrive in the same bulk batch. Because the
+   * bulk flush uses `refresh: false`, the target event may not yet be
+   * searchable immediately after flushing.  By deferring to
+   * `recomputeScores` (which runs every 5 s), the documents are guaranteed
+   * to have been through multiple natural refresh cycles.
    */
   private pendingDirtyIds = new Set<string>();
   private pendingDirtyPubkeys = new Set<string>();
@@ -1451,74 +1453,19 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
   }
 
   /**
-   * Flush accumulated dirty event IDs and pubkeys by setting
-   * `scores_dirty: true` on the corresponding OpenSearch documents.
-   *
-   * Called at the start of {@link recomputeScores} to ensure all
-   * recently-indexed documents are searchable before querying.
+   * Drain the in-memory pending dirty sets and return their contents.
+   * Replaces each set with a fresh empty one so that concurrent
+   * `collectDirtyReferences()` calls from `flush()` are not affected.
    */
-  private async flushPendingDirty(): Promise<void> {
-    // Atomically drain both sets so concurrent flush() calls can keep
-    // adding to fresh sets without interference.
-    const dirtyIds = this.pendingDirtyIds;
+  private drainPendingDirty(): {
+    ids: Set<string>;
+    pubkeys: Set<string>;
+  } {
+    const ids = this.pendingDirtyIds;
     this.pendingDirtyIds = new Set();
-    const dirtyPubkeys = this.pendingDirtyPubkeys;
+    const pubkeys = this.pendingDirtyPubkeys;
     this.pendingDirtyPubkeys = new Set();
-
-    const promises: Promise<unknown>[] = [];
-
-    // Mark engagement-referenced events dirty by event id.
-    if (dirtyIds.size > 0) {
-      promises.push(
-        this.client.updateByQuery({
-          index: this.indexName,
-          body: {
-            query: {
-              bool: {
-                must: [
-                  { terms: { id: [...dirtyIds] } },
-                  { term: { scores_dirty: false } },
-                ],
-              },
-            },
-            script: {
-              source: "ctx._source.scores_dirty = true",
-              lang: "painless",
-            },
-          },
-          refresh: false,
-          conflicts: "proceed",
-        }),
-      );
-    }
-
-    // Mark kind 0 events dirty for followed pubkeys.
-    if (dirtyPubkeys.size > 0) {
-      promises.push(
-        this.client.updateByQuery({
-          index: this.indexName,
-          body: {
-            query: {
-              bool: {
-                must: [
-                  { term: { kind: 0 } },
-                  { terms: { pubkey: [...dirtyPubkeys] } },
-                  { term: { scores_dirty: false } },
-                ],
-              },
-            },
-            script: {
-              source: "ctx._source.scores_dirty = true",
-              lang: "painless",
-            },
-          },
-          refresh: false,
-          conflicts: "proceed",
-        }),
-      );
-    }
-
-    await Promise.all(promises);
+    return { ids, pubkeys };
   }
 
   /**
@@ -1909,47 +1856,109 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
    * Returns the computed scores so callers (e.g. NIP-85) can publish them.
    */
   async recomputeScores(batchSize = 5000): Promise<RecomputeResult> {
-    // Phase 0: Flush any accumulated dirty event IDs / pubkeys that were
-    // collected by collectDirtyReferences() during bulk flushes. By now
-    // those documents have been through multiple natural refresh cycles
-    // and are guaranteed to be searchable.
-    await this.flushPendingDirty();
+    // Phase 0: Drain in-memory pending dirty sets accumulated by
+    // collectDirtyReferences() during bulk flushes.
+    const pending = this.drainPendingDirty();
 
-    // Phase 1: Find dirty events (need id, kind, and pubkey).
-    const dirtyResponse = await this.client.search({
-      index: this.indexName,
-      body: {
-        query: {
-          bool: {
-            must: [{ term: { scores_dirty: true } }],
+    // Phase 1: Find all events that need score recomputation. This
+    // combines three sources in parallel:
+    //   (a) Events already marked scores_dirty in OpenSearch
+    //   (b) Events referenced by engagement events (pending dirty IDs)
+    //   (c) Kind 0 profiles for followed pubkeys (pending dirty pubkeys)
+    type DirtyHit = { id: string; kind: number; pubkey: string };
+
+    const searches: Promise<DirtyHit[]>[] = [];
+
+    // (a) Events with scores_dirty: true in OpenSearch.
+    searches.push(
+      this.client
+        .search({
+          index: this.indexName,
+          body: {
+            query: {
+              bool: {
+                must: [{ term: { scores_dirty: true } }],
+              },
+            },
+            _source: ["id", "kind", "pubkey"],
+            size: batchSize,
           },
-        },
-        _source: ["id", "kind", "pubkey"],
-        size: batchSize,
-      },
-    });
+        })
+        .then((r) => {
+          const hits = r.body.hits.hits as Array<{ _source?: DirtyHit }>;
+          return hits.filter((h) => h._source?.id).map((h) => h._source!);
+        }),
+    );
 
-    const dirtyHits = dirtyResponse.body.hits.hits as unknown as Array<{
-      _source?: { id: string; kind: number; pubkey: string };
-    }>;
-    if (dirtyHits.length === 0) {
-      return { count: 0, userScores: new Map(), eventScores: new Map() };
+    // (b) Events referenced by engagement events (by event ID).
+    if (pending.ids.size > 0) {
+      searches.push(
+        this.client
+          .search({
+            index: this.indexName,
+            body: {
+              query: { terms: { id: [...pending.ids] } },
+              _source: ["id", "kind", "pubkey"],
+              size: pending.ids.size,
+            },
+          })
+          .then((r) => {
+            const hits = r.body.hits.hits as Array<{ _source?: DirtyHit }>;
+            return hits.filter((h) => h._source?.id).map((h) => h._source!);
+          }),
+      );
     }
 
-    // Separate dirty events into kind 0 (profiles) and non-kind-0.
+    // (c) Kind 0 profiles for followed pubkeys from contact lists.
+    if (pending.pubkeys.size > 0) {
+      searches.push(
+        this.client
+          .search({
+            index: this.indexName,
+            body: {
+              query: {
+                bool: {
+                  must: [
+                    { term: { kind: 0 } },
+                    { terms: { pubkey: [...pending.pubkeys] } },
+                  ],
+                },
+              },
+              _source: ["id", "kind", "pubkey"],
+              size: pending.pubkeys.size,
+            },
+          })
+          .then((r) => {
+            const hits = r.body.hits.hits as Array<{ _source?: DirtyHit }>;
+            return hits.filter((h) => h._source?.id).map((h) => h._source!);
+          }),
+      );
+    }
+
+    const results = await Promise.all(searches);
+
+    // Merge and deduplicate all dirty hits.
+    const seen = new Set<string>();
     const dirtyKind0: Array<{ id: string; pubkey: string }> = [];
     const dirtyNonKind0Ids: string[] = [];
 
-    for (const h of dirtyHits) {
-      if (!h._source?.id) continue;
-      if (h._source.kind === 0) {
-        dirtyKind0.push({ id: h._source.id, pubkey: h._source.pubkey });
-      } else {
-        dirtyNonKind0Ids.push(h._source.id);
+    for (const hits of results) {
+      for (const hit of hits) {
+        if (seen.has(hit.id)) continue;
+        seen.add(hit.id);
+        if (hit.kind === 0) {
+          dirtyKind0.push({ id: hit.id, pubkey: hit.pubkey });
+        } else {
+          dirtyNonKind0Ids.push(hit.id);
+        }
       }
     }
 
     const allDirtyIds = [...dirtyKind0.map((d) => d.id), ...dirtyNonKind0Ids];
+
+    if (allDirtyIds.length === 0) {
+      return { count: 0, userScores: new Map(), eventScores: new Map() };
+    }
 
     // Build score maps — initialize all dirty IDs with zeros.
     const scores = new Map<
