@@ -98,6 +98,20 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
   private bulkFlushMs: number;
 
   /**
+   * In-memory sets of event IDs and pubkeys that need their `scores_dirty`
+   * flag set to `true`. Accumulated by {@link markReferencedEventsDirty} and
+   * flushed at the start of {@link recomputeScores}.
+   *
+   * This deferred approach avoids a race condition where a referencing event
+   * (e.g. a repost) and the event it references arrive in the same bulk
+   * batch. Because the bulk flush uses `refresh: false`, the target event
+   * may not yet be searchable when an immediate `updateByQuery` runs,
+   * causing it to silently match 0 documents.
+   */
+  private pendingDirtyIds = new Set<string>();
+  private pendingDirtyPubkeys = new Set<string>();
+
+  /**
    * Optional callback invoked when engagement events reference addressable
    * events via `a` tags. Called with the set of `a` tag values (event
    * addresses like `30023:pubkey:slug`) that need NIP-85 stats updates.
@@ -1355,11 +1369,11 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
         }
       }
 
-      // Mark referenced events as scores_dirty when referencing events are indexed.
-      // Referencing kinds: 1, 6, 7, 16, 1111 (engagement), 9735 (zaps).
-      this.markReferencedEventsDirty(entries).catch((err) => {
-        console.error("Failed to mark referenced events dirty:", err);
-      });
+      // Collect referenced event IDs for deferred dirty-marking.
+      // The actual scores_dirty flag is set by flushPendingDirty() at the
+      // start of recomputeScores(), avoiding a race where a referencing
+      // event and its target arrive in the same bulk batch.
+      this.collectDirtyReferences(entries);
     } catch (error) {
       flushEnd();
       // Entire bulk request failed — reject all entries
@@ -1374,28 +1388,28 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
   private static REFERENCING_KINDS = new Set([1, 6, 7, 16, 17, 1111, 9735]);
 
   /**
-   * After indexing referencing events, mark the target events they reference
-   * as needing score recomputation by setting `scores_dirty: true`.
+   * After indexing referencing events, accumulate the target event IDs and
+   * followed pubkeys that need score recomputation. The actual
+   * `scores_dirty` flag is set later by {@link flushPendingDirty}, which
+   * runs at the start of {@link recomputeScores} — by that time all
+   * recently-indexed documents will be searchable.
    *
-   * Also handles kind 3 (contact list) events: when a contact list is
-   * indexed, the pubkeys it follows (`p` tags) have their kind 0 events
-   * marked dirty so follower counts are recomputed.
+   * Also notifies the NIP-85 publisher about dirty addressable event and
+   * external identifier references via callbacks.
    */
-  private async markReferencedEventsDirty(entries: BulkEntry[]): Promise<void> {
-    const referencedIds = new Set<string>();
-    const followedPubkeys = new Set<string>();
+  private collectDirtyReferences(entries: BulkEntry[]): void {
     const referencedAddrs = new Set<string>();
     const referencedIdentifiers = new Set<string>();
 
     for (const entry of entries) {
-      // Engagement-referencing events: mark target events dirty by event id,
+      // Engagement-referencing events: accumulate target event IDs,
       // and collect addressable event references via `a` tags.
       if (OpenSearchRelay.REFERENCING_KINDS.has(entry.event.kind)) {
         // NIP-25: For kind 7 reactions, only the last e tag is the target.
         if (entry.event.kind === 7) {
           for (let i = entry.event.tags.length - 1; i >= 0; i--) {
             if (entry.event.tags[i][0] === "e" && entry.event.tags[i][1]) {
-              referencedIds.add(entry.event.tags[i][1]);
+              this.pendingDirtyIds.add(entry.event.tags[i][1]);
               break;
             }
           }
@@ -1403,7 +1417,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
 
         for (const tag of entry.event.tags) {
           if (tag[0] === "e" && tag[1] && entry.event.kind !== 7) {
-            referencedIds.add(tag[1]);
+            this.pendingDirtyIds.add(tag[1]);
           } else if (tag[0] === "a" && tag[1]) {
             referencedAddrs.add(tag[1]);
           } else if (tag[0] === "i" && tag[1]) {
@@ -1414,20 +1428,47 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
         }
       }
 
-      // Kind 3 (contact list): mark followed pubkeys' kind 0 events dirty.
+      // Kind 3 (contact list): accumulate followed pubkeys so their
+      // kind 0 events get marked dirty for follower count recomputation.
       if (entry.event.kind === 3) {
         for (const tag of entry.event.tags) {
           if (tag[0] === "p" && tag[1]) {
-            followedPubkeys.add(tag[1]);
+            this.pendingDirtyPubkeys.add(tag[1]);
           }
         }
       }
     }
 
+    // Notify NIP-85 publisher about dirty addressable event references.
+    if (referencedAddrs.size > 0) {
+      this.onDirtyAddrs?.(referencedAddrs);
+    }
+
+    // Notify NIP-85 publisher about dirty external identifier references.
+    if (referencedIdentifiers.size > 0) {
+      this.onDirtyIdentifiers?.(referencedIdentifiers);
+    }
+  }
+
+  /**
+   * Flush accumulated dirty event IDs and pubkeys by setting
+   * `scores_dirty: true` on the corresponding OpenSearch documents.
+   *
+   * Called at the start of {@link recomputeScores} to ensure all
+   * recently-indexed documents are searchable before querying.
+   */
+  private async flushPendingDirty(): Promise<void> {
+    // Atomically drain both sets so concurrent flush() calls can keep
+    // adding to fresh sets without interference.
+    const dirtyIds = this.pendingDirtyIds;
+    this.pendingDirtyIds = new Set();
+    const dirtyPubkeys = this.pendingDirtyPubkeys;
+    this.pendingDirtyPubkeys = new Set();
+
     const promises: Promise<unknown>[] = [];
 
     // Mark engagement-referenced events dirty by event id.
-    if (referencedIds.size > 0) {
+    if (dirtyIds.size > 0) {
       promises.push(
         this.client.updateByQuery({
           index: this.indexName,
@@ -1435,7 +1476,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
             query: {
               bool: {
                 must: [
-                  { terms: { id: [...referencedIds] } },
+                  { terms: { id: [...dirtyIds] } },
                   { term: { scores_dirty: false } },
                 ],
               },
@@ -1452,7 +1493,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     }
 
     // Mark kind 0 events dirty for followed pubkeys.
-    if (followedPubkeys.size > 0) {
+    if (dirtyPubkeys.size > 0) {
       promises.push(
         this.client.updateByQuery({
           index: this.indexName,
@@ -1461,7 +1502,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
               bool: {
                 must: [
                   { term: { kind: 0 } },
-                  { terms: { pubkey: [...followedPubkeys] } },
+                  { terms: { pubkey: [...dirtyPubkeys] } },
                   { term: { scores_dirty: false } },
                 ],
               },
@@ -1478,16 +1519,6 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     }
 
     await Promise.all(promises);
-
-    // Notify NIP-85 publisher about dirty addressable event references.
-    if (referencedAddrs.size > 0) {
-      this.onDirtyAddrs?.(referencedAddrs);
-    }
-
-    // Notify NIP-85 publisher about dirty external identifier references.
-    if (referencedIdentifiers.size > 0) {
-      this.onDirtyIdentifiers?.(referencedIdentifiers);
-    }
   }
 
   /**
@@ -1878,6 +1909,12 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
    * Returns the computed scores so callers (e.g. NIP-85) can publish them.
    */
   async recomputeScores(batchSize = 5000): Promise<RecomputeResult> {
+    // Phase 0: Flush any accumulated dirty event IDs / pubkeys that were
+    // collected by collectDirtyReferences() during bulk flushes. By now
+    // those documents have been through multiple natural refresh cycles
+    // and are guaranteed to be searchable.
+    await this.flushPendingDirty();
+
     // Phase 1: Find dirty events (need id, kind, and pubkey).
     const dirtyResponse = await this.client.search({
       index: this.indexName,
