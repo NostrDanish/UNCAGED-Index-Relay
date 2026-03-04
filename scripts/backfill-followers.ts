@@ -182,7 +182,6 @@ async function main() {
                 def count = params.counts.get(ctx._source.pubkey);
                 if (count != null) {
                   ctx._source.top_score = count;
-                  ctx._source.scores_dirty = false;
                 }
               `,
               lang: "painless",

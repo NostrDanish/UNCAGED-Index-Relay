@@ -51,8 +51,6 @@ interface NostrEventDocument extends NostrEvent {
   zap_amount_msats: number;
   /** Count of kind 9735 zap receipts referencing this event. */
   zap_cnt: number;
-  /** Whether engagement scores need recomputation. */
-  scores_dirty: boolean;
 }
 
 /** Scores computed for a non-kind-0 event by {@link OpenSearchRelay.recomputeScores}. */
@@ -101,12 +99,12 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
    * In-memory sets of event IDs and pubkeys that need score recomputation.
    * Accumulated by {@link collectDirtyReferences} during bulk flushes and
    * drained by {@link recomputeScores} which fetches and processes them
-   * directly — no intermediate `scores_dirty` flag is set in OpenSearch.
+   * directly from OpenSearch.
    *
    * This avoids a race condition where a referencing event (e.g. a repost)
    * and the event it references arrive in the same bulk batch. Because the
    * bulk flush uses `refresh: false`, the target event may not yet be
-   * searchable immediately after flushing.  By deferring to
+   * searchable immediately after flushing. By deferring to
    * `recomputeScores` (which runs every 5 s), the documents are guaranteed
    * to have been through multiple natural refresh cycles.
    */
@@ -436,7 +434,6 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
       repost_count: 0,
       zap_amount_msats: 0,
       zap_cnt: 0,
-      scores_dirty: false,
     };
   }
 
@@ -1371,10 +1368,9 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
         }
       }
 
-      // Collect referenced event IDs for deferred dirty-marking.
-      // The actual scores_dirty flag is set by flushPendingDirty() at the
-      // start of recomputeScores(), avoiding a race where a referencing
-      // event and its target arrive in the same bulk batch.
+      // Accumulate referenced event IDs for deferred score recomputation
+      // by recomputeScores(), avoiding a race where a referencing event
+      // and its target arrive in the same bulk batch.
       this.collectDirtyReferences(entries);
     } catch (error) {
       flushEnd();
@@ -1391,10 +1387,9 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
 
   /**
    * After indexing referencing events, accumulate the target event IDs and
-   * followed pubkeys that need score recomputation. The actual
-   * `scores_dirty` flag is set later by {@link flushPendingDirty}, which
-   * runs at the start of {@link recomputeScores} — by that time all
-   * recently-indexed documents will be searchable.
+   * followed pubkeys into in-memory sets for deferred score recomputation.
+   * {@link recomputeScores} drains these sets and fetches the events
+   * directly — by that time all recently-indexed documents are searchable.
    *
    * Also notifies the NIP-85 publisher about dirty addressable event and
    * external identifier references via callbacks.
@@ -1753,7 +1748,6 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     repost_count: { type: "integer" },
     zap_amount_msats: { type: "long" },
     zap_cnt: { type: "integer" },
-    scores_dirty: { type: "boolean" },
   };
 
   /**
@@ -1841,12 +1835,13 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
   }
 
   /**
-   * Recompute engagement scores for events marked as dirty.
+   * Recompute engagement scores for dirty events.
    *
-   * Finds events where `scores_dirty: true`, aggregates their referencing
+   * Drains the in-memory pending dirty sets (event IDs and followed
+   * pubkeys accumulated by {@link collectDirtyReferences}), fetches the
+   * corresponding documents from OpenSearch, aggregates their referencing
    * events to compute `top_score`, `reply_count`, `reaction_count`,
-   * `repost_count`, and `zap_amount_msats`, then writes the scores back
-   * and clears the dirty flag.
+   * `repost_count`, and `zap_amount_msats`, then writes the scores back.
    *
    * For kind 0 (profile) events, `top_score` is set to the follower count:
    * the number of unique kind 3 (contact list) events whose `p` tags
@@ -1856,41 +1851,19 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
    * Returns the computed scores so callers (e.g. NIP-85) can publish them.
    */
   async recomputeScores(batchSize = 5000): Promise<RecomputeResult> {
-    // Phase 0: Drain in-memory pending dirty sets accumulated by
-    // collectDirtyReferences() during bulk flushes.
+    // Phase 1: Drain in-memory pending dirty sets and fetch the
+    // corresponding events from OpenSearch. By now these documents have
+    // been through multiple natural refresh cycles and are searchable.
     const pending = this.drainPendingDirty();
 
-    // Phase 1: Find all events that need score recomputation. This
-    // combines three sources in parallel:
-    //   (a) Events already marked scores_dirty in OpenSearch
-    //   (b) Events referenced by engagement events (pending dirty IDs)
-    //   (c) Kind 0 profiles for followed pubkeys (pending dirty pubkeys)
-    type DirtyHit = { id: string; kind: number; pubkey: string };
+    if (pending.ids.size === 0 && pending.pubkeys.size === 0) {
+      return { count: 0, userScores: new Map(), eventScores: new Map() };
+    }
 
+    type DirtyHit = { id: string; kind: number; pubkey: string };
     const searches: Promise<DirtyHit[]>[] = [];
 
-    // (a) Events with scores_dirty: true in OpenSearch.
-    searches.push(
-      this.client
-        .search({
-          index: this.indexName,
-          body: {
-            query: {
-              bool: {
-                must: [{ term: { scores_dirty: true } }],
-              },
-            },
-            _source: ["id", "kind", "pubkey"],
-            size: batchSize,
-          },
-        })
-        .then((r) => {
-          const hits = r.body.hits.hits as Array<{ _source?: DirtyHit }>;
-          return hits.filter((h) => h._source?.id).map((h) => h._source!);
-        }),
-    );
-
-    // (b) Events referenced by engagement events (by event ID).
+    // (a) Events referenced by engagement events (by event ID).
     if (pending.ids.size > 0) {
       searches.push(
         this.client
@@ -1909,7 +1882,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
       );
     }
 
-    // (c) Kind 0 profiles for followed pubkeys from contact lists.
+    // (b) Kind 0 profiles for followed pubkeys from contact lists.
     if (pending.pubkeys.size > 0) {
       searches.push(
         this.client
@@ -2178,7 +2151,6 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
           repost_count: s.repost_count,
           zap_amount_msats: s.zap_amount_msats,
           zap_cnt: s.zap_cnt,
-          scores_dirty: false,
         },
       });
     }
@@ -2204,8 +2176,8 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
           }
         }
 
-        // Batch-clear dirty flag for failed IDs using a single Painless
-        // script that looks up each event's scores from a params map.
+        // Batch-update failed IDs using a single Painless script that
+        // looks up each event's scores from a params map.
         if (failedIds.length > 0) {
           const scoreParams: Record<
             string,
@@ -2237,7 +2209,6 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
                     ctx._source.repost_count = s.repost_count;
                     ctx._source.zap_amount_msats = s.zap_amount_msats;
                     ctx._source.zap_cnt = s.zap_cnt;
-                    ctx._source.scores_dirty = false;
                   }
                 `,
                 lang: "painless",

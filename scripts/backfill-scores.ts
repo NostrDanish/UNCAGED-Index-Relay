@@ -220,7 +220,6 @@ async function main() {
           reaction_count: s.reaction_count,
           repost_count: s.repost_count,
           zap_amount_msats: s.zap_amount_msats,
-          scores_dirty: false,
         },
       });
     }
@@ -262,7 +261,6 @@ async function main() {
                   ctx._source.reaction_count = s.reaction_count;
                   ctx._source.repost_count = s.repost_count;
                   ctx._source.zap_amount_msats = s.zap_amount_msats;
-                  ctx._source.scores_dirty = false;
                 }
               `,
               lang: "painless",
@@ -368,7 +366,7 @@ async function main() {
         update: { _index: indexName, _id: noteEncode(id) },
       });
       body.push({
-        doc: { zap_amount_msats: msats, scores_dirty: false },
+        doc: { zap_amount_msats: msats },
       });
     }
 
@@ -402,7 +400,6 @@ async function main() {
                   def msats = params.zaps.get(ctx._source.id);
                   if (msats != null) {
                     ctx._source.zap_amount_msats = msats;
-                    ctx._source.scores_dirty = false;
                   }
                 `,
                 lang: "painless",
@@ -433,34 +430,6 @@ async function main() {
     }
 
     await sleep(200);
-  }
-
-  // Phase 3: Clear dirty flag on remaining events that were never referenced.
-  console.log("\nClearing dirty flag on unreferenced events...");
-
-  const clearResponse = await client.updateByQuery({
-    index: indexName,
-    body: {
-      query: { term: { scores_dirty: true } },
-      script: {
-        source: "ctx._source.scores_dirty = false",
-        lang: "painless",
-      },
-    },
-    refresh: false,
-    conflicts: "proceed",
-    wait_for_completion: false,
-  });
-
-  const clearBody = clearResponse.body as unknown as {
-    task?: string;
-    updated?: number;
-  };
-
-  if (clearBody.task) {
-    console.log(`Cleanup task started: ${clearBody.task}`);
-  } else {
-    console.log(`Cleared ${clearBody.updated ?? 0} remaining dirty events`);
   }
 
   console.log(`\nBackfill complete:`);
