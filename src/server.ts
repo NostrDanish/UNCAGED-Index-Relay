@@ -43,6 +43,7 @@ const relay = new Relay(opensearchRelay, {
   relayInfo: {
     pubkey: config.relayPubkey,
     contact: config.relayContact,
+    self: await config.nostrSigner.getPublicKey(),
   },
 });
 
