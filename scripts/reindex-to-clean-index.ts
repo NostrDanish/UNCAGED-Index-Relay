@@ -17,8 +17,8 @@
  * Steps:
  *   1. Resolve alias to find the concrete source index name
  *   2. Create a new index with clean mappings
- *   3. Reindex from old to new (only rebuilds tags_map)
- *   4. Swap the alias from old to new
+ *   3. Swap the alias immediately (new events go to the new index)
+ *   4. Reindex from old to new (backfills historical data)
  *
  * Usage:
  *   bun run scripts/reindex-to-clean-index.ts
@@ -131,6 +131,23 @@ async function main() {
       console.log(`Created index ${newIndex}\n`);
     }
 
+    // Step 3: Swap alias immediately so new events go to the clean index
+    console.log(`Swapping alias '${alias}' from ${oldIndex} to ${newIndex}...`);
+
+    const actions: Array<Record<string, unknown>> = [
+      { add: { index: newIndex, alias } },
+    ];
+
+    // Only remove the old alias if it was actually an alias (not a bare index)
+    if (oldIndex !== alias) {
+      actions.unshift({ remove: { index: oldIndex, alias } });
+    }
+
+    await client.indices.updateAliases({
+      body: { actions },
+    });
+    console.log("Alias swapped — new events now go to the clean index.\n");
+
     // Get source doc count
     const srcCount = await client.count({ index: oldIndex });
     const totalDocs = (srcCount.body as { count: number }).count;
@@ -138,7 +155,7 @@ async function main() {
       `Source index has ${totalDocs.toLocaleString()} documents to reindex.\n`,
     );
 
-    // Step 3: Reindex with Painless script that rebuilds tags_map,
+    // Step 4: Reindex with Painless script that rebuilds tags_map,
     // renames legacy fields, and populates search_text.
     const painlessScript = OpenSearchRelay.buildReindexPainlessScript();
 
@@ -232,7 +249,7 @@ async function main() {
       }
     }
 
-    // Step 4: Restore normal index settings
+    // Step 5: Restore normal index settings
     console.log("\nRestoring index settings...");
     await client.indices.putSettings({
       index: newIndex,
@@ -242,7 +259,7 @@ async function main() {
       },
     });
 
-    // Verify doc counts before swapping
+    // Verify doc counts
     const newCount = await client.count({ index: newIndex });
     const newDocs = (newCount.body as { count: number }).count;
     const oldCount2 = await client.count({ index: oldIndex });
@@ -250,25 +267,6 @@ async function main() {
     console.log(
       `\nDoc counts — Old: ${oldDocs.toLocaleString()}, New: ${newDocs.toLocaleString()}`,
     );
-
-    // Step 5: Swap alias atomically
-    console.log(
-      `\nSwapping alias '${alias}' from ${oldIndex} to ${newIndex}...`,
-    );
-
-    const actions: Array<Record<string, unknown>> = [
-      { add: { index: newIndex, alias } },
-    ];
-
-    // Only remove the old alias if it was actually an alias (not a bare index)
-    if (oldIndex !== alias) {
-      actions.unshift({ remove: { index: oldIndex, alias } });
-    }
-
-    await client.indices.updateAliases({
-      body: { actions },
-    });
-    console.log("Alias swapped.\n");
 
     // Check new mapping field count
     const mappingResp = await client.indices.getMapping({ index: newIndex });
