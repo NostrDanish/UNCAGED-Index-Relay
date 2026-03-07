@@ -143,13 +143,13 @@ describe("AnalyzePool", () => {
     assert.equal(result.sentiment, "positive");
   });
 
-  it("should not detect language for non-text kinds", async () => {
+  it("should not detect language when search text is too short", async () => {
     console.log = () => {};
     pool = new AnalyzePool(1);
-    // Kind 3 (contacts) is not a text kind
+    // Kind 0 with no searchable JSON fields produces empty search text
     const event = createValidEvent(
-      "This has enough text but is not a text kind for language detection",
-      3,
+      JSON.stringify({ picture: "https://example.com/pic.jpg" }),
+      0,
     );
 
     const result = await pool.analyze(event);

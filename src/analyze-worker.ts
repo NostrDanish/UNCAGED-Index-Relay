@@ -1,33 +1,24 @@
 /// Worker thread that performs Nostr event analysis off the main thread.
-/// Handles signature verification (via nostr-wasm), language detection (tinyld),
-/// and sentiment analysis. Short-circuits if verification fails.
+/// Handles signature verification (via nostr-wasm), search text extraction,
+/// language detection (tinyld), sentiment analysis, and media detection.
+/// Short-circuits if verification fails.
 
 declare var self: Worker;
 
-import { NSchema as n } from "@nostrify/nostrify";
 import type { NostrEvent } from "nostr-tools";
 import { initNostrWasm } from "nostr-wasm";
 import Sentiment from "sentiment";
 import { detect as detectLanguage } from "tinyld";
 
 import type { AnalyzeResult } from "./analyze-pool.ts";
+import { detectMedia } from "./media.ts";
+import { buildSearchText } from "./search-text.ts";
 
 const nw = await initNostrWasm();
 const sentimentAnalyzer = new Sentiment();
 
-/** Minimum content length (in characters) required to attempt language detection. */
+/** Minimum text length (in characters) required to attempt language detection. */
 const MIN_LANGUAGE_DETECT_LENGTH = 10;
-
-/** Event kinds with plaintext content suitable for language/sentiment detection. */
-const TEXT_KINDS = new Set([
-  1, // Short Text Note (NIP-10)
-  11, // Thread (NIP-7D)
-  30023, // Long-form Content (NIP-23)
-  1111, // Comment (NIP-22)
-  9, // Chat Message (NIP-C7)
-  42, // Channel Message (NIP-28)
-  1311, // Live Chat Message (NIP-53)
-]);
 
 /** Minimum absolute `comparative` score to classify as positive or negative. */
 const SENTIMENT_THRESHOLD = 0.1;
@@ -35,54 +26,36 @@ const SENTIMENT_THRESHOLD = 0.1;
 /** NIP-30 custom emoji shortcodes like `:soapbox:`. */
 const CUSTOM_EMOJI_RE = /^:[\w-]+:$/;
 
-import { detectMedia } from "./media.ts";
-
 /**
- * Detect the language of a Nostr event's content using `tinyld`.
- *
- * Only runs for kinds with meaningful text content. Kind 0 (metadata)
- * is handled specially by parsing the JSON and joining the `name`,
- * `display_name`, and `about` fields.
+ * Detect the language of a Nostr event using its pre-computed search text.
  *
  * Returns an ISO 639-1 two-letter code, or `undefined` when the language
  * cannot be determined.
  */
-function detectEventLanguage(event: NostrEvent): string | undefined {
-  let text: string;
-
-  if (event.kind === 0) {
-    // Parse JSON metadata and join relevant text fields.
-    const result = n.json().pipe(n.metadata()).safeParse(event.content);
-    if (!result.success) return undefined;
-    text = [result.data.name, result.data.display_name, result.data.about]
-      .filter(Boolean)
-      .join(" ");
-  } else if (TEXT_KINDS.has(event.kind)) {
-    text = event.content;
-  } else {
+function detectEventLanguage(searchText: string): string | undefined {
+  if (searchText.length < MIN_LANGUAGE_DETECT_LENGTH) {
     return undefined;
   }
 
-  if (text.length < MIN_LANGUAGE_DETECT_LENGTH) {
-    return undefined;
-  }
-
-  const detected = detectLanguage(text);
+  const detected = detectLanguage(searchText);
   return detected || undefined; // tinyld returns "" when unsure
 }
 
 /**
- * Detect the sentiment of a Nostr event's content.
+ * Detect the sentiment of a Nostr event.
  *
- * Runs for kinds with meaningful text content (same as language detection,
- * but excluding kind 0). Kind 7 (reactions) is handled specially per NIP-25:
- * `"+"` or `""` maps to `"positive"`, `"-"` maps to `"negative"`, and emoji
- * reactions are passed through the sentiment analyzer.
+ * Uses the pre-computed search text for most kinds. Kind 7 (reactions)
+ * is handled specially per NIP-25: `"+"` or `""` maps to `"positive"`,
+ * `"-"` maps to `"negative"`, and emoji reactions are passed through
+ * the sentiment analyzer.
  *
  * Returns `"positive"`, `"negative"`, `"neutral"`, or `undefined` when
  * sentiment cannot be determined.
  */
-function detectEventSentiment(event: NostrEvent): string | undefined {
+function detectEventSentiment(
+  event: NostrEvent,
+  searchText: string,
+): string | undefined {
   // Kind 7 reactions get special handling (NIP-25).
   if (event.kind === 7) {
     const content = event.content;
@@ -99,14 +72,12 @@ function detectEventSentiment(event: NostrEvent): string | undefined {
     return "neutral";
   }
 
-  // For text kinds, analyze full content.
-  if (!TEXT_KINDS.has(event.kind)) return undefined;
-
-  if (event.content.length < MIN_LANGUAGE_DETECT_LENGTH) {
+  // For all other kinds, analyze the search text.
+  if (searchText.length < MIN_LANGUAGE_DETECT_LENGTH) {
     return undefined;
   }
 
-  const result = sentimentAnalyzer.analyze(event.content);
+  const result = sentimentAnalyzer.analyze(searchText);
   if (result.comparative > SENTIMENT_THRESHOLD) return "positive";
   if (result.comparative < -SENTIMENT_THRESHOLD) return "negative";
   return "neutral";
@@ -131,14 +102,18 @@ self.onmessage = (event: MessageEvent<NostrEvent>) => {
     return;
   }
 
-  // Step 2: Detect language, sentiment, and media (only for verified events)
-  const language = detectEventLanguage(nostrEvent);
-  const sentiment = detectEventSentiment(nostrEvent);
+  // Step 2: Build search text (used by language/sentiment detection below)
+  const searchText = buildSearchText(nostrEvent);
+
+  // Step 3: Detect language, sentiment, and media (only for verified events)
+  const language = detectEventLanguage(searchText);
+  const sentiment = detectEventSentiment(nostrEvent, searchText);
   const { media, video } = detectMedia(nostrEvent);
 
   postMessage({
     id,
     verified,
+    ...(searchText && { search_text: searchText }),
     ...(language && { language }),
     ...(sentiment && { sentiment }),
     ...(media !== undefined && { media }),

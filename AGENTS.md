@@ -25,12 +25,15 @@
 │   ├── analyze-pool.test.ts # Analysis pool tests
 │   ├── analyze-worker.ts   # Worker thread for event analysis
 │   ├── media.ts            # Media/video detection from imeta tags and URLs
+│   ├── search-text.ts      # Shared buildSearchText for full-text search indexing
+│   ├── search-text.test.ts # Search text tests
 │   ├── trends.ts           # Trending tag computation and publishing
 │   └── trends.test.ts      # Trends tests
 ├── scripts/
 │   ├── backfill-language.ts       # Backfill language field for existing events
 │   ├── backfill-media.ts          # Backfill media/video fields for existing events
 │   ├── backfill-protocol.ts       # Backfill protocol field for NIP-48 events
+│   ├── backfill-search.ts         # Backfill search field for existing events
 │   ├── backfill-sentiment.ts      # Backfill sentiment field for existing events
 │   ├── backfill-zap-amounts.ts    # Backfill zap amount fields for kind 9735
 │   ├── delete-ephemeral-events.ts # Delete ephemeral events from storage

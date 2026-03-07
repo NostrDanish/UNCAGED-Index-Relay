@@ -19,12 +19,15 @@ import {
   opensearchQueriesCounter,
   opensearchQueryDurationHistogram,
 } from "./metrics.ts";
+import { buildSearchText } from "./search-text.ts";
 
 /**
  * OpenSearch document structure for Nostr events
  */
 interface NostrEventDocument extends NostrEvent {
   tags_map: Record<string, string[]>;
+  /** Indexed full-text search field, built per-kind from event content. */
+  search_text: string;
   deleted?: boolean;
   protocol?: string;
   amount_msats?: number;
@@ -380,6 +383,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
   private eventToDocument(
     event: NostrEvent,
     analysis?: {
+      search_text?: string;
       language?: string;
       sentiment?: string;
       media?: boolean;
@@ -420,6 +424,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     return {
       ...event,
       tags_map: tagsMap,
+      search_text: analysis?.search_text ?? buildSearchText(event),
       deleted: false,
       ...(protocol && { protocol }),
       ...(amount_msats !== undefined && { amount_msats }),
@@ -1063,7 +1068,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
           must.push({
             multi_match: {
               query: positiveTerms,
-              fields: ["content", "content.url"],
+              fields: ["search_text", "search_text.url"],
               operator: "and",
               type: "best_fields",
             },
@@ -1084,7 +1089,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
           mustNot.push({
             multi_match: {
               query: term,
-              fields: ["content", "content.url"],
+              fields: ["search_text", "search_text.url"],
             },
           });
         }
@@ -1251,6 +1256,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     opts?: {
       signal?: AbortSignal;
       analysis?: {
+        search_text?: string;
         language?: string;
         sentiment?: string;
         media?: boolean;
@@ -1708,6 +1714,10 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
       dynamic: "true",
     },
     content: {
+      type: "object",
+      enabled: false,
+    },
+    search_text: {
       type: "text",
       analyzer: "standard",
       fields: {

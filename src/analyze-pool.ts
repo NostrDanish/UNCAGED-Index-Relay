@@ -4,6 +4,7 @@ import { analyzePendingGauge } from "./metrics.ts";
 /** Result of analyzing a Nostr event off the main thread. */
 export interface AnalyzeResult {
   verified: boolean;
+  search_text?: string;
   language?: string;
   sentiment?: string;
   media?: boolean;
@@ -36,13 +37,15 @@ export class AnalyzePool {
       worker.onmessage = (
         event: MessageEvent<{ id: string } & AnalyzeResult>,
       ) => {
-        const { id, verified, language, sentiment, media, video } = event.data;
+        const { id, verified, search_text, language, sentiment, media, video } =
+          event.data;
         const request = this.pending.get(id);
         if (request) {
           this.pending.delete(id);
           analyzePendingGauge.set(this.pending.size);
           request.resolve({
             verified,
+            ...(search_text && { search_text }),
             ...(language && { language }),
             ...(sentiment && { sentiment }),
             ...(media !== undefined && { media }),

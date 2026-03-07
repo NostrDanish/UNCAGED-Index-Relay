@@ -4,50 +4,28 @@
  *
  * Unlike backfill-protocol.ts (which uses a Painless script), this script
  * must run client-side because language detection uses the `tinyld` JS
- * library.  It scrolls through all documents missing a `language` field
- * whose kind is eligible for detection, runs tinyld, and bulk-updates
- * the results.
+ * library.  It scrolls through all documents missing a `language` field,
+ * builds the search text using the shared `buildSearchText` function,
+ * runs tinyld on it, and bulk-updates the results.
  *
  * Usage:
  *   bun run scripts/backfill-language.ts
  */
 
 import process from "node:process";
-import { NSchema as n } from "@nostrify/nostrify";
 import type { ClientOptions } from "@opensearch-project/opensearch";
 import { Client as OpenSearchClient } from "@opensearch-project/opensearch";
+import type { NostrEvent } from "nostr-tools";
 import { detect as detectLanguage } from "tinyld";
 import { Config } from "../src/config.ts";
+import { buildSearchText } from "../src/search-text.ts";
 
-/** Minimum content length (in characters) required to attempt language detection. */
+/** Minimum text length (in characters) required to attempt language detection. */
 const MIN_LANGUAGE_DETECT_LENGTH = 10;
 
-/** Event kinds with plaintext content suitable for language detection. */
-const TEXT_KINDS = new Set([
-  1, // Short Text Note (NIP-10)
-  11, // Thread (NIP-7D)
-  30023, // Long-form Content (NIP-23)
-  1111, // Comment (NIP-22)
-  9, // Chat Message (NIP-C7)
-  42, // Channel Message (NIP-28)
-  1311, // Live Chat Message (NIP-53)
-]);
-
-/** Detect language from a document's kind and content. */
-function detectDocLanguage(kind: number, content: string): string | undefined {
-  let text: string;
-
-  if (kind === 0) {
-    const result = n.json().pipe(n.metadata()).safeParse(content);
-    if (!result.success) return undefined;
-    text = [result.data.name, result.data.display_name, result.data.about]
-      .filter(Boolean)
-      .join(" ");
-  } else if (TEXT_KINDS.has(kind)) {
-    text = content;
-  } else {
-    return undefined;
-  }
+/** Detect language from a document using its search text. */
+function detectDocLanguage(event: NostrEvent): string | undefined {
+  const text = buildSearchText(event);
 
   if (text.length < MIN_LANGUAGE_DETECT_LENGTH) {
     return undefined;
@@ -99,16 +77,12 @@ async function main() {
       console.warn("Warning: could not update mapping (may already exist):", e);
     }
 
-    // Only query kinds that are eligible for language detection.
-    const eligibleKinds = [0, ...TEXT_KINDS];
-
     // Count documents missing the language field
     const countResponse = await client.count({
       index: config.opensearchIndex,
       body: {
         query: {
           bool: {
-            must: [{ terms: { kind: eligibleKinds } }],
             must_not: [{ exists: { field: "language" } }],
           },
         },
@@ -116,7 +90,7 @@ async function main() {
     });
     const total = (countResponse.body as { count: number }).count;
     console.log(
-      `Found ${total.toLocaleString()} eligible documents without a language field.\n`,
+      `Found ${total.toLocaleString()} documents without a language field.\n`,
     );
 
     if (total === 0) {
@@ -135,10 +109,17 @@ async function main() {
       scroll: SCROLL_TTL,
       body: {
         size: SCROLL_SIZE,
-        _source: ["kind", "content"],
+        _source: [
+          "id",
+          "pubkey",
+          "created_at",
+          "kind",
+          "tags",
+          "content",
+          "sig",
+        ],
         query: {
           bool: {
-            must: [{ terms: { kind: eligibleKinds } }],
             must_not: [{ exists: { field: "language" } }],
           },
         },
@@ -150,7 +131,7 @@ async function main() {
       initialResponse.body.hits as unknown as {
         hits: Array<{
           _id: string;
-          _source: { kind: number; content: string };
+          _source: NostrEvent;
         }>;
       }
     ).hits;
@@ -159,8 +140,7 @@ async function main() {
       const bulkBody: Array<Record<string, unknown>> = [];
 
       for (const hit of hits) {
-        const { kind, content } = hit._source;
-        const language = detectDocLanguage(kind, content);
+        const language = detectDocLanguage(hit._source);
 
         if (language) {
           bulkBody.push({
@@ -211,7 +191,7 @@ async function main() {
         scrollResponse.body.hits as unknown as {
           hits: Array<{
             _id: string;
-            _source: { kind: number; content: string };
+            _source: NostrEvent;
           }>;
         }
       ).hits;
