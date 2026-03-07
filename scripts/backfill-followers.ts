@@ -3,9 +3,9 @@
  *
  * Aggregates kind 3 (contact list) events by their `tags_map.p` values
  * to count how many unique pubkeys follow each pubkey, then writes the
- * count into the `top_score` field on the corresponding kind 0 event.
+ * count into the `followers` field on the corresponding kind 0 event.
  *
- * For kind 0 events, `top_score` represents follower count (the number
+ * For kind 0 events, `followers` represents follower count (the number
  * of unique kind 3 events whose `p` tags include the profile's pubkey).
  *
  * Usage:
@@ -181,7 +181,7 @@ async function main() {
               source: `
                 def count = params.counts.get(ctx._source.pubkey);
                 if (count != null) {
-                  ctx._source.top_score = count;
+                  ctx._source.followers = count;
                 }
               `,
               lang: "painless",

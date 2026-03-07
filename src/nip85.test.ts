@@ -310,7 +310,7 @@ describe("Nip85", () => {
         signer,
       });
 
-      const userScores = new Map([[pubkey, { top_score: 42 }]]);
+      const userScores = new Map([[pubkey, { followers: 42 }]]);
       await nip85.publishUserStats(userScores);
 
       assert.equal(relay.events.length, 1);
@@ -344,7 +344,7 @@ describe("Nip85", () => {
         signer,
       });
 
-      const userScores = new Map([[pubkey, { top_score: 0 }]]);
+      const userScores = new Map([[pubkey, { followers: 0 }]]);
       await nip85.publishUserStats(userScores);
 
       assert.equal(relay.events.length, 0);
@@ -383,9 +383,9 @@ describe("Nip85", () => {
       const eventId =
         "dddd000000000000000000000000000000000000000000000000000000000000";
       const scores: EventScores = {
-        reply_count: 10,
-        reaction_count: 20,
-        repost_count: 3,
+        comment_cnt: 10,
+        reaction_cnt: 20,
+        repost_cnt: 3,
         zap_cnt: 5,
         zap_amount_msats: 100_000,
       };
@@ -436,9 +436,9 @@ describe("Nip85", () => {
       const eventId =
         "eeee000000000000000000000000000000000000000000000000000000000000";
       const scores: EventScores = {
-        reply_count: 0,
-        reaction_count: 0,
-        repost_count: 0,
+        comment_cnt: 0,
+        reaction_cnt: 0,
+        repost_cnt: 0,
         zap_cnt: 1,
         zap_amount_msats: 21_500, // 21.5 sats, floors to 21
       };
@@ -468,9 +468,9 @@ describe("Nip85", () => {
       const eventId =
         "ffff000000000000000000000000000000000000000000000000000000000000";
       const scores: EventScores = {
-        reply_count: 0,
-        reaction_count: 0,
-        repost_count: 0,
+        comment_cnt: 0,
+        reaction_cnt: 0,
+        repost_cnt: 0,
         zap_cnt: 0,
         zap_amount_msats: 0,
       };
@@ -494,9 +494,9 @@ describe("Nip85", () => {
       const eventId =
         "1111000000000000000000000000000000000000000000000000000000000000";
       const scores: EventScores = {
-        reply_count: 5,
-        reaction_count: 0,
-        repost_count: 0,
+        comment_cnt: 5,
+        reaction_cnt: 0,
+        repost_cnt: 0,
         zap_cnt: 0,
         zap_amount_msats: 0,
       };

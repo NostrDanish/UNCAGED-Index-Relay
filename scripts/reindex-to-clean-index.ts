@@ -5,8 +5,11 @@
  * This is the nuclear option for cleaning up index mapping bloat (e.g.
  * too many tags_map.* fields). All document data (including enrichment
  * fields like language, sentiment, media, scores, etc.) is carried over
- * from the source index. The only transformation applied is rebuilding
- * tags_map with the current whitelist rules.
+ * from the source index. Transformations applied:
+ * - Rebuild tags_map with the current whitelist rules
+ * - Rename legacy fields (top_score → followers/engagers, reply_count →
+ *   comment_cnt, reaction_count → reaction_cnt, repost_count → repost_cnt)
+ * - Build search_text from event content and tags
  *
  * Index settings and mappings are imported from OpenSearchRelay so this
  * script never drifts out of sync with the relay.
@@ -135,10 +138,9 @@ async function main() {
       `Source index has ${totalDocs.toLocaleString()} documents to reindex.\n`,
     );
 
-    // Step 3: Reindex with Painless script that rebuilds tags_map.
-    // All other fields (language, sentiment, media, scores, etc.) are
-    // carried over from the source documents unchanged.
-    const painlessScript = OpenSearchRelay.buildTagsMapPainlessScript();
+    // Step 3: Reindex with Painless script that rebuilds tags_map,
+    // renames legacy fields, and populates search_text.
+    const painlessScript = OpenSearchRelay.buildReindexPainlessScript();
 
     console.log("Starting reindex (this will take a while)...\n");
 

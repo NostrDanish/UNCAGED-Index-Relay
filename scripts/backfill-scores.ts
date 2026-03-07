@@ -75,10 +75,10 @@ async function withRetry<T>(
 }
 
 interface ScoreEntry {
-  top_score: number;
-  reply_count: number;
-  reaction_count: number;
-  repost_count: number;
+  engagers: number;
+  comment_cnt: number;
+  reaction_cnt: number;
+  repost_cnt: number;
   zap_amount_msats: number;
 }
 
@@ -179,10 +179,10 @@ async function main() {
     for (const bucket of buckets) {
       const id = bucket.key.event_id;
       const entry: ScoreEntry = {
-        top_score: bucket.unique_authors?.value ?? 0,
-        reply_count: 0,
-        reaction_count: 0,
-        repost_count: 0,
+        engagers: bucket.unique_authors?.value ?? 0,
+        comment_cnt: 0,
+        reaction_cnt: 0,
+        repost_cnt: 0,
         zap_amount_msats: 0,
       };
 
@@ -190,14 +190,14 @@ async function main() {
         switch (kb.key) {
           case 1:
           case 1111:
-            entry.reply_count += kb.doc_count;
+            entry.comment_cnt += kb.doc_count;
             break;
           case 7:
-            entry.reaction_count += kb.doc_count;
+            entry.reaction_cnt += kb.doc_count;
             break;
           case 6:
           case 16:
-            entry.repost_count += kb.doc_count;
+            entry.repost_cnt += kb.doc_count;
             break;
         }
       }
@@ -215,10 +215,10 @@ async function main() {
       });
       body.push({
         doc: {
-          top_score: s.top_score,
-          reply_count: s.reply_count,
-          reaction_count: s.reaction_count,
-          repost_count: s.repost_count,
+          engagers: s.engagers,
+          comment_cnt: s.comment_cnt,
+          reaction_cnt: s.reaction_cnt,
+          repost_cnt: s.repost_cnt,
           zap_amount_msats: s.zap_amount_msats,
         },
       });
@@ -256,10 +256,10 @@ async function main() {
               source: `
                 def s = params.scores.get(ctx._source.id);
                 if (s != null) {
-                  ctx._source.top_score = s.top_score;
-                  ctx._source.reply_count = s.reply_count;
-                  ctx._source.reaction_count = s.reaction_count;
-                  ctx._source.repost_count = s.repost_count;
+                  ctx._source.engagers = s.engagers;
+                  ctx._source.comment_cnt = s.comment_cnt;
+                  ctx._source.reaction_cnt = s.reaction_cnt;
+                  ctx._source.repost_cnt = s.repost_cnt;
                   ctx._source.zap_amount_msats = s.zap_amount_msats;
                 }
               `,

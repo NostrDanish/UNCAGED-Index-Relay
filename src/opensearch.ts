@@ -42,14 +42,16 @@ interface NostrEventDocument extends NostrEvent {
     nip05?: string;
     about?: string;
   };
-  /** Unique authors who referenced this event (replies, reposts, reactions). */
-  top_score: number;
+  /** Number of followers (kind 0 profiles). */
+  followers: number;
+  /** Count of unique authors who engaged with this event (non-kind-0). */
+  engagers: number;
   /** Count of kind 1/1111 referencing events. */
-  reply_count: number;
+  comment_cnt: number;
   /** Count of kind 7 referencing events. */
-  reaction_count: number;
+  reaction_cnt: number;
   /** Count of kind 6/16 referencing events. */
-  repost_count: number;
+  repost_cnt: number;
   /** Sum of amount_msats from kind 9735 zap receipts referencing this event. */
   zap_amount_msats: number;
   /** Count of kind 9735 zap receipts referencing this event. */
@@ -58,9 +60,9 @@ interface NostrEventDocument extends NostrEvent {
 
 /** Scores computed for a non-kind-0 event by {@link OpenSearchRelay.recomputeScores}. */
 export interface EventScores {
-  reply_count: number;
-  reaction_count: number;
-  repost_count: number;
+  comment_cnt: number;
+  reaction_cnt: number;
+  repost_cnt: number;
   zap_amount_msats: number;
   zap_cnt: number;
 }
@@ -69,8 +71,8 @@ export interface EventScores {
 export interface RecomputeResult {
   /** Total number of dirty events processed. */
   count: number;
-  /** Pubkey -> follower count (top_score) for dirty kind 0 events. */
-  userScores: Map<string, { top_score: number }>;
+  /** Pubkey -> follower count for dirty kind 0 events. */
+  userScores: Map<string, { followers: number }>;
   /** Event ID -> engagement scores for dirty non-kind-0 events. */
   eventScores: Map<string, EventScores>;
 }
@@ -226,6 +228,138 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
       def last = tagsMap.get('e').get(tagsMap.get('e').size() - 1);
       tagsMap.put('e', [last]);
     }`;
+  }
+
+  /**
+   * Build a comprehensive Painless script for reindexing that:
+   * 1. Rebuilds `tags_map` using the current whitelist
+   * 2. Renames legacy fields: `top_score` → `followers`/`engagers`,
+   *    `reply_count` → `comment_cnt`, `reaction_count` → `reaction_cnt`,
+   *    `repost_count` → `repost_cnt`
+   * 3. Builds `search_text` from event content and tags
+   *
+   * Returns the Painless script source string.
+   */
+  static buildReindexPainlessScript(): string {
+    const tagsMapScript = OpenSearchRelay.buildTagsMapPainlessScript();
+
+    return `
+    ${tagsMapScript}
+
+    // --- Field renames ---
+    // Split top_score into followers (kind 0) and engagers (non-kind-0).
+    if (ctx._source.containsKey('top_score')) {
+      def ts = ctx._source.remove('top_score');
+      if (ctx._source.kind == 0) {
+        ctx._source.followers = ts != null ? ts : 0;
+        ctx._source.engagers = 0;
+      } else {
+        ctx._source.engagers = ts != null ? ts : 0;
+        ctx._source.followers = 0;
+      }
+    }
+    if (!ctx._source.containsKey('followers')) { ctx._source.followers = 0; }
+    if (!ctx._source.containsKey('engagers')) { ctx._source.engagers = 0; }
+
+    // Rename reply_count → comment_cnt
+    if (ctx._source.containsKey('reply_count')) {
+      ctx._source.comment_cnt = ctx._source.remove('reply_count');
+    }
+    if (!ctx._source.containsKey('comment_cnt')) { ctx._source.comment_cnt = 0; }
+
+    // Rename reaction_count → reaction_cnt
+    if (ctx._source.containsKey('reaction_count')) {
+      ctx._source.reaction_cnt = ctx._source.remove('reaction_count');
+    }
+    if (!ctx._source.containsKey('reaction_cnt')) { ctx._source.reaction_cnt = 0; }
+
+    // Rename repost_count → repost_cnt
+    if (ctx._source.containsKey('repost_count')) {
+      ctx._source.repost_cnt = ctx._source.remove('repost_count');
+    }
+    if (!ctx._source.containsKey('repost_cnt')) { ctx._source.repost_cnt = 0; }
+
+    // Ensure zap_cnt exists
+    if (!ctx._source.containsKey('zap_cnt')) { ctx._source.zap_cnt = 0; }
+
+    // --- Build search_text ---
+    int MAX_LEN = 8000;
+
+    Set jsonKinds = new HashSet();
+    jsonKinds.add(0); jsonKinds.add(40); jsonKinds.add(41);
+    jsonKinds.add(30017); jsonKinds.add(30018); jsonKinds.add(30019); jsonKinds.add(30020);
+
+    Set skipKinds = new HashSet();
+    for (int k : new int[]{6, 16, 4, 13, 1059, 10013, 31234, 3,
+      10000, 10001, 10002, 10003, 10004, 10005, 10006, 10007,
+      10009, 10012, 10015, 10020, 10030, 10050, 10101, 10102,
+      30000, 30002, 30003, 30004, 30005, 30006, 30007, 30015,
+      30030, 31924, 39089, 39092, 9735}) {
+      skipKinds.add(k);
+    }
+
+    Set searchTags = new HashSet();
+    searchTags.add('title'); searchTags.add('name'); searchTags.add('description');
+    searchTags.add('summary'); searchTags.add('location'); searchTags.add('subject');
+    searchTags.add('about');
+
+    String[] jsonFields = new String[] {'name', 'about', 'description', 'display_name'};
+
+    StringBuilder sb = new StringBuilder();
+
+    if (skipKinds.contains(ctx._source.kind)) {
+      // Skip content
+    } else if (jsonKinds.contains(ctx._source.kind)) {
+      String c = ctx._source.content;
+      if (c != null && c.startsWith('{')) {
+        for (String field : jsonFields) {
+          String key = '"' + field + '"';
+          int keyIdx = c.indexOf(key);
+          if (keyIdx >= 0) {
+            int colonIdx = c.indexOf(':', keyIdx + key.length());
+            if (colonIdx >= 0) {
+              int startQuote = c.indexOf('"', colonIdx + 1);
+              if (startQuote >= 0) {
+                int endQuote = startQuote + 1;
+                while (endQuote < c.length()) {
+                  if (c.charAt(endQuote) == (char)'"' && c.charAt(endQuote - 1) != (char)'\\\\') {
+                    break;
+                  }
+                  endQuote++;
+                }
+                if (endQuote < c.length()) {
+                  String val = c.substring(startQuote + 1, endQuote);
+                  if (val.length() > 0) {
+                    if (sb.length() > 0) sb.append('\\n');
+                    sb.append(val);
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    } else {
+      if (ctx._source.content != null && ctx._source.content.length() > 0) {
+        sb.append(ctx._source.content);
+      }
+    }
+
+    if (ctx._source.tags != null) {
+      for (def tag : ctx._source.tags) {
+        if (tag.length >= 2 && searchTags.contains(tag[0]) && tag[1].length() > 0) {
+          if (sb.length() > 0) sb.append('\\n');
+          sb.append(tag[1]);
+        }
+      }
+    }
+
+    String result = sb.toString();
+    if (result.length() > MAX_LEN) {
+      result = result.substring(0, MAX_LEN);
+    }
+    ctx._source.search_text = result;
+    `;
   }
 
   /**
@@ -433,10 +567,11 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
       media: mediaResult.media ?? false,
       video: mediaResult.video ?? false,
       ...(metadata && { metadata }),
-      top_score: 0,
-      reply_count: 0,
-      reaction_count: 0,
-      repost_count: 0,
+      followers: 0,
+      engagers: 0,
+      comment_cnt: 0,
+      reaction_cnt: 0,
+      repost_cnt: 0,
       zap_amount_msats: 0,
       zap_cnt: 0,
     };
@@ -524,8 +659,8 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
   /**
    * Query events using precomputed engagement scores.
    *
-   * Each sort mode uses the building-block score fields (top_score,
-   * reply_count, reaction_count, repost_count, zap_amount_msats) that
+   * Each sort mode uses the building-block score fields (followers,
+   * engagers, comment_cnt, reaction_cnt, repost_cnt, zap_amount_msats) that
    * are maintained by the background recomputeScores() job. Filters
    * are applied directly in the query, so results are correct for any
    * filter narrowing (kinds, tags, full-text search, etc.).
@@ -619,7 +754,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
   }
 
   /**
-   * Query top events — sorted by precomputed `top_score` (unique authors
+   * Query top events — sorted by precomputed `engagers` (unique authors
    * who referenced this event). Single OpenSearch query with the user's
    * filter applied directly.
    */
@@ -630,13 +765,13 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     const query = this.buildQuery(filter) as {
       bool: { must: Record<string, unknown>[] };
     };
-    query.bool.must.push({ range: { top_score: { gt: 0 } } });
+    query.bool.must.push({ range: { engagers: { gt: 0 } } });
 
     const response = await this.client.search({
       index: this.indexName,
       body: {
         query,
-        sort: [{ top_score: { order: "desc" as const } }],
+        sort: [{ engagers: { order: "desc" as const } }],
         size: limit,
       },
     });
@@ -645,8 +780,8 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
   }
 
   /**
-   * Query hot events — top_score weighted by exponential time decay.
-   * Score = top_score * 0.5^(age_in_hours / 24).
+   * Query hot events — engagers weighted by exponential time decay.
+   * Score = engagers * 0.5^(age_in_hours / 24).
    * Uses a script_score query so OpenSearch computes and sorts server-side.
    */
   private async querySortHot(
@@ -657,7 +792,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     const query = this.buildQuery(filter) as {
       bool: { must: Record<string, unknown>[] };
     };
-    query.bool.must.push({ range: { top_score: { gt: 0 } } });
+    query.bool.must.push({ range: { engagers: { gt: 0 } } });
 
     const response = await this.client.search({
       index: this.indexName,
@@ -667,9 +802,9 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
             query,
             script: {
               source: `
-                double topScore = doc['top_score'].value;
+                double engagers = doc['engagers'].value;
                 double ageHours = (params.now - doc['created_at'].value) / 3600.0;
-                return topScore * Math.pow(0.5, ageHours / 24.0);
+                return engagers * Math.pow(0.5, ageHours / 24.0);
               `,
               params: { now },
             },
@@ -683,8 +818,8 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
   }
 
   /**
-   * Query controversial events — high engagement with balanced replies
-   * vs reactions. Score = min(reply_count, reaction_count) * sqrt(total).
+   * Query controversial events — high engagement with balanced comments
+   * vs reactions. Score = min(comment_cnt, reaction_cnt) * sqrt(total).
    */
   private async querySortControversial(
     filter: NostrFilter,
@@ -693,9 +828,9 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     const query = this.buildQuery(filter) as {
       bool: { must: Record<string, unknown>[] };
     };
-    // Require at least one reply AND one reaction for controversy
-    query.bool.must.push({ range: { reply_count: { gt: 0 } } });
-    query.bool.must.push({ range: { reaction_count: { gt: 0 } } });
+    // Require at least one comment AND one reaction for controversy
+    query.bool.must.push({ range: { comment_cnt: { gt: 0 } } });
+    query.bool.must.push({ range: { reaction_cnt: { gt: 0 } } });
 
     const response = await this.client.search({
       index: this.indexName,
@@ -705,10 +840,10 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
             query,
             script: {
               source: `
-                double replies = doc['reply_count'].value;
-                double reactions = doc['reaction_count'].value;
-                double balanced = Math.min(replies, reactions);
-                return balanced * Math.sqrt(replies + reactions);
+                double comments = doc['comment_cnt'].value;
+                double reactions = doc['reaction_cnt'].value;
+                double balanced = Math.min(comments, reactions);
+                return balanced * Math.sqrt(comments + reactions);
               `,
             },
           },
@@ -722,7 +857,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
 
   /**
    * Query rising events — gaining engagement quickly relative to age.
-   * Score = (reply_count + reaction_count + repost_count) / age_in_hours.
+   * Score = (comment_cnt + reaction_cnt + repost_cnt) / age_in_hours.
    * Uses all-time counts as the score basis.
    */
   private async querySortRising(
@@ -733,7 +868,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     const query = this.buildQuery(filter) as {
       bool: { must: Record<string, unknown>[] };
     };
-    query.bool.must.push({ range: { top_score: { gt: 0 } } });
+    query.bool.must.push({ range: { engagers: { gt: 0 } } });
 
     const response = await this.client.search({
       index: this.indexName,
@@ -743,7 +878,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
             query,
             script: {
               source: `
-                double total = doc['reply_count'].value + doc['reaction_count'].value + doc['repost_count'].value;
+                double total = doc['comment_cnt'].value + doc['reaction_cnt'].value + doc['repost_cnt'].value;
                 double ageHours = Math.max((params.now - doc['created_at'].value) / 3600.0, 0.1);
                 return total / ageHours;
               `,
@@ -786,35 +921,71 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
   // Kind-0 (profile) sort methods
   //
   // When the filter targets only kind 0, sort queries use follower-count
-  // (stored in top_score) and author-based ranking.  For modes that don't
+  // (stored in `followers`) and author-based ranking.  For modes that don't
   // apply directly to profiles (controversial, rising, zaps) we perform a
   // two-step query: first find top events by the sort mode across all kinds,
   // then return the kind 0 events for those authors.
   // ---------------------------------------------------------------------------
 
   /**
-   * Sort kind 0 events by follower count (top_score).
-   * For profiles, top_score holds the number of followers.
+   * Sort kind 0 events by follower count.
    */
   private async querySortTopKind0(
     filter: NostrFilter,
     limit: number,
   ): Promise<NostrEvent[]> {
-    // querySortTop already works — it sorts by top_score with the filter's
-    // kinds constraint (kind 0) applied.  For kind 0 events top_score holds
-    // follower count, so the result is correct.
-    return this.querySortTop(filter, limit);
+    const query = this.buildQuery(filter) as {
+      bool: { must: Record<string, unknown>[] };
+    };
+    query.bool.must.push({ range: { followers: { gt: 0 } } });
+
+    const response = await this.client.search({
+      index: this.indexName,
+      body: {
+        query,
+        sort: [{ followers: { order: "desc" as const } }],
+        size: limit,
+      },
+    });
+
+    return this.hitsToEvents(response);
   }
 
   /**
    * Sort kind 0 events by follower count with time decay.
-   * Score = top_score * 0.5^(age_hours / 24).
+   * Score = followers * 0.5^(age_hours / 24).
    */
   private async querySortHotKind0(
     filter: NostrFilter,
     limit: number,
   ): Promise<NostrEvent[]> {
-    return this.querySortHot(filter, limit);
+    const now = Math.floor(Date.now() / 1000);
+    const query = this.buildQuery(filter) as {
+      bool: { must: Record<string, unknown>[] };
+    };
+    query.bool.must.push({ range: { followers: { gt: 0 } } });
+
+    const response = await this.client.search({
+      index: this.indexName,
+      body: {
+        query: {
+          script_score: {
+            query,
+            script: {
+              source: `
+                double followers = doc['followers'].value;
+                double ageHours = (params.now - doc['created_at'].value) / 3600.0;
+                return followers * Math.pow(0.5, ageHours / 24.0);
+              `,
+              params: { now },
+            },
+          },
+        },
+        size: limit,
+      },
+    });
+
+    return this.hitsToEvents(response);
   }
 
   /**
@@ -1300,17 +1471,19 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
       } else if (params.event.created_at > ctx._source.created_at ||
                  (params.event.created_at == ctx._source.created_at &&
                   params.event.id.compareTo(ctx._source.id) < 0)) {
-        def old_top_score = ctx._source.top_score;
-        def old_reply_count = ctx._source.reply_count;
-        def old_reaction_count = ctx._source.reaction_count;
-        def old_repost_count = ctx._source.repost_count;
+        def old_followers = ctx._source.containsKey('followers') ? ctx._source.followers : 0;
+        def old_engagers = ctx._source.containsKey('engagers') ? ctx._source.engagers : 0;
+        def old_comment_cnt = ctx._source.containsKey('comment_cnt') ? ctx._source.comment_cnt : 0;
+        def old_reaction_cnt = ctx._source.containsKey('reaction_cnt') ? ctx._source.reaction_cnt : 0;
+        def old_repost_cnt = ctx._source.containsKey('repost_cnt') ? ctx._source.repost_cnt : 0;
         def old_zap_amount_msats = ctx._source.zap_amount_msats;
         def old_zap_cnt = ctx._source.containsKey('zap_cnt') ? ctx._source.zap_cnt : 0;
         ctx._source = params.event;
-        ctx._source.top_score = old_top_score;
-        ctx._source.reply_count = old_reply_count;
-        ctx._source.reaction_count = old_reaction_count;
-        ctx._source.repost_count = old_repost_count;
+        ctx._source.followers = old_followers;
+        ctx._source.engagers = old_engagers;
+        ctx._source.comment_cnt = old_comment_cnt;
+        ctx._source.reaction_cnt = old_reaction_cnt;
+        ctx._source.repost_cnt = old_repost_cnt;
         ctx._source.zap_amount_msats = old_zap_amount_msats;
         ctx._source.zap_cnt = old_zap_cnt;
       } else {
@@ -1752,10 +1925,11 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
         about: { type: "text", analyzer: "standard" },
       },
     },
-    top_score: { type: "integer" },
-    reply_count: { type: "integer" },
-    reaction_count: { type: "integer" },
-    repost_count: { type: "integer" },
+    followers: { type: "integer" },
+    engagers: { type: "integer" },
+    comment_cnt: { type: "integer" },
+    reaction_cnt: { type: "integer" },
+    repost_cnt: { type: "integer" },
     zap_amount_msats: { type: "long" },
     zap_cnt: { type: "integer" },
   };
@@ -1850,10 +2024,10 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
    * Drains the in-memory pending dirty sets (event IDs and followed
    * pubkeys accumulated by {@link collectDirtyReferences}), fetches the
    * corresponding documents from OpenSearch, aggregates their referencing
-   * events to compute `top_score`, `reply_count`, `reaction_count`,
-   * `repost_count`, and `zap_amount_msats`, then writes the scores back.
+   * events to compute `followers`, `engagers`, `comment_cnt`, `reaction_cnt`,
+   * `repost_cnt`, and `zap_amount_msats`, then writes the scores back.
    *
-   * For kind 0 (profile) events, `top_score` is set to the follower count:
+   * For kind 0 (profile) events, `followers` is set to the follower count:
    * the number of unique kind 3 (contact list) events whose `p` tags
    * include this profile's pubkey.
    *
@@ -1947,10 +2121,11 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     const scores = new Map<
       string,
       {
-        top_score: number;
-        reply_count: number;
-        reaction_count: number;
-        repost_count: number;
+        followers: number;
+        engagers: number;
+        comment_cnt: number;
+        reaction_cnt: number;
+        repost_cnt: number;
         zap_amount_msats: number;
         zap_cnt: number;
       }
@@ -1958,10 +2133,11 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
 
     for (const id of allDirtyIds) {
       scores.set(id, {
-        top_score: 0,
-        reply_count: 0,
-        reaction_count: 0,
-        repost_count: 0,
+        followers: 0,
+        engagers: 0,
+        comment_cnt: 0,
+        reaction_cnt: 0,
+        repost_cnt: 0,
         zap_amount_msats: 0,
         zap_cnt: 0,
       });
@@ -2010,11 +2186,11 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
         followerCounts.set(bucket.key, bucket.doc_count);
       }
 
-      // Set top_score = follower count for each kind 0 event.
+      // Set followers count for each kind 0 event.
       for (const { id, pubkey } of dirtyKind0) {
         const s = scores.get(id);
         if (s) {
-          s.top_score = followerCounts.get(pubkey) ?? 0;
+          s.followers = followerCounts.get(pubkey) ?? 0;
         }
       }
     }
@@ -2073,20 +2249,20 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
         const s = scores.get(bucket.key);
         if (!s) continue;
 
-        s.top_score = bucket.unique_authors?.value ?? 0;
+        s.engagers = bucket.unique_authors?.value ?? 0;
 
         for (const kb of bucket.by_kind?.buckets || []) {
           switch (kb.key) {
             case 1:
             case 1111:
-              s.reply_count += kb.doc_count;
+              s.comment_cnt += kb.doc_count;
               break;
             case 7:
-              s.reaction_count += kb.doc_count;
+              s.reaction_cnt += kb.doc_count;
               break;
             case 6:
             case 16:
-              s.repost_count += kb.doc_count;
+              s.repost_cnt += kb.doc_count;
               break;
           }
         }
@@ -2155,10 +2331,11 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
       });
       body.push({
         doc: {
-          top_score: s.top_score,
-          reply_count: s.reply_count,
-          reaction_count: s.reaction_count,
-          repost_count: s.repost_count,
+          followers: s.followers,
+          engagers: s.engagers,
+          comment_cnt: s.comment_cnt,
+          reaction_cnt: s.reaction_cnt,
+          repost_cnt: s.repost_cnt,
           zap_amount_msats: s.zap_amount_msats,
           zap_cnt: s.zap_cnt,
         },
@@ -2192,10 +2369,11 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
           const scoreParams: Record<
             string,
             {
-              top_score: number;
-              reply_count: number;
-              reaction_count: number;
-              repost_count: number;
+              followers: number;
+              engagers: number;
+              comment_cnt: number;
+              reaction_cnt: number;
+              repost_cnt: number;
               zap_amount_msats: number;
               zap_cnt: number;
             }
@@ -2213,10 +2391,11 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
                 source: `
                   def s = params.scores.get(ctx._source.id);
                   if (s != null) {
-                    ctx._source.top_score = s.top_score;
-                    ctx._source.reply_count = s.reply_count;
-                    ctx._source.reaction_count = s.reaction_count;
-                    ctx._source.repost_count = s.repost_count;
+                    ctx._source.followers = s.followers;
+                    ctx._source.engagers = s.engagers;
+                    ctx._source.comment_cnt = s.comment_cnt;
+                    ctx._source.reaction_cnt = s.reaction_cnt;
+                    ctx._source.repost_cnt = s.repost_cnt;
                     ctx._source.zap_amount_msats = s.zap_amount_msats;
                     ctx._source.zap_cnt = s.zap_cnt;
                   }
@@ -2239,11 +2418,11 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     );
 
     // Build result maps for callers (e.g. NIP-85 publisher).
-    const userScores = new Map<string, { top_score: number }>();
+    const userScores = new Map<string, { followers: number }>();
     for (const { id, pubkey } of dirtyKind0) {
       const s = scores.get(id);
       if (s) {
-        userScores.set(pubkey, { top_score: s.top_score });
+        userScores.set(pubkey, { followers: s.followers });
       }
     }
 
@@ -2252,9 +2431,9 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
       const s = scores.get(id);
       if (s) {
         eventScores.set(id, {
-          reply_count: s.reply_count,
-          reaction_count: s.reaction_count,
-          repost_count: s.repost_count,
+          comment_cnt: s.comment_cnt,
+          reaction_cnt: s.reaction_cnt,
+          repost_cnt: s.repost_cnt,
           zap_amount_msats: s.zap_amount_msats,
           zap_cnt: s.zap_cnt,
         });

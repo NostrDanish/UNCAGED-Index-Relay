@@ -138,10 +138,11 @@ describe("OpenSearchRelay", () => {
                     ) {
                       // Preserve stats fields across replacement
                       const statsFields = [
-                        "top_score",
-                        "reply_count",
-                        "reaction_count",
-                        "repost_count",
+                        "followers",
+                        "engagers",
+                        "comment_cnt",
+                        "reaction_cnt",
+                        "repost_cnt",
                         "zap_amount_msats",
                       ];
                       const preserved: Record<string, unknown> = {};
@@ -403,10 +404,11 @@ describe("OpenSearchRelay", () => {
 
       // Simulate accumulated stats (e.g., followers)
       const doc = Array.from(documents.values())[0] as Record<string, unknown>;
-      doc.top_score = 42;
-      doc.reply_count = 5;
-      doc.reaction_count = 10;
-      doc.repost_count = 3;
+      doc.followers = 42;
+      doc.engagers = 7;
+      doc.comment_cnt = 5;
+      doc.reaction_cnt = 10;
+      doc.repost_cnt = 3;
       doc.zap_amount_msats = 1_000_000;
 
       // Now replace with a newer kind 0 event from the same author
@@ -433,14 +435,15 @@ describe("OpenSearchRelay", () => {
         true,
         "Content should be updated",
       );
-      assert.equal(updated.top_score, 42, "top_score should be preserved");
-      assert.equal(updated.reply_count, 5, "reply_count should be preserved");
+      assert.equal(updated.followers, 42, "followers should be preserved");
+      assert.equal(updated.engagers, 7, "engagers should be preserved");
+      assert.equal(updated.comment_cnt, 5, "comment_cnt should be preserved");
       assert.equal(
-        updated.reaction_count,
+        updated.reaction_cnt,
         10,
-        "reaction_count should be preserved",
+        "reaction_cnt should be preserved",
       );
-      assert.equal(updated.repost_count, 3, "repost_count should be preserved");
+      assert.equal(updated.repost_cnt, 3, "repost_cnt should be preserved");
       assert.equal(
         updated.zap_amount_msats,
         1_000_000,
@@ -591,24 +594,26 @@ describe("OpenSearchRelay", () => {
         const src = script.source.replace(/\s+/g, " ").trim();
 
         if (src.includes("Math.pow(0.5, ageHours / 24.0)")) {
-          // sort:hot
-          const topScore = doc.top_score || 0;
+          // sort:hot — uses engagers for non-kind-0, followers for kind-0
+          const score = src.includes("followers")
+            ? doc.followers || 0
+            : doc.engagers || 0;
           const ageHours = (params.now - doc.created_at) / 3600;
-          return topScore * 0.5 ** (ageHours / 24);
+          return score * 0.5 ** (ageHours / 24);
         }
-        if (src.includes("Math.min(replies, reactions)")) {
+        if (src.includes("Math.min(comments, reactions)")) {
           // sort:controversial
-          const replies = doc.reply_count || 0;
-          const reactions = doc.reaction_count || 0;
-          const balanced = Math.min(replies, reactions);
-          return balanced * Math.sqrt(replies + reactions);
+          const comments = doc.comment_cnt || 0;
+          const reactions = doc.reaction_cnt || 0;
+          const balanced = Math.min(comments, reactions);
+          return balanced * Math.sqrt(comments + reactions);
         }
         if (src.includes("total / ageHours")) {
           // sort:rising
           const total =
-            (doc.reply_count || 0) +
-            (doc.reaction_count || 0) +
-            (doc.repost_count || 0);
+            (doc.comment_cnt || 0) +
+            (doc.reaction_cnt || 0) +
+            (doc.repost_cnt || 0);
           const ageHours = Math.max((params.now - doc.created_at) / 3600, 0.1);
           return total / ageHours;
         }
@@ -621,10 +626,11 @@ describe("OpenSearchRelay", () => {
         setScore: (
           eventId: string,
           scores: Partial<{
-            top_score: number;
-            reply_count: number;
-            reaction_count: number;
-            repost_count: number;
+            followers: number;
+            engagers: number;
+            comment_cnt: number;
+            reaction_cnt: number;
+            repost_cnt: number;
             zap_amount_msats: number;
           }>,
         ) => {
@@ -807,14 +813,14 @@ describe("OpenSearchRelay", () => {
       await relay.event(event1);
       await relay.event(event2);
 
-      // Set precomputed scores (event2 has higher top_score)
-      setScore(event1.id, { top_score: 1 });
-      setScore(event2.id, { top_score: 3 });
+      // Set precomputed scores (event2 has higher engagers)
+      setScore(event1.id, { engagers: 1 });
+      setScore(event2.id, { engagers: 3 });
 
       // Query with sort:top
       const results = await relay.query([{ kinds: [1], search: "sort:top" }]);
 
-      // Event2 should be first (higher top_score)
+      // Event2 should be first (higher engagers)
       assert.equal(results.length, 2);
       assert.equal(results[0].id, event2.id);
       assert.equal(results[1].id, event1.id);
@@ -882,11 +888,11 @@ describe("OpenSearchRelay", () => {
       await relay.event(recentEvent);
       await relay.event(olderEvent);
 
-      // Same top_score, but recent event scores higher due to less time decay
+      // Same engagers, but recent event scores higher due to less time decay
       // recent: 5 * 0.5^(0.5/24) ≈ 4.93
       // older:  5 * 0.5^(20/24) ≈ 2.17
-      setScore(recentEvent.id, { top_score: 5 });
-      setScore(olderEvent.id, { top_score: 5 });
+      setScore(recentEvent.id, { engagers: 5 });
+      setScore(olderEvent.id, { engagers: 5 });
 
       // Query with sort:hot
       const results = await relay.query([{ kinds: [1], search: "sort:hot" }]);
@@ -916,7 +922,7 @@ describe("OpenSearchRelay", () => {
       );
 
       await relay.event(event);
-      setScore(event.id, { top_score: 1 });
+      setScore(event.id, { engagers: 1 });
 
       // Query combining search text and sort
       const results = await relay.query([
@@ -1091,9 +1097,9 @@ describe("OpenSearchRelay", () => {
       await relay.event(event2);
 
       // Set precomputed scores
-      setScore(event1b.id, { top_score: 5 });
-      setScore(event1a.id, { top_score: 1 });
-      setScore(event2.id, { top_score: 3 });
+      setScore(event1b.id, { engagers: 5 });
+      setScore(event1a.id, { engagers: 1 });
+      setScore(event2.id, { engagers: 3 });
 
       // Query with sort:top and distinct:author
       const results = await relay.query([
@@ -1440,14 +1446,14 @@ describe("OpenSearchRelay", () => {
       await relay.event(event1);
       await relay.event(event2);
 
-      // event2 has higher top_score
-      setScore(event1.id, { top_score: 1 });
-      setScore(event2.id, { top_score: 5 });
+      // event2 has higher engagers
+      setScore(event1.id, { engagers: 1 });
+      setScore(event2.id, { engagers: 5 });
 
       // Plain text search with no tokens should use sort:top
       const results = await relay.query([{ kinds: [1], search: "hello" }]);
 
-      // event2 should be first (higher top_score), proving sort:top was applied
+      // event2 should be first (higher engagers), proving sort:top was applied
       assert.equal(results.length, 2);
       assert.equal(results[0].id, event2.id);
       assert.equal(results[1].id, event1.id);
@@ -1486,9 +1492,9 @@ describe("OpenSearchRelay", () => {
       await relay.event(event1);
       await relay.event(event2);
 
-      // event2 has higher top_score, but sort:new should use chronological order
-      setScore(event1.id, { top_score: 1 });
-      setScore(event2.id, { top_score: 10 });
+      // event2 has higher engagers, but sort:new should use chronological order
+      setScore(event1.id, { engagers: 1 });
+      setScore(event2.id, { engagers: 10 });
 
       // sort:new is a no-op token that prevents the default sort:top
       const results = await relay.query([
@@ -1534,8 +1540,8 @@ describe("OpenSearchRelay", () => {
       await relay.event(event1);
       await relay.event(event2);
 
-      setScore(event1.id, { top_score: 1 });
-      setScore(event2.id, { top_score: 10 });
+      setScore(event1.id, { engagers: 1 });
+      setScore(event2.id, { engagers: 10 });
 
       // No search field at all — should use default chronological order
       const results = await relay.query([{ kinds: [1] }]);
@@ -1590,9 +1596,9 @@ describe("OpenSearchRelay", () => {
       await relay.event(event2);
       await relay.event(event3);
 
-      setScore(event1.id, { top_score: 3 });
-      setScore(event2.id, { top_score: 2 });
-      setScore(event3.id, { top_score: 1 });
+      setScore(event1.id, { engagers: 3 });
+      setScore(event2.id, { engagers: 2 });
+      setScore(event3.id, { engagers: 1 });
 
       // Negative token: exclude events containing "bitcoin"
       const results = await relay.query([
@@ -1639,8 +1645,8 @@ describe("OpenSearchRelay", () => {
       await relay.event(event1);
       await relay.event(event2);
 
-      setScore(event1.id, { top_score: 1 });
-      setScore(event2.id, { top_score: 1 });
+      setScore(event1.id, { engagers: 1 });
+      setScore(event2.id, { engagers: 1 });
 
       // Only negative tokens, no positive text
       const results = await relay.query([
@@ -1695,9 +1701,9 @@ describe("OpenSearchRelay", () => {
       await relay.event(event2);
       await relay.event(event3);
 
-      setScore(event1.id, { top_score: 1 });
-      setScore(event2.id, { top_score: 1 });
-      setScore(event3.id, { top_score: 1 });
+      setScore(event1.id, { engagers: 1 });
+      setScore(event2.id, { engagers: 1 });
+      setScore(event3.id, { engagers: 1 });
 
       // Multiple negative tokens
       const results = await relay.query([
@@ -1855,21 +1861,24 @@ describe("OpenSearchRelay", () => {
         const src = script.source.replace(/\s+/g, " ").trim();
 
         if (src.includes("Math.pow(0.5, ageHours / 24.0)")) {
-          const topScore = doc.top_score || 0;
+          // sort:hot — uses engagers for non-kind-0, followers for kind-0
+          const score = src.includes("followers")
+            ? doc.followers || 0
+            : doc.engagers || 0;
           const ageHours = (params.now - doc.created_at) / 3600;
-          return topScore * 0.5 ** (ageHours / 24);
+          return score * 0.5 ** (ageHours / 24);
         }
-        if (src.includes("Math.min(replies, reactions)")) {
-          const replies = doc.reply_count || 0;
-          const reactions = doc.reaction_count || 0;
-          const balanced = Math.min(replies, reactions);
-          return balanced * Math.sqrt(replies + reactions);
+        if (src.includes("Math.min(comments, reactions)")) {
+          const comments = doc.comment_cnt || 0;
+          const reactions = doc.reaction_cnt || 0;
+          const balanced = Math.min(comments, reactions);
+          return balanced * Math.sqrt(comments + reactions);
         }
         if (src.includes("total / ageHours")) {
           const total =
-            (doc.reply_count || 0) +
-            (doc.reaction_count || 0) +
-            (doc.repost_count || 0);
+            (doc.comment_cnt || 0) +
+            (doc.reaction_cnt || 0) +
+            (doc.repost_cnt || 0);
           const ageHours = Math.max((params.now - doc.created_at) / 3600, 0.1);
           return total / ageHours;
         }
@@ -1881,10 +1890,11 @@ describe("OpenSearchRelay", () => {
         setScore: (
           eventId: string,
           scores: Partial<{
-            top_score: number;
-            reply_count: number;
-            reaction_count: number;
-            repost_count: number;
+            followers: number;
+            engagers: number;
+            comment_cnt: number;
+            reaction_cnt: number;
+            repost_cnt: number;
             zap_amount_msats: number;
           }>,
         ) => {
@@ -2105,10 +2115,10 @@ describe("OpenSearchRelay", () => {
       await relay.event(profile2);
       await relay.event(profile3);
 
-      // Set follower counts (stored as top_score for kind 0)
-      setScore(profile1.id, { top_score: 100 });
-      setScore(profile2.id, { top_score: 50000 }); // jack is most followed
-      setScore(profile3.id, { top_score: 500 });
+      // Set follower counts (stored as followers for kind 0)
+      setScore(profile1.id, { followers: 100 });
+      setScore(profile2.id, { followers: 50000 }); // jack is most followed
+      setScore(profile3.id, { followers: 500 });
 
       // Query kind 0 with sort:top
       const results = await relay.query([{ kinds: [0], search: "sort:top" }]);
@@ -2165,9 +2175,9 @@ describe("OpenSearchRelay", () => {
       await relay.event(profile2);
       await relay.event(profile3);
 
-      setScore(profile1.id, { top_score: 50000 }); // jack — most followed
-      setScore(profile2.id, { top_score: 200 }); // jackson — fewer
-      setScore(profile3.id, { top_score: 1000 }); // alice — irrelevant to search
+      setScore(profile1.id, { followers: 50000 }); // jack — most followed
+      setScore(profile2.id, { followers: 200 }); // jackson — fewer
+      setScore(profile3.id, { followers: 1000 }); // alice — irrelevant to search
 
       // Search for "jac" with sort:top — should find jack and jackson
       const results = await relay.query([
@@ -2238,11 +2248,11 @@ describe("OpenSearchRelay", () => {
       await relay.event(post2);
 
       // Set controversy scores on posts
-      // controversial = min(reply, reaction) * sqrt(total)
+      // controversial = min(comment, reaction) * sqrt(total)
       // post1: min(10, 8) * sqrt(18) = 8 * 4.24 = 33.9
-      setScore(post1.id, { reply_count: 10, reaction_count: 8 });
+      setScore(post1.id, { comment_cnt: 10, reaction_cnt: 8 });
       // post2: min(2, 1) * sqrt(3) = 1 * 1.73 = 1.73
-      setScore(post2.id, { reply_count: 2, reaction_count: 1 });
+      setScore(post2.id, { comment_cnt: 2, reaction_cnt: 1 });
 
       // Query kind 0 with sort:controversial
       const results = await relay.query([
@@ -2313,20 +2323,20 @@ describe("OpenSearchRelay", () => {
       await relay.event(post1);
       await relay.event(post2);
 
-      // rising = (reply + reaction + repost) / age_hours
+      // rising = (comment + reaction + repost) / age_hours
       // post1: (5 + 5 + 5) / 0.5 = 30
       setScore(post1.id, {
-        top_score: 1,
-        reply_count: 5,
-        reaction_count: 5,
-        repost_count: 5,
+        engagers: 1,
+        comment_cnt: 5,
+        reaction_cnt: 5,
+        repost_cnt: 5,
       });
       // post2: (5 + 5 + 5) / 10 = 1.5
       setScore(post2.id, {
-        top_score: 1,
-        reply_count: 5,
-        reaction_count: 5,
-        repost_count: 5,
+        engagers: 1,
+        comment_cnt: 5,
+        reaction_cnt: 5,
+        repost_cnt: 5,
       });
 
       const results = await relay.query([
@@ -2481,14 +2491,14 @@ describe("OpenSearchRelay", () => {
       await relay.event(profile);
       await relay.event(post);
 
-      setScore(post.id, { top_score: 10 });
+      setScore(post.id, { engagers: 10 });
 
       // Query with kinds [0, 1] — should use regular sort, not kind-0 sort
       const results = await relay.query([
         { kinds: [0, 1], search: "sort:top" },
       ]);
 
-      // Only the post has top_score > 0, profile has 0
+      // Only the post has engagers > 0, profile has 0
       assert.equal(results.length, 1);
       assert.equal(results[0].id, post.id);
     });
@@ -2539,9 +2549,9 @@ describe("OpenSearchRelay", () => {
       await relay.event(profile2);
       await relay.event(profile3);
 
-      setScore(profile1.id, { top_score: 50000 });
-      setScore(profile2.id, { top_score: 200 });
-      setScore(profile3.id, { top_score: 1000 });
+      setScore(profile1.id, { followers: 50000 });
+      setScore(profile2.id, { followers: 200 });
+      setScore(profile3.id, { followers: 1000 });
 
       // "jac" is a prefix — should match "jack" and "jackson" but not "alice"
       const results = await relay.query([{ kinds: [0], search: "jac" }]);
@@ -2591,8 +2601,8 @@ describe("OpenSearchRelay", () => {
       await relay.event(profile1);
       await relay.event(profile2);
 
-      setScore(profile1.id, { top_score: 100 });
-      setScore(profile2.id, { top_score: 100 });
+      setScore(profile1.id, { followers: 100 });
+      setScore(profile2.id, { followers: 100 });
 
       // Search by display_name prefix "dor" should match Jack Dorsey
       const results = await relay.query([{ kinds: [0], search: "dor" }]);
@@ -2623,7 +2633,7 @@ describe("OpenSearchRelay", () => {
       );
 
       await relay.event(post);
-      setScore(post.id, { top_score: 10 });
+      setScore(post.id, { engagers: 10 });
 
       // Kind 1 search should match via content, not metadata
       const results = await relay.query([{ kinds: [1], search: "jack" }]);
@@ -4249,10 +4259,11 @@ describe("OpenSearchRelay", () => {
         "media",
         "video",
         "metadata",
-        "top_score",
-        "reply_count",
-        "reaction_count",
-        "repost_count",
+        "followers",
+        "engagers",
+        "comment_cnt",
+        "reaction_cnt",
+        "repost_cnt",
         "zap_amount_msats",
         "zap_cnt",
       ]);

@@ -59,11 +59,11 @@ export class Nip85 {
    * Publish kind 30382 user-stats assertion events for dirty profiles.
    *
    * Stats published:
-   * - `followers` -- from pre-computed top_score (follower count)
+   * - `followers` -- from pre-computed followers count
    * - `post_cnt`  -- computed via OpenSearch aggregation on kind 1 events
    */
   async publishUserStats(
-    userScores: Map<string, { top_score: number }>,
+    userScores: Map<string, { followers: number }>,
   ): Promise<void> {
     if (userScores.size === 0) return;
 
@@ -73,7 +73,7 @@ export class Nip85 {
     const postCounts = await this.getPostCounts(pubkeys);
 
     for (const [pubkey, scores] of userScores) {
-      const followers = scores.top_score;
+      const followers = scores.followers;
       const postCount = postCounts.get(pubkey) ?? 0;
 
       const tags: string[][] = [["d", pubkey]];
@@ -99,9 +99,9 @@ export class Nip85 {
    * Publish kind 30383 event-stats assertion events for dirty events.
    *
    * Stats published:
-   * - `comment_cnt`  -- reply_count from recomputeScores
-   * - `repost_cnt`   -- repost_count from recomputeScores
-   * - `reaction_cnt` -- reaction_count from recomputeScores
+   * - `comment_cnt`  -- comment_cnt from recomputeScores
+   * - `repost_cnt`   -- repost_cnt from recomputeScores
+   * - `reaction_cnt` -- reaction_cnt from recomputeScores
    * - `zap_cnt`      -- zap_cnt from recomputeScores
    * - `zap_amount`   -- zap_amount_msats converted to sats
    */
@@ -112,12 +112,12 @@ export class Nip85 {
       const zapAmount = Math.floor(scores.zap_amount_msats / 1000);
 
       const tags: string[][] = [["d", eventId]];
-      if (scores.reply_count > 0)
-        tags.push(["comment_cnt", scores.reply_count.toString()]);
-      if (scores.repost_count > 0)
-        tags.push(["repost_cnt", scores.repost_count.toString()]);
-      if (scores.reaction_count > 0)
-        tags.push(["reaction_cnt", scores.reaction_count.toString()]);
+      if (scores.comment_cnt > 0)
+        tags.push(["comment_cnt", scores.comment_cnt.toString()]);
+      if (scores.repost_cnt > 0)
+        tags.push(["repost_cnt", scores.repost_cnt.toString()]);
+      if (scores.reaction_cnt > 0)
+        tags.push(["reaction_cnt", scores.reaction_cnt.toString()]);
       if (scores.zap_cnt > 0) tags.push(["zap_cnt", scores.zap_cnt.toString()]);
       if (zapAmount > 0) tags.push(["zap_amount", zapAmount.toString()]);
 
@@ -171,12 +171,12 @@ export class Nip85 {
       const zapAmount = Math.floor(scores.zap_amount_msats / 1000);
 
       const tags: string[][] = [["d", addr]];
-      if (scores.reply_count > 0)
-        tags.push(["comment_cnt", scores.reply_count.toString()]);
-      if (scores.repost_count > 0)
-        tags.push(["repost_cnt", scores.repost_count.toString()]);
-      if (scores.reaction_count > 0)
-        tags.push(["reaction_cnt", scores.reaction_count.toString()]);
+      if (scores.comment_cnt > 0)
+        tags.push(["comment_cnt", scores.comment_cnt.toString()]);
+      if (scores.repost_cnt > 0)
+        tags.push(["repost_cnt", scores.repost_cnt.toString()]);
+      if (scores.reaction_cnt > 0)
+        tags.push(["reaction_cnt", scores.reaction_cnt.toString()]);
       if (scores.zap_cnt > 0) tags.push(["zap_cnt", scores.zap_cnt.toString()]);
       if (zapAmount > 0) tags.push(["zap_amount", zapAmount.toString()]);
 
@@ -226,12 +226,12 @@ export class Nip85 {
 
     for (const [identifier, scores] of identifierScores) {
       const tags: string[][] = [["d", identifier]];
-      if (scores.comment_count > 0)
-        tags.push(["comment_cnt", scores.comment_count.toString()]);
-      if (scores.reaction_count > 0)
-        tags.push(["reaction_cnt", scores.reaction_count.toString()]);
-      if (scores.repost_count > 0)
-        tags.push(["repost_cnt", scores.repost_count.toString()]);
+      if (scores.comment_cnt > 0)
+        tags.push(["comment_cnt", scores.comment_cnt.toString()]);
+      if (scores.reaction_cnt > 0)
+        tags.push(["reaction_cnt", scores.reaction_cnt.toString()]);
+      if (scores.repost_cnt > 0)
+        tags.push(["repost_cnt", scores.repost_cnt.toString()]);
 
       // Only publish if we have actual stats.
       if (tags.length <= 1) continue;
@@ -317,9 +317,9 @@ export class Nip85 {
     // Initialize all addresses with zeros.
     for (const addr of addrs) {
       scores.set(addr, {
-        reply_count: 0,
-        reaction_count: 0,
-        repost_count: 0,
+        comment_cnt: 0,
+        reaction_cnt: 0,
+        repost_cnt: 0,
         zap_amount_msats: 0,
         zap_cnt: 0,
       });
@@ -377,14 +377,14 @@ export class Nip85 {
         switch (kb.key) {
           case 1:
           case 1111:
-            s.reply_count += kb.doc_count;
+            s.comment_cnt += kb.doc_count;
             break;
           case 7:
-            s.reaction_count += kb.doc_count;
+            s.reaction_cnt += kb.doc_count;
             break;
           case 6:
           case 16:
-            s.repost_count += kb.doc_count;
+            s.repost_cnt += kb.doc_count;
             break;
         }
       }
@@ -452,26 +452,26 @@ export class Nip85 {
    *
    * Engagement mapping:
    * - kind 1, 1111 → comment_count
-   * - kind 7       → reaction_count
-   * - kind 16, 17  → repost_count
+   * - kind 7       → reaction_cnt
+   * - kind 16, 17  → repost_cnt
    */
   private async getIdentifierEngagement(
     identifiers: string[],
   ): Promise<
     Map<
       string,
-      { comment_count: number; reaction_count: number; repost_count: number }
+      { comment_cnt: number; reaction_cnt: number; repost_cnt: number }
     >
   > {
     const scores = new Map<
       string,
-      { comment_count: number; reaction_count: number; repost_count: number }
+      { comment_cnt: number; reaction_cnt: number; repost_cnt: number }
     >();
     if (identifiers.length === 0) return scores;
 
     // Initialize all identifiers with zeros.
     for (const id of identifiers) {
-      scores.set(id, { comment_count: 0, reaction_count: 0, repost_count: 0 });
+      scores.set(id, { comment_cnt: 0, reaction_cnt: 0, repost_cnt: 0 });
     }
 
     const response = await this.client.search({
@@ -543,14 +543,14 @@ export class Nip85 {
           switch (kb.key) {
             case 1:
             case 1111:
-              s.comment_count += kb.doc_count;
+              s.comment_cnt += kb.doc_count;
               break;
             case 7:
-              s.reaction_count += kb.doc_count;
+              s.reaction_cnt += kb.doc_count;
               break;
             case 16:
             case 17:
-              s.repost_count += kb.doc_count;
+              s.repost_cnt += kb.doc_count;
               break;
           }
         }
