@@ -282,6 +282,11 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     // Ensure zap_cnt exists
     if (!ctx._source.containsKey('zap_cnt')) { ctx._source.zap_cnt = 0; }
 
+    // --- Remove legacy fields not in new mapping ---
+    ctx._source.remove('scores_dirty');
+    ctx._source.remove('nip05_domain');
+    ctx._source.remove('nip05_hostname');
+
     // --- Build search_text ---
     int MAX_LEN = 8000;
 
