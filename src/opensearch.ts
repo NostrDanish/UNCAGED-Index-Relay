@@ -307,48 +307,48 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
 
     StringBuilder sb = new StringBuilder();
 
-    if (skipKinds.contains(ctx._source.kind)) {
-      // Skip content
-    } else if (jsonKinds.contains(ctx._source.kind)) {
-      String c = ctx._source.content;
-      if (c != null && c.startsWith('{')) {
-        for (String field : jsonFields) {
-          String key = '"' + field + '"';
-          int keyIdx = c.indexOf(key);
-          if (keyIdx >= 0) {
-            int colonIdx = c.indexOf(':', keyIdx + key.length());
-            if (colonIdx >= 0) {
-              int startQuote = c.indexOf('"', colonIdx + 1);
-              if (startQuote >= 0) {
-                int endQuote = startQuote + 1;
-                while (endQuote < c.length()) {
-                  if (c.charAt(endQuote) == (char)'"' && c.charAt(endQuote - 1) != (char)'\\\\') {
-                    break;
+    if (!skipKinds.contains(ctx._source.kind)) {
+      if (jsonKinds.contains(ctx._source.kind)) {
+        String c = ctx._source.content;
+        if (c != null && c.startsWith('{')) {
+          for (String field : jsonFields) {
+            String key = '"' + field + '"';
+            int keyIdx = c.indexOf(key);
+            if (keyIdx >= 0) {
+              int colonIdx = c.indexOf(':', keyIdx + key.length());
+              if (colonIdx >= 0) {
+                int startQuote = c.indexOf('"', colonIdx + 1);
+                if (startQuote >= 0) {
+                  int endQuote = startQuote + 1;
+                  while (endQuote < c.length()) {
+                    if (c.charAt(endQuote) == (char)'"' && c.charAt(endQuote - 1) != (char)'\\\\') {
+                      break;
+                    }
+                    endQuote++;
                   }
-                  endQuote++;
-                }
-                if (endQuote < c.length()) {
-                  String val = c.substring(startQuote + 1, endQuote);
-                  if (val.length() > 0) {
-                    if (sb.length() > 0) sb.append('\\n');
-                    sb.append(val);
+                  if (endQuote < c.length()) {
+                    String val = c.substring(startQuote + 1, endQuote);
+                    if (val.length() > 0) {
+                      if (sb.length() > 0) sb.append(' ');
+                      sb.append(val);
+                    }
                   }
                 }
               }
             }
           }
         }
-      }
-    } else {
-      if (ctx._source.content != null && ctx._source.content.length() > 0) {
-        sb.append(ctx._source.content);
+      } else {
+        if (ctx._source.content != null && ctx._source.content.length() > 0) {
+          sb.append(ctx._source.content);
+        }
       }
     }
 
     if (ctx._source.tags != null) {
       for (def tag : ctx._source.tags) {
         if (tag.length >= 2 && searchTags.contains(tag[0]) && tag[1].length() > 0) {
-          if (sb.length() > 0) sb.append('\\n');
+          if (sb.length() > 0) sb.append(' ');
           sb.append(tag[1]);
         }
       }
