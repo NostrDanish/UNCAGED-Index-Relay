@@ -1981,13 +1981,23 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
         }
 
         // Update mappings so any new fields are added to the existing index.
-        await this.client.indices.putMapping({
-          index: this.indexName,
-          body: {
-            properties: OpenSearchRelay.MAPPING_PROPERTIES,
-          },
-        });
-        console.log(`Updated mappings for index ${this.indexName}`);
+        // This may fail if field types changed (e.g. content: text → object),
+        // which requires a full reindex to resolve. Non-fatal — the relay can
+        // still operate on the existing mapping.
+        try {
+          await this.client.indices.putMapping({
+            index: this.indexName,
+            body: {
+              properties: OpenSearchRelay.MAPPING_PROPERTIES,
+            },
+          });
+          console.log(`Updated mappings for index ${this.indexName}`);
+        } catch (e) {
+          console.warn(
+            "Warning: could not update mappings (may need reindex):",
+            e,
+          );
+        }
         return;
       }
 
