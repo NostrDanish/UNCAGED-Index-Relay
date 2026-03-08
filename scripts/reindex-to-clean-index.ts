@@ -29,6 +29,7 @@ import type { ClientOptions } from "@opensearch-project/opensearch";
 import { Client as OpenSearchClient } from "@opensearch-project/opensearch";
 import { Config } from "../src/config.ts";
 import { OpenSearchRelay } from "../src/opensearch.ts";
+import { buildReindexPainlessScript } from "./painless.ts";
 
 async function main() {
   const config = new Config({
@@ -157,7 +158,7 @@ async function main() {
 
     // Step 4: Reindex with Painless script that rebuilds tags_map,
     // renames legacy fields, and populates search_text.
-    const painlessScript = OpenSearchRelay.buildReindexPainlessScript();
+    const painlessScript = buildReindexPainlessScript();
 
     console.log("Starting reindex (this will take a while)...\n");
 

@@ -23,7 +23,7 @@ import process from "node:process";
 import type { ClientOptions } from "@opensearch-project/opensearch";
 import { Client as OpenSearchClient } from "@opensearch-project/opensearch";
 import { Config } from "../src/config.ts";
-import { OpenSearchRelay } from "../src/opensearch.ts";
+import { buildTagsMapPainlessScript } from "./painless.ts";
 
 async function main() {
   console.log("Starting tags_map reindex\n");
@@ -51,7 +51,7 @@ async function main() {
 
   // Painless script that rebuilds tags_map from ctx._source.tags.
   // Generated from OpenSearchRelay so filtering rules stay in sync.
-  const painlessScript = OpenSearchRelay.buildTagsMapPainlessScript();
+  const painlessScript = buildTagsMapPainlessScript();
 
   try {
     // Get total count for context

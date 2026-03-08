@@ -1,0 +1,185 @@
+/**
+ * Painless script builders for OpenSearch reindex and update-by-query
+ * operations. These mirror the tag filtering logic in OpenSearchRelay
+ * (MULTI_LETTER_TAG_WHITELIST, TAG_VALUE_MAX_LENGTH) so the rules stay
+ * in sync between TypeScript and server-side Painless execution.
+ */
+
+import { OpenSearchRelay } from "../src/opensearch.ts";
+
+/**
+ * Generate the Painless script snippet that rebuilds `tags_map` from
+ * `ctx._source.tags`, mirroring the `buildTagsMap` / `isIndexableTagName`
+ * logic. Used by reindex and update-by-query scripts so the filtering
+ * rules stay in sync with the TypeScript implementation.
+ */
+export function buildTagsMapPainlessScript(): string {
+  const adds = [...OpenSearchRelay.MULTI_LETTER_TAG_WHITELIST]
+    .map((t) => `whitelist.add('${t}');`)
+    .join(" ");
+
+  return `
+    Set whitelist = new HashSet();
+    ${adds}
+    Map tagsMap = new HashMap();
+    if (ctx._source.tags != null) {
+      for (def tag : ctx._source.tags) {
+        if (tag != null && tag.size() >= 2) {
+          String tagName = tag[0].toString();
+          if (tagName.length() != 1 && !whitelist.contains(tagName)) {
+            continue;
+          }
+          String value = tag[1].toString();
+          if (!tagsMap.containsKey(tagName)) {
+            tagsMap.put(tagName, new ArrayList());
+          }
+          if (value.length() <= ${OpenSearchRelay.TAG_VALUE_MAX_LENGTH}) {
+            tagsMap.get(tagName).add(value);
+          }
+        }
+      }
+    }
+    ctx._source.tags_map = tagsMap;
+    // NIP-25: For kind 7 reactions, only keep the last e tag value.
+    if (ctx._source.kind == 7 && tagsMap.containsKey('e') && tagsMap.get('e').size() > 1) {
+      def last = tagsMap.get('e').get(tagsMap.get('e').size() - 1);
+      tagsMap.put('e', [last]);
+    }`;
+}
+
+/**
+ * Build a comprehensive Painless script for reindexing that:
+ * 1. Rebuilds `tags_map` using the current whitelist
+ * 2. Renames legacy fields: `top_score` → `followers`/`engagers`,
+ *    `reply_count` → `comment_cnt`, `reaction_count` → `reaction_cnt`,
+ *    `repost_count` → `repost_cnt`
+ * 3. Builds `search_text` from event content and tags
+ *
+ * Returns the Painless script source string.
+ */
+export function buildReindexPainlessScript(): string {
+  const tagsMapScript = buildTagsMapPainlessScript();
+
+  return `
+    ${tagsMapScript}
+
+    // --- Field renames ---
+    // Split top_score into followers (kind 0) and engagers (non-kind-0).
+    if (ctx._source.containsKey('top_score')) {
+      def ts = ctx._source.remove('top_score');
+      if (ctx._source.kind == 0) {
+        ctx._source.followers = ts != null ? ts : 0;
+        ctx._source.engagers = 0;
+      } else {
+        ctx._source.engagers = ts != null ? ts : 0;
+        ctx._source.followers = 0;
+      }
+    }
+    if (!ctx._source.containsKey('followers')) { ctx._source.followers = 0; }
+    if (!ctx._source.containsKey('engagers')) { ctx._source.engagers = 0; }
+
+    // Rename reply_count → comment_cnt
+    if (ctx._source.containsKey('reply_count')) {
+      ctx._source.comment_cnt = ctx._source.remove('reply_count');
+    }
+    if (!ctx._source.containsKey('comment_cnt')) { ctx._source.comment_cnt = 0; }
+
+    // Rename reaction_count → reaction_cnt
+    if (ctx._source.containsKey('reaction_count')) {
+      ctx._source.reaction_cnt = ctx._source.remove('reaction_count');
+    }
+    if (!ctx._source.containsKey('reaction_cnt')) { ctx._source.reaction_cnt = 0; }
+
+    // Rename repost_count → repost_cnt
+    if (ctx._source.containsKey('repost_count')) {
+      ctx._source.repost_cnt = ctx._source.remove('repost_count');
+    }
+    if (!ctx._source.containsKey('repost_cnt')) { ctx._source.repost_cnt = 0; }
+
+    // Ensure zap_cnt exists
+    if (!ctx._source.containsKey('zap_cnt')) { ctx._source.zap_cnt = 0; }
+
+    // --- Remove legacy fields not in new mapping ---
+    ctx._source.remove('scores_dirty');
+    ctx._source.remove('nip05_domain');
+    ctx._source.remove('nip05_hostname');
+
+    // --- Build search_text ---
+    int MAX_LEN = 8000;
+
+    Set jsonKinds = new HashSet();
+    jsonKinds.add(0); jsonKinds.add(40); jsonKinds.add(41);
+    jsonKinds.add(30017); jsonKinds.add(30018); jsonKinds.add(30019); jsonKinds.add(30020);
+
+    Set skipKinds = new HashSet();
+    for (int k : new int[]{6, 16, 4, 13, 1059, 10013, 31234, 3,
+      10000, 10001, 10002, 10003, 10004, 10005, 10006, 10007,
+      10009, 10012, 10015, 10020, 10030, 10050, 10101, 10102,
+      30000, 30002, 30003, 30004, 30005, 30006, 30007, 30015,
+      30030, 31924, 39089, 39092, 9735}) {
+      skipKinds.add(k);
+    }
+
+    Set searchTags = new HashSet();
+    searchTags.add('title'); searchTags.add('name'); searchTags.add('description');
+    searchTags.add('summary'); searchTags.add('location'); searchTags.add('subject');
+    searchTags.add('about');
+
+    String[] jsonFields = new String[] {'name', 'about', 'description', 'display_name'};
+
+    StringBuilder sb = new StringBuilder();
+
+    if (!skipKinds.contains(ctx._source.kind)) {
+      if (jsonKinds.contains(ctx._source.kind)) {
+        String c = ctx._source.content;
+        if (c != null && c.startsWith('{')) {
+          for (String field : jsonFields) {
+            String key = '"' + field + '"';
+            int keyIdx = c.indexOf(key);
+            if (keyIdx >= 0) {
+              int colonIdx = c.indexOf(':', keyIdx + key.length());
+              if (colonIdx >= 0) {
+                int startQuote = c.indexOf('"', colonIdx + 1);
+                if (startQuote >= 0) {
+                  int endQuote = startQuote + 1;
+                  while (endQuote < c.length()) {
+                    if (c.charAt(endQuote) == (char)'"' && c.charAt(endQuote - 1) != (char)'\\\\') {
+                      break;
+                    }
+                    endQuote++;
+                  }
+                  if (endQuote < c.length()) {
+                    String val = c.substring(startQuote + 1, endQuote);
+                    if (val.length() > 0) {
+                      if (sb.length() > 0) sb.append(' ');
+                      sb.append(val);
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      } else {
+        if (ctx._source.content != null && ctx._source.content.length() > 0) {
+          sb.append(ctx._source.content);
+        }
+      }
+    }
+
+    if (ctx._source.tags != null) {
+      for (def tag : ctx._source.tags) {
+        if (tag.length >= 2 && searchTags.contains(tag[0]) && tag[1].length() > 0) {
+          if (sb.length() > 0) sb.append(' ');
+          sb.append(tag[1]);
+        }
+      }
+    }
+
+    String result = sb.toString();
+    if (result.length() > MAX_LEN) {
+      result = result.substring(0, MAX_LEN);
+    }
+    ctx._source.search_text = result;
+    `;
+}

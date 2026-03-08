@@ -17,7 +17,7 @@ import process from "node:process";
 import type { ClientOptions } from "@opensearch-project/opensearch";
 import { Client as OpenSearchClient } from "@opensearch-project/opensearch";
 import { Config } from "../src/config.ts";
-import { OpenSearchRelay } from "../src/opensearch.ts";
+import { buildTagsMapPainlessScript } from "./painless.ts";
 
 async function main() {
   console.log("Starting client tag backfill\n");
@@ -43,7 +43,7 @@ async function main() {
 
   const client = new OpenSearchClient(clientOptions);
 
-  const painlessScript = OpenSearchRelay.buildTagsMapPainlessScript();
+  const painlessScript = buildTagsMapPainlessScript();
 
   try {
     // Count documents that don't yet have tags_map.client.
