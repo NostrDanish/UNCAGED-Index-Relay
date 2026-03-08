@@ -185,6 +185,8 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     "proxy",
     // NIP-52, NIP-53, NIP-69: enum-like values (live/ended/pending/active/sold/etc)
     "status",
+    // NIP-89: client application identifier
+    "client",
   ]);
 
   /** Maximum length of a single tag value stored in tags_map. */
