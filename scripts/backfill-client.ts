@@ -3,8 +3,11 @@
  * that have a "client" tag in their raw tags array but were indexed
  * before "client" was added to the MULTI_LETTER_TAG_WHITELIST.
  *
- * Uses the shared Painless script from OpenSearchRelay to rebuild
- * tags_map, ensuring filtering rules stay in sync.
+ * Since `tags` is not indexed (only stored in _source), we cannot
+ * query for documents with client tags directly. Instead, we rebuild
+ * tags_map for all documents that lack tags_map.client. The Painless
+ * script is idempotent — documents without client tags get a harmless
+ * noop rewrite of their existing tags_map.
  *
  * Usage:
  *   bun run scripts/backfill-client.ts
@@ -43,22 +46,14 @@ async function main() {
   const painlessScript = OpenSearchRelay.buildTagsMapPainlessScript();
 
   try {
-    // Count documents that have a "client" tag but no tags_map.client yet
+    // Count documents that don't yet have tags_map.client.
+    // This is an upper bound — not all of these will actually have a
+    // client tag in _source, but we can't know without the script.
     const countResponse = await client.count({
       index: config.opensearchIndex,
       body: {
         query: {
           bool: {
-            must: [
-              {
-                nested: {
-                  path: "tags",
-                  query: {
-                    term: { "tags.0": "client" },
-                  },
-                },
-              },
-            ],
             must_not: [{ exists: { field: "tags_map.client" } }],
           },
         },
@@ -67,7 +62,7 @@ async function main() {
 
     const total = (countResponse.body as { count: number }).count;
     console.log(
-      `Found ${total.toLocaleString()} documents with client tags to backfill.\n`,
+      `Found ${total.toLocaleString()} documents without tags_map.client to process.\n`,
     );
 
     if (total === 0) {
