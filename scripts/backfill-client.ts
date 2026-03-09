@@ -70,9 +70,9 @@ async function main() {
       return;
     }
 
-    console.log("Running update_by_query...\n");
+    console.log("Running update_by_query (this may take a while)...\n");
 
-    const result = await client.updateByQuery({
+    const taskResponse = await client.updateByQuery({
       index: config.opensearchIndex,
       body: {
         query: {
@@ -86,30 +86,78 @@ async function main() {
         },
       },
       conflicts: "proceed",
-      refresh: true,
+      scroll_size: 1000,
+      wait_for_completion: false,
+      requests_per_second: -1,
     });
 
-    const responseBody = result.body as {
-      updated?: number;
-      total?: number;
-      version_conflicts?: number;
+    const taskId = (taskResponse.body as unknown as { task: string }).task;
+    console.log(`Task started: ${taskId}\n`);
+
+    // Poll for task completion
+    let completed = false;
+    while (!completed) {
+      await new Promise((resolve) => setTimeout(resolve, 5000));
+
+      const statusResponse = await client.tasks.get({ task_id: taskId });
+      const task = statusResponse.body.task as {
+        status: {
+          total: number;
+          updated: number;
+          version_conflicts: number;
+          noops: number;
+        };
+      };
+      const status = task.status;
+
+      const pct =
+        status.total > 0
+          ? ((status.updated / status.total) * 100).toFixed(2)
+          : "0.00";
+
+      const parts = [
+        `Updated ${status.updated.toLocaleString()} / ${status.total.toLocaleString()} (${pct}%)`,
+      ];
+      if (status.version_conflicts > 0) {
+        parts.push(`${status.version_conflicts} conflicts`);
+      }
+      if (status.noops > 0) {
+        parts.push(`${status.noops} noops`);
+      }
+      console.log(parts.join(" | "));
+
+      completed = statusResponse.body.completed as boolean;
+    }
+
+    // Get final result
+    const finalResponse = await client.tasks.get({ task_id: taskId });
+    const response = finalResponse.body.response as {
+      total: number;
+      updated: number;
+      version_conflicts: number;
       failures?: Array<Record<string, unknown>>;
     };
 
     console.log(
-      `Updated ${(responseBody.updated || 0).toLocaleString()} of ${(responseBody.total || 0).toLocaleString()} documents`,
+      `\nUpdated ${response.updated.toLocaleString()} of ${response.total.toLocaleString()} documents`,
     );
 
-    if (responseBody.version_conflicts) {
+    if (response.version_conflicts > 0) {
       console.log(
-        `  ${responseBody.version_conflicts} version conflicts (skipped)`,
+        `  ${response.version_conflicts} version conflicts (skipped)`,
       );
     }
 
-    if (responseBody.failures && responseBody.failures.length > 0) {
-      console.error(
-        `  ${responseBody.failures.length} documents failed to update`,
-      );
+    if (response.failures && response.failures.length > 0) {
+      console.error(`  ${response.failures.length} documents failed to update`);
+      for (const failure of response.failures.slice(0, 5)) {
+        console.error(`  ${JSON.stringify(failure)}`);
+      }
+      if (response.failures.length > 5) {
+        console.error(
+          `    ... and ${response.failures.length - 5} more failures`,
+        );
+      }
     }
 
     console.log("\nBackfill completed successfully");
