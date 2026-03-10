@@ -1555,15 +1555,24 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
           this.hasDistinctAuthor(filter) &&
           !filter.kinds?.every((k) => NKinds.replaceable(k))
         ) {
-          // Use cardinality aggregation for distinct author count
+          // Use cardinality aggregation for distinct author count.
+          // precision_threshold controls HyperLogLog++ precision: lower values
+          // are significantly faster on large result sets at the cost of some
+          // accuracy (still very good for counts above the threshold).
+          // A 10s timeout ensures the query returns partial results rather than
+          // hanging indefinitely on broad filters.
           const response = await this.client.search({
             index: this.indexName,
             body: {
               query,
               size: 0,
+              timeout: "10s",
               aggs: {
                 unique_authors: {
-                  cardinality: { field: "pubkey" },
+                  cardinality: {
+                    field: "pubkey",
+                    precision_threshold: 100,
+                  },
                 },
               },
             },
