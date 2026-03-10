@@ -83,6 +83,7 @@ const server = serve<WebSocketData>({
         data: {
           subscriptions: new Map(),
           challenge: "",
+          challengeSent: false,
           authedPubkeys: new Set(),
         },
       });

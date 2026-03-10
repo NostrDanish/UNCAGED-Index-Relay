@@ -50,6 +50,8 @@ export interface WebSocketData {
   subscriptions: Map<string, Subscription>;
   /** The current AUTH challenge string for this connection. */
   challenge: string;
+  /** Whether the AUTH challenge has been sent to the client. */
+  challengeSent: boolean;
   /** Set of pubkeys that have been authenticated on this connection. */
   authedPubkeys: Set<string>;
 }
@@ -288,6 +290,8 @@ export class Relay {
     // NIP-70: Reject protected events unless the author is authenticated
     if (this.isProtectedEvent(event)) {
       if (!this.isAuthenticated(ws, event.pubkey)) {
+        // Send the AUTH challenge so the client can authenticate and retry
+        this.ensureChallengeSent(ws);
         return {
           eventId: event.id,
           accepted: false,
@@ -670,6 +674,14 @@ export class Relay {
     return randomBytes(32).toString("hex");
   }
 
+  /** Send the AUTH challenge to the client if it hasn't been sent yet. */
+  private ensureChallengeSent(ws: ServerWebSocket<WebSocketData>): void {
+    if (!ws.data.challengeSent) {
+      this.sendMessage(ws, ["AUTH", ws.data.challenge]);
+      ws.data.challengeSent = true;
+    }
+  }
+
   /**
    * Compare two relay URLs, tolerating a missing trailing slash
    * when the path is the root `/`.
@@ -882,10 +894,8 @@ export class Relay {
   handleOpen(ws: ServerWebSocket<WebSocketData>) {
     this.connections.add(ws);
     relayConnectionsGauge.set(this.connections.size);
-    // Generate and send NIP-42 AUTH challenge
-    const challenge = this.generateChallenge();
-    ws.data.challenge = challenge;
-    this.sendMessage(ws, ["AUTH", challenge]);
+    // Generate NIP-42 AUTH challenge (sent lazily when needed)
+    ws.data.challenge = this.generateChallenge();
     console.log("WebSocket connection opened");
   }
 

@@ -38,6 +38,7 @@ describe("Relay", () => {
       data: {
         subscriptions: new Map(),
         challenge: "",
+        challengeSent: false,
         authedPubkeys: new Set(),
       },
     } as unknown as ServerWebSocket<WebSocketData>;
@@ -676,15 +677,16 @@ describe("Relay", () => {
   });
 
   describe("handleOpen", () => {
-    it("should send AUTH challenge on connection open", () => {
+    it("should generate AUTH challenge but not send it on connection open", () => {
       relay.handleOpen(mockWs);
 
-      assert.equal(sentMessages.length, 1);
-      assert.equal(sentMessages[0][0], "AUTH");
-      assert.equal(typeof sentMessages[0][1], "string");
-      assert.ok((sentMessages[0][1] as string).length > 0);
-      // Challenge should be stored in connection data
-      assert.equal(mockWs.data.challenge, sentMessages[0][1]);
+      // No messages should be sent on connection open
+      assert.equal(sentMessages.length, 0);
+      // Challenge should be generated and stored in connection data
+      assert.equal(typeof mockWs.data.challenge, "string");
+      assert.ok(mockWs.data.challenge.length > 0);
+      // Challenge should not be marked as sent
+      assert.equal(mockWs.data.challengeSent, false);
     });
   });
 
@@ -1423,7 +1425,7 @@ describe("Relay", () => {
   });
 
   describe("NIP-70 protected events", () => {
-    it("should reject protected event from unauthenticated client", async () => {
+    it("should reject protected event from unauthenticated client and send AUTH challenge", async () => {
       relay.handleOpen(mockWs);
       sentMessages.length = 0;
 
@@ -1440,11 +1442,14 @@ describe("Relay", () => {
 
       await relay.handleEvent(mockWs, protectedEvent);
 
-      assert.equal(sentMessages.length, 1);
-      assert.equal(sentMessages[0][0], "OK");
-      assert.equal(sentMessages[0][1], protectedEvent.id);
-      assert.equal(sentMessages[0][2], false);
-      assert.ok((sentMessages[0][3] as string).includes("auth-required"));
+      // AUTH challenge should be sent before the OK rejection
+      assert.equal(sentMessages.length, 2);
+      assert.equal(sentMessages[0][0], "AUTH");
+      assert.equal(sentMessages[0][1], mockWs.data.challenge);
+      assert.equal(sentMessages[1][0], "OK");
+      assert.equal(sentMessages[1][1], protectedEvent.id);
+      assert.equal(sentMessages[1][2], false);
+      assert.ok((sentMessages[1][3] as string).includes("auth-required"));
     });
 
     it("should accept protected event from authenticated author", async () => {
@@ -1526,9 +1531,11 @@ describe("Relay", () => {
 
       await relay.handleEvent(mockWs, protectedEvent);
 
-      assert.equal(sentMessages.length, 1);
-      assert.equal(sentMessages[0][2], false);
-      assert.ok((sentMessages[0][3] as string).includes("auth-required"));
+      // AUTH challenge is sent lazily before the rejection
+      assert.equal(sentMessages.length, 2);
+      assert.equal(sentMessages[0][0], "AUTH");
+      assert.equal(sentMessages[1][2], false);
+      assert.ok((sentMessages[1][3] as string).includes("auth-required"));
     });
 
     it("should accept non-protected event from unauthenticated client", async () => {
@@ -1592,10 +1599,12 @@ describe("Relay", () => {
       const message = JSON.stringify(["EVENT", protectedEvent]);
       await relay.handleMessage(mockWs, message);
 
-      assert.equal(sentMessages.length, 1);
-      assert.equal(sentMessages[0][0], "OK");
-      assert.equal(sentMessages[0][2], false);
-      assert.ok((sentMessages[0][3] as string).includes("auth-required"));
+      // AUTH challenge should be sent before the OK rejection
+      assert.equal(sentMessages.length, 2);
+      assert.equal(sentMessages[0][0], "AUTH");
+      assert.equal(sentMessages[1][0], "OK");
+      assert.equal(sentMessages[1][2], false);
+      assert.ok((sentMessages[1][3] as string).includes("auth-required"));
     });
   });
 
