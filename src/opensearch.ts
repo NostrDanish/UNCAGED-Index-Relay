@@ -1566,7 +1566,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
             body: {
               query,
               size: 0,
-              timeout: "10s",
+              timeout: "5s",
               aggs: {
                 unique_authors: {
                   cardinality: {
