@@ -20,7 +20,7 @@ import { noteEncode } from "nostr-tools/nip19";
 import { Config } from "../src/config.ts";
 import { OpenSearchRelay } from "../src/opensearch.ts";
 
-const BATCH_SIZE = 5000;
+const BATCH_SIZE = 10000;
 
 /** Delay for the given number of milliseconds. */
 function sleep(ms: number): Promise<void> {
@@ -398,13 +398,9 @@ async function main() {
     if (!afterKey) break;
 
     // Periodically clear fielddata cache to prevent circuit breaker.
-    if (totalProcessed % 5_000 === 0) {
+    if (totalProcessed % 50_000 === 0) {
       await clearCache();
     }
-
-    // Small delay between batches to avoid fielddata accumulation
-    // triggering the circuit breaker.
-    await sleep(200);
   }
 
   console.log(`\nBackfill complete: ${totalProcessed} events processed`);
