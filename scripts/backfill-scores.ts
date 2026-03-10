@@ -84,6 +84,288 @@ interface ScoreEntry {
   zap_cnt: number;
 }
 
+/** Phase 2: Backfill zap amounts and counts (kind 9735). */
+async function backfillZaps(
+  client: OpenSearchClient,
+  indexName: string,
+): Promise<number> {
+  console.log("\nComputing zap scores...\n");
+
+  let zapProcessed = 0;
+  let afterKey: Record<string, string> | undefined;
+
+  while (true) {
+    const compositeAgg: Record<string, unknown> = {
+      composite: {
+        size: BATCH_SIZE,
+        sources: [{ event_id: { terms: { field: "tags_map.e" } } }],
+        ...(afterKey && { after: afterKey }),
+      },
+      aggs: {
+        total_msats: { sum: { field: "amount_msats" } },
+      },
+    };
+
+    const clearCache = async () => {
+      await client.indices.clearCache({ index: indexName, fielddata: true });
+    };
+
+    const response = await withRetry(
+      () =>
+        // @ts-expect-error: composite aggregation not in client types
+        client.search({
+          index: indexName,
+          body: {
+            query: {
+              bool: {
+                must: [{ term: { deleted: false } }, { term: { kind: 9735 } }],
+              },
+            },
+            size: 0,
+            aggs: { by_event: compositeAgg },
+          },
+        }),
+      { onRetry: clearCache },
+    );
+
+    const aggResult = response.body.aggregations?.by_event as {
+      buckets: Array<{
+        key: { event_id: string };
+        doc_count: number;
+        total_msats?: { value: number };
+      }>;
+      after_key?: Record<string, string>;
+    };
+
+    const buckets = aggResult?.buckets || [];
+    if (buckets.length === 0) break;
+
+    // Bulk update zap amounts and counts.
+    const body: Array<Record<string, unknown>> = [];
+    const idList: string[] = [];
+    const zapData = new Map<string, { msats: number; cnt: number }>();
+
+    for (const bucket of buckets) {
+      const id = bucket.key.event_id;
+      const msats = bucket.total_msats?.value ?? 0;
+      const cnt = bucket.doc_count;
+      if (msats <= 0 && cnt <= 0) continue;
+      if (!isValidEventId(id)) continue;
+
+      idList.push(id);
+      zapData.set(id, { msats, cnt });
+
+      body.push({
+        update: { _index: indexName, _id: noteEncode(id) },
+      });
+      body.push({
+        doc: { zap_amount_msats: msats, zap_cnt: cnt },
+      });
+    }
+
+    if (body.length > 0) {
+      const updateResponse = await client.bulk({ body, refresh: false });
+
+      if (updateResponse.body.errors) {
+        const failedIds: string[] = [];
+        const items: Array<Record<string, { error?: unknown }>> =
+          updateResponse.body.items;
+
+        for (let i = 0; i < items.length; i++) {
+          if (items[i].update?.error) {
+            failedIds.push(idList[i]);
+          }
+        }
+
+        if (failedIds.length > 0) {
+          const zapParams: Record<string, { msats: number; cnt: number }> = {};
+          for (const id of failedIds) {
+            const data = zapData.get(id);
+            if (data) zapParams[id] = data;
+          }
+
+          await client.updateByQuery({
+            index: indexName,
+            body: {
+              query: { terms: { id: failedIds } },
+              script: {
+                source: `
+                  def z = params.zaps.get(ctx._source.id);
+                  if (z != null) {
+                    ctx._source.zap_amount_msats = z.msats;
+                    ctx._source.zap_cnt = z.cnt;
+                  }
+                `,
+                lang: "painless",
+                params: { zaps: zapParams },
+              },
+            },
+            refresh: false,
+            conflicts: "proceed",
+          });
+        }
+      }
+    }
+
+    zapProcessed += buckets.length;
+    afterKey = aggResult.after_key;
+
+    console.log(
+      `[zaps] Processed ${zapProcessed} zapped events (batch: ${buckets.length})`,
+    );
+
+    if (!afterKey) break;
+
+    if (zapProcessed % 5_000 === 0) {
+      await client.indices.clearCache({
+        index: indexName,
+        fielddata: true,
+      });
+    }
+
+    await sleep(200);
+  }
+
+  return zapProcessed;
+}
+
+/** Phase 3: Backfill quote repost counts (kind 1 events referencing via `q` tag). */
+async function backfillQuotes(
+  client: OpenSearchClient,
+  indexName: string,
+): Promise<number> {
+  console.log("\nComputing quote repost scores...\n");
+
+  let quoteProcessed = 0;
+  let afterKey: Record<string, string> | undefined;
+
+  while (true) {
+    const compositeAgg: Record<string, unknown> = {
+      composite: {
+        size: BATCH_SIZE,
+        sources: [{ event_id: { terms: { field: "tags_map.q" } } }],
+        ...(afterKey && { after: afterKey }),
+      },
+    };
+
+    const clearCache = async () => {
+      await client.indices.clearCache({ index: indexName, fielddata: true });
+    };
+
+    const response = await withRetry(
+      () =>
+        // @ts-expect-error: composite aggregation not in client types
+        client.search({
+          index: indexName,
+          body: {
+            query: {
+              bool: {
+                must: [{ term: { deleted: false } }, { term: { kind: 1 } }],
+              },
+            },
+            size: 0,
+            aggs: { by_event: compositeAgg },
+          },
+        }),
+      { onRetry: clearCache },
+    );
+
+    const aggResult = response.body.aggregations?.by_event as {
+      buckets: Array<{
+        key: { event_id: string };
+        doc_count: number;
+      }>;
+      after_key?: Record<string, string>;
+    };
+
+    const buckets = aggResult?.buckets || [];
+    if (buckets.length === 0) break;
+
+    // Bulk update quote counts.
+    const body: Array<Record<string, unknown>> = [];
+    const idList: string[] = [];
+    const quoteCounts = new Map<string, number>();
+
+    for (const bucket of buckets) {
+      const id = bucket.key.event_id;
+      if (!isValidEventId(id)) continue;
+
+      idList.push(id);
+      quoteCounts.set(id, bucket.doc_count);
+
+      body.push({
+        update: { _index: indexName, _id: noteEncode(id) },
+      });
+      body.push({
+        doc: { quote_cnt: bucket.doc_count },
+      });
+    }
+
+    if (body.length > 0) {
+      const updateResponse = await client.bulk({ body, refresh: false });
+
+      if (updateResponse.body.errors) {
+        const failedIds: string[] = [];
+        const items: Array<Record<string, { error?: unknown }>> =
+          updateResponse.body.items;
+
+        for (let i = 0; i < items.length; i++) {
+          if (items[i].update?.error) {
+            failedIds.push(idList[i]);
+          }
+        }
+
+        if (failedIds.length > 0) {
+          const quoteParams: Record<string, number> = {};
+          for (const id of failedIds) {
+            const cnt = quoteCounts.get(id);
+            if (cnt) quoteParams[id] = cnt;
+          }
+
+          await client.updateByQuery({
+            index: indexName,
+            body: {
+              query: { terms: { id: failedIds } },
+              script: {
+                source: `
+                  def cnt = params.quotes.get(ctx._source.id);
+                  if (cnt != null) {
+                    ctx._source.quote_cnt = cnt;
+                  }
+                `,
+                lang: "painless",
+                params: { quotes: quoteParams },
+              },
+            },
+            refresh: false,
+            conflicts: "proceed",
+          });
+        }
+      }
+    }
+
+    quoteProcessed += buckets.length;
+    afterKey = aggResult.after_key;
+
+    console.log(
+      `[quotes] Processed ${quoteProcessed} quoted events (batch: ${buckets.length})`,
+    );
+
+    if (!afterKey) break;
+
+    if (quoteProcessed % 5_000 === 0) {
+      await client.indices.clearCache({
+        index: indexName,
+        fielddata: true,
+      });
+    }
+
+    await sleep(200);
+  }
+
+  return quoteProcessed;
+}
+
 async function main() {
   console.log("Starting scores backfill\n");
 
@@ -304,273 +586,11 @@ async function main() {
     await sleep(200);
   }
 
-  // Phase 2: Same for zap amounts (kind 9735).
-  console.log("\nComputing zap scores...\n");
-
-  let zapProcessed = 0;
-  afterKey = undefined;
-
-  while (true) {
-    const compositeAgg: Record<string, unknown> = {
-      composite: {
-        size: BATCH_SIZE,
-        sources: [{ event_id: { terms: { field: "tags_map.e" } } }],
-        ...(afterKey && { after: afterKey }),
-      },
-      aggs: {
-        total_msats: { sum: { field: "amount_msats" } },
-      },
-    };
-
-    const clearCache = async () => {
-      await client.indices.clearCache({ index: indexName, fielddata: true });
-    };
-
-    const response = await withRetry(
-      () =>
-        // @ts-expect-error: composite aggregation not in client types
-        client.search({
-          index: indexName,
-          body: {
-            query: {
-              bool: {
-                must: [{ term: { deleted: false } }, { term: { kind: 9735 } }],
-              },
-            },
-            size: 0,
-            aggs: { by_event: compositeAgg },
-          },
-        }),
-      { onRetry: clearCache },
-    );
-
-    const aggResult = response.body.aggregations?.by_event as {
-      buckets: Array<{
-        key: { event_id: string };
-        doc_count: number;
-        total_msats?: { value: number };
-      }>;
-      after_key?: Record<string, string>;
-    };
-
-    const buckets = aggResult?.buckets || [];
-    if (buckets.length === 0) break;
-
-    // Bulk update zap amounts and counts.
-    const body: Array<Record<string, unknown>> = [];
-    const idList: string[] = [];
-    const zapData = new Map<string, { msats: number; cnt: number }>();
-
-    for (const bucket of buckets) {
-      const id = bucket.key.event_id;
-      const msats = bucket.total_msats?.value ?? 0;
-      const cnt = bucket.doc_count;
-      if (msats <= 0 && cnt <= 0) continue;
-      if (!isValidEventId(id)) continue;
-
-      idList.push(id);
-      zapData.set(id, { msats, cnt });
-
-      body.push({
-        update: { _index: indexName, _id: noteEncode(id) },
-      });
-      body.push({
-        doc: { zap_amount_msats: msats, zap_cnt: cnt },
-      });
-    }
-
-    if (body.length > 0) {
-      const updateResponse = await client.bulk({ body, refresh: false });
-
-      if (updateResponse.body.errors) {
-        const failedIds: string[] = [];
-        const items: Array<Record<string, { error?: unknown }>> =
-          updateResponse.body.items;
-
-        for (let i = 0; i < items.length; i++) {
-          if (items[i].update?.error) {
-            failedIds.push(idList[i]);
-          }
-        }
-
-        if (failedIds.length > 0) {
-          const zapParams: Record<string, { msats: number; cnt: number }> = {};
-          for (const id of failedIds) {
-            const data = zapData.get(id);
-            if (data) zapParams[id] = data;
-          }
-
-          await client.updateByQuery({
-            index: indexName,
-            body: {
-              query: { terms: { id: failedIds } },
-              script: {
-                source: `
-                  def z = params.zaps.get(ctx._source.id);
-                  if (z != null) {
-                    ctx._source.zap_amount_msats = z.msats;
-                    ctx._source.zap_cnt = z.cnt;
-                  }
-                `,
-                lang: "painless",
-                params: { zaps: zapParams },
-              },
-            },
-            refresh: false,
-            conflicts: "proceed",
-          });
-        }
-      }
-    }
-
-    zapProcessed += buckets.length;
-    afterKey = aggResult.after_key;
-
-    console.log(
-      `Processed ${zapProcessed} zapped events (batch: ${buckets.length})`,
-    );
-
-    if (!afterKey) break;
-
-    if (zapProcessed % 5_000 === 0) {
-      await client.indices.clearCache({
-        index: indexName,
-        fielddata: true,
-      });
-    }
-
-    await sleep(200);
-  }
-
-  // Phase 3: Quote reposts (kind 1 events referencing via `q` tag).
-  console.log("\nComputing quote repost scores...\n");
-
-  let quoteProcessed = 0;
-  afterKey = undefined;
-
-  while (true) {
-    const compositeAgg: Record<string, unknown> = {
-      composite: {
-        size: BATCH_SIZE,
-        sources: [{ event_id: { terms: { field: "tags_map.q" } } }],
-        ...(afterKey && { after: afterKey }),
-      },
-    };
-
-    const clearCache = async () => {
-      await client.indices.clearCache({ index: indexName, fielddata: true });
-    };
-
-    const response = await withRetry(
-      () =>
-        // @ts-expect-error: composite aggregation not in client types
-        client.search({
-          index: indexName,
-          body: {
-            query: {
-              bool: {
-                must: [{ term: { deleted: false } }, { term: { kind: 1 } }],
-              },
-            },
-            size: 0,
-            aggs: { by_event: compositeAgg },
-          },
-        }),
-      { onRetry: clearCache },
-    );
-
-    const aggResult = response.body.aggregations?.by_event as {
-      buckets: Array<{
-        key: { event_id: string };
-        doc_count: number;
-      }>;
-      after_key?: Record<string, string>;
-    };
-
-    const buckets = aggResult?.buckets || [];
-    if (buckets.length === 0) break;
-
-    // Bulk update quote counts.
-    const body: Array<Record<string, unknown>> = [];
-    const idList: string[] = [];
-    const quoteCounts = new Map<string, number>();
-
-    for (const bucket of buckets) {
-      const id = bucket.key.event_id;
-      if (!isValidEventId(id)) continue;
-
-      idList.push(id);
-      quoteCounts.set(id, bucket.doc_count);
-
-      body.push({
-        update: { _index: indexName, _id: noteEncode(id) },
-      });
-      body.push({
-        doc: { quote_cnt: bucket.doc_count },
-      });
-    }
-
-    if (body.length > 0) {
-      const updateResponse = await client.bulk({ body, refresh: false });
-
-      if (updateResponse.body.errors) {
-        const failedIds: string[] = [];
-        const items: Array<Record<string, { error?: unknown }>> =
-          updateResponse.body.items;
-
-        for (let i = 0; i < items.length; i++) {
-          if (items[i].update?.error) {
-            failedIds.push(idList[i]);
-          }
-        }
-
-        if (failedIds.length > 0) {
-          const quoteParams: Record<string, number> = {};
-          for (const id of failedIds) {
-            const cnt = quoteCounts.get(id);
-            if (cnt) quoteParams[id] = cnt;
-          }
-
-          await client.updateByQuery({
-            index: indexName,
-            body: {
-              query: { terms: { id: failedIds } },
-              script: {
-                source: `
-                  def cnt = params.quotes.get(ctx._source.id);
-                  if (cnt != null) {
-                    ctx._source.quote_cnt = cnt;
-                  }
-                `,
-                lang: "painless",
-                params: { quotes: quoteParams },
-              },
-            },
-            refresh: false,
-            conflicts: "proceed",
-          });
-        }
-      }
-    }
-
-    quoteProcessed += buckets.length;
-    afterKey = aggResult.after_key;
-
-    console.log(
-      `Processed ${quoteProcessed} quoted events (batch: ${buckets.length})`,
-    );
-
-    if (!afterKey) break;
-
-    if (quoteProcessed % 5_000 === 0) {
-      await client.indices.clearCache({
-        index: indexName,
-        fielddata: true,
-      });
-    }
-
-    await sleep(200);
-  }
+  // Phase 2 & 3 run concurrently since they update independent fields.
+  const [zapProcessed, quoteProcessed] = await Promise.all([
+    backfillZaps(client, indexName),
+    backfillQuotes(client, indexName),
+  ]);
 
   console.log(`\nBackfill complete:`);
   console.log(`  ${totalWithScores} events with engagement scores`);
