@@ -81,6 +81,7 @@ interface ScoreEntry {
   repost_cnt: number;
   quote_cnt: number;
   zap_amount_msats: number;
+  zap_cnt: number;
 }
 
 async function main() {
@@ -186,6 +187,7 @@ async function main() {
         repost_cnt: 0,
         quote_cnt: 0,
         zap_amount_msats: 0,
+        zap_cnt: 0,
       };
 
       for (const kb of bucket.by_kind?.buckets || []) {
@@ -223,6 +225,7 @@ async function main() {
           repost_cnt: s.repost_cnt,
           quote_cnt: s.quote_cnt,
           zap_amount_msats: s.zap_amount_msats,
+          zap_cnt: s.zap_cnt,
         },
       });
     }
@@ -265,6 +268,7 @@ async function main() {
                   ctx._source.repost_cnt = s.repost_cnt;
                   ctx._source.quote_cnt = s.quote_cnt;
                   ctx._source.zap_amount_msats = s.zap_amount_msats;
+                  ctx._source.zap_cnt = s.zap_cnt;
                 }
               `,
               lang: "painless",
@@ -352,25 +356,26 @@ async function main() {
     const buckets = aggResult?.buckets || [];
     if (buckets.length === 0) break;
 
-    // Bulk update zap amounts.
+    // Bulk update zap amounts and counts.
     const body: Array<Record<string, unknown>> = [];
     const idList: string[] = [];
-    const zapAmounts = new Map<string, number>();
+    const zapData = new Map<string, { msats: number; cnt: number }>();
 
     for (const bucket of buckets) {
       const id = bucket.key.event_id;
       const msats = bucket.total_msats?.value ?? 0;
-      if (msats <= 0) continue;
+      const cnt = bucket.doc_count;
+      if (msats <= 0 && cnt <= 0) continue;
       if (!isValidEventId(id)) continue;
 
       idList.push(id);
-      zapAmounts.set(id, msats);
+      zapData.set(id, { msats, cnt });
 
       body.push({
         update: { _index: indexName, _id: noteEncode(id) },
       });
       body.push({
-        doc: { zap_amount_msats: msats },
+        doc: { zap_amount_msats: msats, zap_cnt: cnt },
       });
     }
 
@@ -389,10 +394,10 @@ async function main() {
         }
 
         if (failedIds.length > 0) {
-          const zapParams: Record<string, number> = {};
+          const zapParams: Record<string, { msats: number; cnt: number }> = {};
           for (const id of failedIds) {
-            const msats = zapAmounts.get(id);
-            if (msats) zapParams[id] = msats;
+            const data = zapData.get(id);
+            if (data) zapParams[id] = data;
           }
 
           await client.updateByQuery({
@@ -401,9 +406,10 @@ async function main() {
               query: { terms: { id: failedIds } },
               script: {
                 source: `
-                  def msats = params.zaps.get(ctx._source.id);
-                  if (msats != null) {
-                    ctx._source.zap_amount_msats = msats;
+                  def z = params.zaps.get(ctx._source.id);
+                  if (z != null) {
+                    ctx._source.zap_amount_msats = z.msats;
+                    ctx._source.zap_cnt = z.cnt;
                   }
                 `,
                 lang: "painless",
