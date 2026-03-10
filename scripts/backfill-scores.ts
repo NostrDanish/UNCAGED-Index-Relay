@@ -1,10 +1,10 @@
 /**
  * Backfill engagement scores for all existing events.
  *
- * Paginates through ALL referencing events using composite aggregation
- * on `tags_map.e`. For each batch of referenced event IDs, runs scoped
- * zap and quote aggregations, merges everything into a single scores
- * map, and issues one bulk update per batch.
+ * Paginates through referenced event IDs using composite aggregation on
+ * `tags_map.e`. Each batch of IDs gets engagement, zap, and quote
+ * aggregations run against it, then a single bulk update writes all
+ * scores. Nothing accumulates across batches.
  *
  * Events that have never been referenced get no update (their scores
  * remain at 0, which is correct).
