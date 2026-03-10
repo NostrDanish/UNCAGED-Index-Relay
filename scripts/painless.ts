@@ -96,6 +96,9 @@ export function buildReindexPainlessScript(): string {
     }
     if (!ctx._source.containsKey('repost_cnt')) { ctx._source.repost_cnt = 0; }
 
+    // Ensure quote_cnt exists
+    if (!ctx._source.containsKey('quote_cnt')) { ctx._source.quote_cnt = 0; }
+
     // Ensure zap_cnt exists
     if (!ctx._source.containsKey('zap_cnt')) { ctx._source.zap_cnt = 0; }
 

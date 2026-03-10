@@ -102,6 +102,7 @@ export class Nip85 {
    * - `comment_cnt`  -- comment_cnt from recomputeScores
    * - `repost_cnt`   -- repost_cnt from recomputeScores
    * - `reaction_cnt` -- reaction_cnt from recomputeScores
+   * - `quote_cnt`    -- quote_cnt from recomputeScores
    * - `zap_cnt`      -- zap_cnt from recomputeScores
    * - `zap_amount`   -- zap_amount_msats converted to sats
    */
@@ -118,6 +119,8 @@ export class Nip85 {
         tags.push(["repost_cnt", scores.repost_cnt.toString()]);
       if (scores.reaction_cnt > 0)
         tags.push(["reaction_cnt", scores.reaction_cnt.toString()]);
+      if (scores.quote_cnt > 0)
+        tags.push(["quote_cnt", scores.quote_cnt.toString()]);
       if (scores.zap_cnt > 0) tags.push(["zap_cnt", scores.zap_cnt.toString()]);
       if (zapAmount > 0) tags.push(["zap_amount", zapAmount.toString()]);
 
@@ -154,6 +157,7 @@ export class Nip85 {
    * - `comment_cnt`  -- kind 1 + 1111 referencing via `a` tag
    * - `repost_cnt`   -- kind 6 + 16 referencing via `a` tag
    * - `reaction_cnt` -- kind 7 referencing via `a` tag
+   * - `quote_cnt`    -- kind 1 referencing via `q` tag (quote reposts)
    * - `zap_cnt`      -- kind 9735 count referencing via `a` tag
    * - `zap_amount`   -- sum of zap sats referencing via `a` tag
    */
@@ -177,6 +181,8 @@ export class Nip85 {
         tags.push(["repost_cnt", scores.repost_cnt.toString()]);
       if (scores.reaction_cnt > 0)
         tags.push(["reaction_cnt", scores.reaction_cnt.toString()]);
+      if (scores.quote_cnt > 0)
+        tags.push(["quote_cnt", scores.quote_cnt.toString()]);
       if (scores.zap_cnt > 0) tags.push(["zap_cnt", scores.zap_cnt.toString()]);
       if (zapAmount > 0) tags.push(["zap_amount", zapAmount.toString()]);
 
@@ -320,6 +326,7 @@ export class Nip85 {
         comment_cnt: 0,
         reaction_cnt: 0,
         repost_cnt: 0,
+        quote_cnt: 0,
         zap_amount_msats: 0,
         zap_cnt: 0,
       });

@@ -386,6 +386,7 @@ describe("Nip85", () => {
         comment_cnt: 10,
         reaction_cnt: 20,
         repost_cnt: 3,
+        quote_cnt: 2,
         zap_cnt: 5,
         zap_amount_msats: 100_000,
       };
@@ -410,6 +411,10 @@ describe("Nip85", () => {
       assert.deepEqual(
         event.tags.find((t) => t[0] === "repost_cnt"),
         ["repost_cnt", "3"],
+      );
+      assert.deepEqual(
+        event.tags.find((t) => t[0] === "quote_cnt"),
+        ["quote_cnt", "2"],
       );
       assert.deepEqual(
         event.tags.find((t) => t[0] === "zap_cnt"),
@@ -439,6 +444,7 @@ describe("Nip85", () => {
         comment_cnt: 0,
         reaction_cnt: 0,
         repost_cnt: 0,
+        quote_cnt: 0,
         zap_cnt: 1,
         zap_amount_msats: 21_500, // 21.5 sats, floors to 21
       };
@@ -471,6 +477,7 @@ describe("Nip85", () => {
         comment_cnt: 0,
         reaction_cnt: 0,
         repost_cnt: 0,
+        quote_cnt: 0,
         zap_cnt: 0,
         zap_amount_msats: 0,
       };
@@ -497,6 +504,7 @@ describe("Nip85", () => {
         comment_cnt: 5,
         reaction_cnt: 0,
         repost_cnt: 0,
+        quote_cnt: 0,
         zap_cnt: 0,
         zap_amount_msats: 0,
       };

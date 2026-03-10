@@ -46,12 +46,14 @@ interface NostrEventDocument extends NostrEvent {
   followers: number;
   /** Count of unique authors who engaged with this event (non-kind-0). */
   engagers: number;
-  /** Count of kind 1/1111 referencing events. */
+  /** Count of kind 1/1111 referencing events (excludes quote reposts). */
   comment_cnt: number;
   /** Count of kind 7 referencing events. */
   reaction_cnt: number;
   /** Count of kind 6/16 referencing events. */
   repost_cnt: number;
+  /** Count of kind 1 quote reposts referencing via `q` tag. */
+  quote_cnt: number;
   /** Sum of amount_msats from kind 9735 zap receipts referencing this event. */
   zap_amount_msats: number;
   /** Count of kind 9735 zap receipts referencing this event. */
@@ -63,6 +65,7 @@ export interface EventScores {
   comment_cnt: number;
   reaction_cnt: number;
   repost_cnt: number;
+  quote_cnt: number;
   zap_amount_msats: number;
   zap_cnt: number;
 }
@@ -402,6 +405,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
       comment_cnt: 0,
       reaction_cnt: 0,
       repost_cnt: 0,
+      quote_cnt: 0,
       zap_amount_msats: 0,
       zap_cnt: 0,
     };
@@ -687,7 +691,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
 
   /**
    * Query rising events — gaining engagement quickly relative to age.
-   * Score = (comment_cnt + reaction_cnt + repost_cnt) / age_in_hours.
+   * Score = (comment_cnt + reaction_cnt + repost_cnt + quote_cnt) / age_in_hours.
    * Uses all-time counts as the score basis.
    */
   private async querySortRising(
@@ -708,7 +712,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
             query,
             script: {
               source: `
-                double total = doc['comment_cnt'].value + doc['reaction_cnt'].value + doc['repost_cnt'].value;
+                double total = doc['comment_cnt'].value + doc['reaction_cnt'].value + doc['repost_cnt'].value + doc['quote_cnt'].value;
                 double ageHours = Math.max((params.now - doc['created_at'].value) / 3600.0, 0.1);
                 return total / ageHours;
               `,
@@ -1306,6 +1310,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
         def old_comment_cnt = ctx._source.containsKey('comment_cnt') ? ctx._source.comment_cnt : 0;
         def old_reaction_cnt = ctx._source.containsKey('reaction_cnt') ? ctx._source.reaction_cnt : 0;
         def old_repost_cnt = ctx._source.containsKey('repost_cnt') ? ctx._source.repost_cnt : 0;
+        def old_quote_cnt = ctx._source.containsKey('quote_cnt') ? ctx._source.quote_cnt : 0;
         def old_zap_amount_msats = ctx._source.zap_amount_msats;
         def old_zap_cnt = ctx._source.containsKey('zap_cnt') ? ctx._source.zap_cnt : 0;
         ctx._source = params.event;
@@ -1314,6 +1319,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
         ctx._source.comment_cnt = old_comment_cnt;
         ctx._source.reaction_cnt = old_reaction_cnt;
         ctx._source.repost_cnt = old_repost_cnt;
+        ctx._source.quote_cnt = old_quote_cnt;
         ctx._source.zap_amount_msats = old_zap_amount_msats;
         ctx._source.zap_cnt = old_zap_cnt;
       } else {
@@ -1423,6 +1429,9 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
 
         for (const tag of entry.event.tags) {
           if (tag[0] === "e" && tag[1] && entry.event.kind !== 7) {
+            this.pendingDirtyIds.add(tag[1]);
+          } else if (tag[0] === "q" && tag[1]) {
+            // NIP-18: Quote reposts reference the quoted event via `q` tag.
             this.pendingDirtyIds.add(tag[1]);
           } else if (tag[0] === "a" && tag[1]) {
             referencedAddrs.add(tag[1]);
@@ -1769,6 +1778,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     comment_cnt: { type: "integer" },
     reaction_cnt: { type: "integer" },
     repost_cnt: { type: "integer" },
+    quote_cnt: { type: "integer" },
     zap_amount_msats: { type: "long" },
     zap_cnt: { type: "integer" },
   };
@@ -1975,6 +1985,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
         comment_cnt: number;
         reaction_cnt: number;
         repost_cnt: number;
+        quote_cnt: number;
         zap_amount_msats: number;
         zap_cnt: number;
       }
@@ -1987,6 +1998,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
         comment_cnt: 0,
         reaction_cnt: 0,
         repost_cnt: 0,
+        quote_cnt: 0,
         zap_amount_msats: 0,
         zap_cnt: 0,
       });
@@ -2166,6 +2178,49 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
           s.zap_cnt = bucket.doc_count;
         }
       }
+
+      // Phase 3b: Aggregate quote reposts (kind 1 events referencing via `q` tag).
+      const quoteResponse = await this.client.search({
+        index: this.indexName,
+        body: {
+          query: {
+            bool: {
+              must: [
+                { term: { deleted: false } },
+                { term: { kind: 1 } },
+                { terms: { "tags_map.q": dirtyNonKind0Ids } },
+              ],
+            },
+          },
+          size: 0,
+          aggs: {
+            by_event: {
+              terms: {
+                field: "tags_map.q",
+                size: dirtyNonKind0Ids.length,
+                include: dirtyNonKind0Ids,
+              },
+            },
+          },
+        },
+      });
+
+      const quoteBuckets =
+        (
+          quoteResponse.body.aggregations?.by_event as unknown as {
+            buckets?: Array<{
+              key: string;
+              doc_count: number;
+            }>;
+          }
+        )?.buckets || [];
+
+      for (const bucket of quoteBuckets) {
+        const s = scores.get(bucket.key);
+        if (s) {
+          s.quote_cnt = bucket.doc_count;
+        }
+      }
     }
 
     // Phase 4: Bulk update the dirty events with computed scores.
@@ -2185,6 +2240,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
           comment_cnt: s.comment_cnt,
           reaction_cnt: s.reaction_cnt,
           repost_cnt: s.repost_cnt,
+          quote_cnt: s.quote_cnt,
           zap_amount_msats: s.zap_amount_msats,
           zap_cnt: s.zap_cnt,
         },
@@ -2223,6 +2279,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
               comment_cnt: number;
               reaction_cnt: number;
               repost_cnt: number;
+              quote_cnt: number;
               zap_amount_msats: number;
               zap_cnt: number;
             }
@@ -2245,6 +2302,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
                     ctx._source.comment_cnt = s.comment_cnt;
                     ctx._source.reaction_cnt = s.reaction_cnt;
                     ctx._source.repost_cnt = s.repost_cnt;
+                    ctx._source.quote_cnt = s.quote_cnt;
                     ctx._source.zap_amount_msats = s.zap_amount_msats;
                     ctx._source.zap_cnt = s.zap_cnt;
                   }
@@ -2283,6 +2341,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
           comment_cnt: s.comment_cnt,
           reaction_cnt: s.reaction_cnt,
           repost_cnt: s.repost_cnt,
+          quote_cnt: s.quote_cnt,
           zap_amount_msats: s.zap_amount_msats,
           zap_cnt: s.zap_cnt,
         });
