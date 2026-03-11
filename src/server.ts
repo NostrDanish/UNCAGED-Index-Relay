@@ -46,6 +46,8 @@ const relay = new Relay(opensearchRelay, {
     pubkey: config.relayPubkey,
     contact: config.relayContact,
     self: await config.nostrSigner.getPublicKey(),
+    icon: new URL("/icon.png", config.publicUrl).toString(),
+    banner: new URL("/banner.jpg", config.publicUrl).toString(),
   },
 });
 
@@ -108,65 +110,54 @@ const server = serve<WebSocketData>({
       return undefined;
     }
 
-    // Serve static assets
-    if (url.pathname === "/favicon.ico" && req.method === "GET") {
-      return new Response(faviconIco, {
-        headers: { "Content-Type": "image/x-icon" },
-      });
-    }
-    if (url.pathname === "/icon.png" && req.method === "GET") {
-      return new Response(iconPng, {
-        headers: { "Content-Type": "image/png" },
-      });
-    }
-    if (url.pathname === "/banner.jpg" && req.method === "GET") {
-      return new Response(bannerJpg, {
-        headers: { "Content-Type": "image/jpeg" },
-      });
-    }
+    if (req.method === "GET") {
+      // Serve static assets
+      if (url.pathname === "/favicon.ico") {
+        return new Response(faviconIco, {
+          headers: { "Content-Type": "image/x-icon" },
+        });
+      }
+      if (url.pathname === "/icon.png") {
+        return new Response(iconPng, {
+          headers: { "Content-Type": "image/png" },
+        });
+      }
+      if (url.pathname === "/banner.jpg") {
+        return new Response(bannerJpg, {
+          headers: { "Content-Type": "image/jpeg" },
+        });
+      }
 
-    // Handle NIP-11 relay information document
-    if (url.pathname === "/" && req.method === "GET") {
-      const acceptHeader = req.headers.get("accept");
+      // Prometheus metrics endpoint
+      if (url.pathname === "/metrics") {
+        const metrics = await register.metrics();
+        return new Response(metrics, {
+          headers: { "Content-Type": register.contentType },
+        });
+      }
 
-      if (acceptHeader?.includes("application/nostr+json")) {
-        return new Response(
-          JSON.stringify({
-            ...relay.getRelayInfo(),
-            banner: new URL(
-              "/banner.jpg",
-              config.relayUrl.replace(/^ws/, "http"),
-            ).toString(),
-            icon: new URL(
-              "/icon.png",
-              config.relayUrl.replace(/^ws/, "http"),
-            ).toString(),
-          }),
-          {
+      // Handle NIP-11 relay information document
+      if (url.pathname === "/") {
+        const acceptHeader = req.headers.get("accept");
+
+        if (acceptHeader?.includes("application/nostr+json")) {
+          return new Response(JSON.stringify(relay.getRelayInfo(), null, 2), {
             headers: {
               "Content-Type": "application/nostr+json",
+              "Access-Control-Allow-Origin": "*",
+            },
+          });
+        }
+
+        return new Response(
+          "This is a Nostr relay. Connect using a WebSocket client or add application/nostr+json Accept header for relay info.",
+          {
+            headers: {
               "Access-Control-Allow-Origin": "*",
             },
           },
         );
       }
-
-      return new Response(
-        "This is a Nostr relay. Connect using a WebSocket client or add application/nostr+json Accept header for relay info.",
-        {
-          headers: {
-            "Access-Control-Allow-Origin": "*",
-          },
-        },
-      );
-    }
-
-    // Prometheus metrics endpoint
-    if (url.pathname === "/metrics" && req.method === "GET") {
-      const metrics = await register.metrics();
-      return new Response(metrics, {
-        headers: { "Content-Type": register.contentType },
-      });
     }
 
     return new Response("Not Found", { status: 404 });

@@ -29,6 +29,14 @@ export class Config {
     return value;
   }
 
+  get publicUrl(): string {
+    const value = this.env.get("PUBLIC_URL");
+    if (!value) {
+      return this.relayUrl.replace(/^ws/, "http"); // Default to relay URL with http scheme
+    }
+    return value;
+  }
+
   get relayPubkey(): string | undefined {
     return this.env.get("RELAY_PUBKEY");
   }
