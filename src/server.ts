@@ -1,4 +1,6 @@
+import { readFile } from "node:fs/promises";
 import process from "node:process";
+import { fileURLToPath } from "node:url";
 import type { ClientOptions } from "@opensearch-project/opensearch";
 import { Client as OpenSearchClient } from "@opensearch-project/opensearch";
 import { serve } from "bun";
@@ -71,6 +73,14 @@ try {
   process.exit(1);
 }
 
+// Pre-load static assets into memory.
+const faviconIco = await readFile(
+  fileURLToPath(new URL("../public/favicon.ico", import.meta.url)),
+);
+const iconPng = await readFile(
+  fileURLToPath(new URL("../public/icon.png", import.meta.url)),
+);
+
 // Create Bun server with WebSocket support
 const server = serve<WebSocketData>({
   port: config.port,
@@ -95,17 +105,35 @@ const server = serve<WebSocketData>({
       return undefined;
     }
 
+    // Serve static assets
+    if (url.pathname === "/favicon.ico" && req.method === "GET") {
+      return new Response(faviconIco, {
+        headers: { "Content-Type": "image/x-icon" },
+      });
+    }
+    if (url.pathname === "/icon.png" && req.method === "GET") {
+      return new Response(iconPng, {
+        headers: { "Content-Type": "image/png" },
+      });
+    }
+
     // Handle NIP-11 relay information document
     if (url.pathname === "/" && req.method === "GET") {
       const acceptHeader = req.headers.get("accept");
 
       if (acceptHeader?.includes("application/nostr+json")) {
-        return new Response(JSON.stringify(relay.getRelayInfo()), {
-          headers: {
-            "Content-Type": "application/nostr+json",
-            "Access-Control-Allow-Origin": "*",
+        return new Response(
+          JSON.stringify({
+            ...relay.getRelayInfo(),
+            icon: `${url.origin}/icon.png`,
+          }),
+          {
+            headers: {
+              "Content-Type": "application/nostr+json",
+              "Access-Control-Allow-Origin": "*",
+            },
           },
-        });
+        );
       }
 
       return new Response(
