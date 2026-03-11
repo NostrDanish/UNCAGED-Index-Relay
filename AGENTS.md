@@ -40,6 +40,7 @@
 │   ├── delete-expired-events.ts   # Delete expired events (NIP-40)
 │   ├── delete-incomplete-events.ts # Delete events with missing fields
 │   ├── export.ts                  # Export events from the index
+│   ├── refresh-nip85.ts           # Refresh NIP-85 stats for events matching a filter
 │   ├── reindex-tags-map.ts        # Reindex tags_map for existing documents
 │   ├── reindex-to-clean-index.ts  # Reindex into a fresh index
 │   └── update-trends.ts          # Compute and publish trending tags
