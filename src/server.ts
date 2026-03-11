@@ -133,8 +133,14 @@ const server = serve<WebSocketData>({
         return new Response(
           JSON.stringify({
             ...relay.getRelayInfo(),
-            banner: new URL("/banner.jpg", url.origin).toString(),
-            icon: new URL("/icon.png", url.origin).toString(),
+            banner: new URL(
+              "/banner.jpg",
+              config.relayUrl.replace(/^ws/, "http"),
+            ).toString(),
+            icon: new URL(
+              "/icon.png",
+              config.relayUrl.replace(/^ws/, "http"),
+            ).toString(),
           }),
           {
             headers: {
