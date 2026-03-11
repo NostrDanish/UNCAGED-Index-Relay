@@ -652,6 +652,13 @@ async function main() {
     }
   }
 
+  function logProgress() {
+    const pct = total > 0 ? ((processed / total) * 100).toFixed(1) : "0.0";
+    console.log(
+      `  Progress: ${processed.toLocaleString()} / ${total.toLocaleString()} (${pct}%) — ${publishedEvents.toLocaleString()} event stats, ${publishedUsers.toLocaleString()} user stats`,
+    );
+  }
+
   let currentHits = hitsResult.hits;
 
   while (currentHits.length > 0) {
@@ -669,14 +676,11 @@ async function main() {
         kind0PubkeyBatch.length >= BATCH_SIZE
       ) {
         await flushBatch();
+        logProgress();
       }
     }
 
     processed += currentHits.length;
-    const pct = total > 0 ? ((processed / total) * 100).toFixed(1) : "0.0";
-    console.log(
-      `  Progress: ${processed.toLocaleString()} / ${total.toLocaleString()} (${pct}%) — ${publishedEvents.toLocaleString()} event stats, ${publishedUsers.toLocaleString()} user stats`,
-    );
 
     // Fetch next scroll page.
     const scrollResponse = await client.scroll({
@@ -698,6 +702,7 @@ async function main() {
 
   // Flush remaining.
   await flushBatch();
+  logProgress();
 
   // Clean up scroll context.
   try {
