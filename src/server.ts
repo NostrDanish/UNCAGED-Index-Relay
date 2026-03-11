@@ -80,6 +80,9 @@ const faviconIco = await readFile(
 const iconPng = await readFile(
   fileURLToPath(new URL("../public/icon.png", import.meta.url)),
 );
+const bannerJpg = await readFile(
+  fileURLToPath(new URL("../public/banner.jpg", import.meta.url)),
+);
 
 // Create Bun server with WebSocket support
 const server = serve<WebSocketData>({
@@ -116,6 +119,11 @@ const server = serve<WebSocketData>({
         headers: { "Content-Type": "image/png" },
       });
     }
+    if (url.pathname === "/banner.jpg" && req.method === "GET") {
+      return new Response(bannerJpg, {
+        headers: { "Content-Type": "image/jpeg" },
+      });
+    }
 
     // Handle NIP-11 relay information document
     if (url.pathname === "/" && req.method === "GET") {
@@ -125,7 +133,8 @@ const server = serve<WebSocketData>({
         return new Response(
           JSON.stringify({
             ...relay.getRelayInfo(),
-            icon: `${url.origin}/icon.png`,
+            banner: new URL("/banner.jpg", url.origin).toString(),
+            icon: new URL("/icon.png", url.origin).toString(),
           }),
           {
             headers: {
