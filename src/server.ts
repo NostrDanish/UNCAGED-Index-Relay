@@ -7,6 +7,7 @@ import { serve } from "bun";
 
 import { AnalyzePool } from "./analyze-pool.ts";
 import { Config } from "./config.ts";
+import { renderLandingPage } from "./landing-page.ts";
 import { register } from "./metrics.ts";
 import { Nip85 } from "./nip85.ts";
 import { OpenSearchRelay } from "./opensearch.ts";
@@ -74,6 +75,12 @@ try {
   console.error(`Make sure OpenSearch is running at ${config.opensearchNode}`);
   process.exit(1);
 }
+
+// Pre-render the HTML landing page (relay info is static after startup).
+const landingPageHtml = renderLandingPage(
+  relay.getRelayInfo(),
+  config.relayUrl,
+);
 
 // Pre-load static assets into memory.
 const faviconIco = await readFile(
@@ -149,14 +156,12 @@ const server = serve<WebSocketData>({
           });
         }
 
-        return new Response(
-          "This is a Nostr relay. Connect using a WebSocket client or add application/nostr+json Accept header for relay info.",
-          {
-            headers: {
-              "Access-Control-Allow-Origin": "*",
-            },
+        return new Response(landingPageHtml, {
+          headers: {
+            "Content-Type": "text/html; charset=utf-8",
+            "Access-Control-Allow-Origin": "*",
           },
-        );
+        });
       }
     }
 
