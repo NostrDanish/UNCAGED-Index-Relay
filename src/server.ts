@@ -77,10 +77,7 @@ try {
 }
 
 // Pre-render the HTML landing page (relay info is static after startup).
-const landingPageHtml = renderLandingPage(
-  relay.getRelayInfo(),
-  config.relayUrl,
-);
+const landingPageHtml = renderLandingPage(relay.getRelayInfo());
 
 // Pre-load static assets into memory.
 const faviconIco = await readFile(
