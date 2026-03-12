@@ -16,6 +16,7 @@ export function renderLandingPage(info: NostrRelayInfo): string {
   const description = esc(String(info.description ?? ""));
   const banner = info.banner ? esc(String(info.banner)) : "";
   const icon = info.icon ? esc(String(info.icon)) : "";
+  const version = info.version ? esc(String(info.version)) : "";
   const contact = info.contact ? esc(String(info.contact)) : "";
 
   const contactHtml = contact
@@ -52,7 +53,7 @@ export function renderLandingPage(info: NostrRelayInfo): string {
     .card{width:100%;max-width:600px;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);overflow:visible}
 
     /* Banner */
-    .banner-wrap{position:relative;aspect-ratio:3/2;overflow:hidden;border-radius:var(--radius) var(--radius) 0 0;background:var(--border)}
+    .banner-wrap{position:relative;aspect-ratio:16/9;overflow:hidden;border-radius:var(--radius) var(--radius) 0 0;background:var(--border)}
     .banner-img{width:100%;height:100%;object-fit:cover;display:block}
 
     /* Icon */
@@ -98,7 +99,7 @@ export function renderLandingPage(info: NostrRelayInfo): string {
       }
     </div>
   </div>
-  <div class="footer"><a href="https://gitlab.com/soapbox-pub/ditto-relay">Ditto Relay</a></div>
+  <div class="footer"><a href="https://gitlab.com/soapbox-pub/ditto-relay">Ditto Relay</a>${version ? ` <span class="version">${version}</span>` : ""}</div>
 </body>
 </html>`;
 }
