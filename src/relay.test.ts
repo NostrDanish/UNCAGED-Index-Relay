@@ -6,7 +6,7 @@ import type { Filter, NostrEvent } from "nostr-tools";
 import { finalizeEvent, generateSecretKey } from "nostr-tools";
 import {
   type AnalyzableRelay,
-  defaultUntil,
+  clampUntil,
   Relay,
   type WebSocketData,
 } from "./relay.ts";
@@ -1717,26 +1717,35 @@ describe("Relay", () => {
     });
   });
 
-  describe("defaultUntil", () => {
+  describe("clampUntil", () => {
     it("should set until to current time when not provided", () => {
       const before = Math.floor(Date.now() / 1000);
-      const result = defaultUntil({ kinds: [1] });
+      const result = clampUntil({ kinds: [1] });
       const after = Math.floor(Date.now() / 1000);
       assert.ok(result.until !== undefined);
       assert.ok(result.until! >= before);
       assert.ok(result.until! <= after);
     });
 
+    it("should add fuzz to until when provided", () => {
+      const before = Math.floor(Date.now() / 1000);
+      const result = clampUntil({ kinds: [1] }, 60);
+      const after = Math.floor(Date.now() / 1000);
+      assert.ok(result.until !== undefined);
+      assert.ok(result.until! >= before + 60);
+      assert.ok(result.until! <= after + 60);
+    });
+
     it("should not override an explicit until", () => {
       const filter = { kinds: [1], until: 9999999999 };
-      const result = defaultUntil(filter);
+      const result = clampUntil(filter);
       assert.equal(result.until, 9999999999);
     });
 
     it("should not set until when since is in the future", () => {
       const future = Math.floor(Date.now() / 1000) + 3600;
       const filter = { kinds: [1], since: future };
-      const result = defaultUntil(filter);
+      const result = clampUntil(filter);
       assert.equal(result.until, undefined);
     });
 
@@ -1744,7 +1753,7 @@ describe("Relay", () => {
       const past = Math.floor(Date.now() / 1000) - 3600;
       const before = Math.floor(Date.now() / 1000);
       const filter = { kinds: [1], since: past };
-      const result = defaultUntil(filter);
+      const result = clampUntil(filter);
       const after = Math.floor(Date.now() / 1000);
       assert.ok(result.until !== undefined);
       assert.ok(result.until! >= before);
@@ -1753,7 +1762,7 @@ describe("Relay", () => {
 
     it("should not mutate the original filter", () => {
       const filter: Filter = { kinds: [1] };
-      const result = defaultUntil(filter);
+      const result = clampUntil(filter);
       assert.equal(filter.until, undefined);
       assert.notStrictEqual(result, filter);
     });

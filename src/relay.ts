@@ -44,33 +44,19 @@ const defaultAnalyze: AnalyzeFn = (event) => ({
 const TIME_FUZZ = 60;
 
 /**
- * Default `until` to the current time for a filter, so future-dated events
- * are hidden until their `created_at` arrives. Skipped when the caller
- * already provides `until`, or when `since` is in the future (which signals
- * an intentional query for future events).
+ * Default `until` to the current time (plus optional fuzz) for a filter, so
+ * future-dated events are hidden until their `created_at` arrives. Skipped
+ * when the caller already provides `until`, or when `since` is in the future
+ * (which signals an intentional query for future events).
  */
-export function defaultUntil(filter: Filter): Filter {
+export function clampUntil(filter: Filter, fuzz = 0): Filter {
   if (typeof filter.until === "number") return filter;
 
   const now = Math.floor(Date.now() / 1000);
 
   if (typeof filter.since === "number" && filter.since > now) return filter;
 
-  return { ...filter, until: now };
-}
-
-/**
- * Like `defaultUntil` but with `TIME_FUZZ` lenience, used for live broadcast
- * matching so events within the clock-skew tolerance are still delivered.
- */
-function broadcastUntil(filter: Filter): Filter {
-  if (typeof filter.until === "number") return filter;
-
-  const now = Math.floor(Date.now() / 1000);
-
-  if (typeof filter.since === "number" && filter.since > now) return filter;
-
-  return { ...filter, until: now + TIME_FUZZ };
+  return { ...filter, until: now + fuzz };
 }
 
 // Track subscriptions per connection
@@ -256,7 +242,7 @@ export class Relay {
       const wsSent = sent.get(entry.ws);
       if (wsSent?.has(entry.subscriptionId)) return;
 
-      if (!matchFilter(broadcastUntil(entry.filter), event)) return;
+      if (!matchFilter(clampUntil(entry.filter, TIME_FUZZ), event)) return;
 
       // Mark as sent
       if (wsSent) {
@@ -506,7 +492,9 @@ export class Relay {
         };
       }
 
-      const result = await this.storage.count(filters.map(defaultUntil));
+      const result = await this.storage.count(
+        filters.map((f) => clampUntil(f)),
+      );
       return { success: true, ...result };
     } catch (error) {
       console.error("Failed to count events:", error);
@@ -567,7 +555,9 @@ export class Relay {
 
     // Query and return existing events using NRelay's query method
     try {
-      const events = await this.storage.query(filters.map(defaultUntil));
+      const events = await this.storage.query(
+        filters.map((f) => clampUntil(f)),
+      );
       return { success: true, events };
     } catch (error) {
       console.error("Failed to query events:", error);
