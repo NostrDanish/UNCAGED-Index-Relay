@@ -1861,5 +1861,28 @@ describe("Relay", () => {
       const eventMessages = sub.messages.filter((m) => m[0] === "EVENT");
       assert.equal(eventMessages.length, 0);
     });
+
+    it("should reject future-dated ephemeral events with OK false", async () => {
+      relay.handleOpen(mockWs);
+      const sk = generateSecretKey();
+      const futureEphemeral = finalizeEvent(
+        {
+          kind: 20000,
+          created_at: Math.floor(Date.now() / 1000) + 3600,
+          tags: [],
+          content: "future ephemeral",
+        },
+        sk,
+      );
+      await relay.handleEvent(mockWs, futureEphemeral);
+
+      const okMsg = sentMessages.find((m) => m[0] === "OK");
+      assert.ok(okMsg);
+      assert.equal(okMsg[1], futureEphemeral.id);
+      assert.equal(okMsg[2], false);
+      assert.ok(
+        (okMsg[3] as string).includes("ephemeral event is in the future"),
+      );
+    });
   });
 });

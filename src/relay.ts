@@ -385,8 +385,18 @@ export class Relay {
       }
     }
 
-    // NIP-01: Ephemeral events (kinds 20000-29999) are not stored, only broadcast
+    // NIP-01: Ephemeral events (kinds 20000-29999) are not stored, only broadcast.
+    // Reject future-dated ephemeral events since they will never be delivered:
+    // they aren't stored, so they can't be queried later when the time arrives.
     if (NKinds.ephemeral(event.kind)) {
+      const now = Math.floor(Date.now() / 1000);
+      if (event.created_at > now) {
+        return {
+          eventId: event.id,
+          accepted: false,
+          message: "invalid: ephemeral event is in the future",
+        };
+      }
       return {
         eventId: event.id,
         accepted: true,
