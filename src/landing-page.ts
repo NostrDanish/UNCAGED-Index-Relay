@@ -16,15 +16,7 @@ export function renderLandingPage(info: NostrRelayInfo): string {
   const description = esc(String(info.description ?? ""));
   const banner = info.banner ? esc(String(info.banner)) : "";
   const icon = info.icon ? esc(String(info.icon)) : "";
-  const software = info.software ? String(info.software) : "";
-  const version = info.version ? esc(String(info.version)) : "";
   const contact = info.contact ? esc(String(info.contact)) : "";
-
-  const softwareHtml = software
-    ? `<a href="${esc(software)}" target="_blank" rel="noopener">${esc(software.replace(/^https?:\/\//, ""))}</a>${version ? ` <span class="version">${version}</span>` : ""}`
-    : version
-      ? `<span class="version">${version}</span>`
-      : "";
 
   const contactHtml = contact
     ? contact.includes("@")
@@ -98,10 +90,9 @@ export function renderLandingPage(info: NostrRelayInfo): string {
       <h1 class="relay-name">${name}</h1>
       ${description ? `<p class="description">${description}</p>` : ""}
       ${
-        softwareHtml || contactHtml
+        contactHtml
           ? `<div class="meta">
-        ${softwareHtml ? `<span>${softwareHtml}</span>` : ""}
-        ${contactHtml ? `<span>${contactHtml}</span>` : ""}
+        <span>${contactHtml}</span>
       </div>`
           : ""
       }
