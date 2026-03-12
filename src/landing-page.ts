@@ -43,7 +43,7 @@ export function renderLandingPage(info: NostrRelayInfo): string {
       --surface:#12121a;
       --border:#1e1e2e;
       --text:#e0e0e8;
-      --text-dim:#7a7a8e;
+      --text-dim:#9a9ab0;
       --accent:#7c5cfc;
       --radius:16px;
     }
@@ -73,10 +73,10 @@ export function renderLandingPage(info: NostrRelayInfo): string {
     .meta{margin-top:16px;display:flex;flex-wrap:wrap;gap:6px 20px;font-size:0.82rem;color:var(--text-dim)}
     .meta a{color:var(--accent);text-decoration:none}
     .meta a:hover{text-decoration:underline}
-    .version{opacity:0.5}
+    .version{opacity:0.7}
 
     /* Footer */
-    .footer{margin-top:24px;text-align:center;color:var(--text-dim);font-size:0.7rem;opacity:0.4}
+    .footer{margin-top:24px;text-align:center;color:var(--text-dim);font-size:0.7rem}
     .footer a{color:inherit;text-decoration:none}
     .footer a:hover{text-decoration:underline}
   </style>
