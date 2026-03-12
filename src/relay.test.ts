@@ -4,7 +4,12 @@ import { afterEach, beforeEach, describe, it } from "node:test";
 import type { ServerWebSocket } from "bun";
 import type { Filter, NostrEvent } from "nostr-tools";
 import { finalizeEvent, generateSecretKey } from "nostr-tools";
-import { type AnalyzableRelay, Relay, type WebSocketData } from "./relay.ts";
+import {
+  type AnalyzableRelay,
+  defaultUntil,
+  Relay,
+  type WebSocketData,
+} from "./relay.ts";
 
 describe("Relay", () => {
   let relay: Relay;
@@ -1708,6 +1713,152 @@ describe("Relay", () => {
 
       // The event should be rejected, so no EVENT message to subscriber
       const eventMessages = sentMessages.filter((m) => m[0] === "EVENT");
+      assert.equal(eventMessages.length, 0);
+    });
+  });
+
+  describe("defaultUntil", () => {
+    it("should set until to current time when not provided", () => {
+      const before = Math.floor(Date.now() / 1000);
+      const result = defaultUntil({ kinds: [1] });
+      const after = Math.floor(Date.now() / 1000);
+      assert.ok(result.until !== undefined);
+      assert.ok(result.until! >= before);
+      assert.ok(result.until! <= after);
+    });
+
+    it("should not override an explicit until", () => {
+      const filter = { kinds: [1], until: 9999999999 };
+      const result = defaultUntil(filter);
+      assert.equal(result.until, 9999999999);
+    });
+
+    it("should not set until when since is in the future", () => {
+      const future = Math.floor(Date.now() / 1000) + 3600;
+      const filter = { kinds: [1], since: future };
+      const result = defaultUntil(filter);
+      assert.equal(result.until, undefined);
+    });
+
+    it("should set until when since is in the past", () => {
+      const past = Math.floor(Date.now() / 1000) - 3600;
+      const before = Math.floor(Date.now() / 1000);
+      const filter = { kinds: [1], since: past };
+      const result = defaultUntil(filter);
+      const after = Math.floor(Date.now() / 1000);
+      assert.ok(result.until !== undefined);
+      assert.ok(result.until! >= before);
+      assert.ok(result.until! <= after);
+    });
+
+    it("should not mutate the original filter", () => {
+      const filter: Filter = { kinds: [1] };
+      const result = defaultUntil(filter);
+      assert.equal(filter.until, undefined);
+      assert.notStrictEqual(result, filter);
+    });
+  });
+
+  describe("future event filtering", () => {
+    it("should not return future events in REQ queries by default", async () => {
+      const futureEvent = finalizeEvent(
+        {
+          kind: 1,
+          created_at: Math.floor(Date.now() / 1000) + 3600,
+          tags: [],
+          content: "future",
+        },
+        generateSecretKey(),
+      );
+
+      // Mock storage returns the future event
+      mockStorage.query = async (filters: Filter[]) => {
+        // Verify that the filter has until set to approximately now
+        assert.ok(filters[0].until !== undefined);
+        assert.ok(filters[0].until! <= Math.floor(Date.now() / 1000) + 1);
+        return [futureEvent];
+      };
+
+      relay.handleOpen(mockWs);
+      await relay.handleReq(mockWs, "sub1", [{ kinds: [1] }]);
+
+      // Should still get events from storage (storage decides what matches)
+      const eventMessages = sentMessages.filter((m) => m[0] === "EVENT");
+      assert.equal(eventMessages.length, 1);
+    });
+
+    it("should pass through explicit until to storage", async () => {
+      const futureUntil = Math.floor(Date.now() / 1000) + 7200;
+
+      mockStorage.query = async (filters: Filter[]) => {
+        assert.equal(filters[0].until, futureUntil);
+        return [];
+      };
+
+      relay.handleOpen(mockWs);
+      await relay.handleReq(mockWs, "sub1", [
+        { kinds: [1], until: futureUntil },
+      ]);
+    });
+
+    it("should not set until when since is in the future", async () => {
+      const futureSince = Math.floor(Date.now() / 1000) + 3600;
+
+      mockStorage.query = async (filters: Filter[]) => {
+        assert.equal(filters[0].until, undefined);
+        assert.equal(filters[0].since, futureSince);
+        return [];
+      };
+
+      relay.handleOpen(mockWs);
+      await relay.handleReq(mockWs, "sub1", [
+        { kinds: [1], since: futureSince },
+      ]);
+    });
+
+    it("should not broadcast future events to subscriptions without explicit until", async () => {
+      /** Helper to create a mock WebSocket that records sent messages. */
+      function createMockWs(): {
+        ws: ServerWebSocket<WebSocketData>;
+        messages: unknown[][];
+      } {
+        const messages: unknown[][] = [];
+        const ws = {
+          send: (message: string) => {
+            messages.push(JSON.parse(message));
+          },
+          data: {
+            subscriptions: new Map(),
+            challenge: "",
+            authedPubkeys: new Set(),
+          },
+        } as unknown as ServerWebSocket<WebSocketData>;
+        return { ws, messages };
+      }
+
+      // Subscriber with no until filter
+      const sub = createMockWs();
+      relay.handleOpen(sub.ws);
+      mockStorage.query = async () => [];
+      await relay.handleReq(sub.ws, "sub1", [{ kinds: [1] }]);
+      sub.messages.length = 0;
+
+      // Publish a future-dated event
+      relay.handleOpen(mockWs);
+      const sk = generateSecretKey();
+      const futureEvent = finalizeEvent(
+        {
+          kind: 1,
+          created_at: Math.floor(Date.now() / 1000) + 3600,
+          tags: [],
+          content: "future event",
+        },
+        sk,
+      );
+      await relay.handleEvent(mockWs, futureEvent);
+
+      // Subscriber should NOT receive the future event
+      const eventMessages = sub.messages.filter((m) => m[0] === "EVENT");
       assert.equal(eventMessages.length, 0);
     });
   });

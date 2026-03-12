@@ -40,6 +40,22 @@ const defaultAnalyze: AnalyzeFn = (event) => ({
   verified: verifyEvent(event),
 });
 
+/**
+ * Default `until` to the current time for a filter, so future-dated events
+ * are hidden until their `created_at` arrives. Skipped when the caller
+ * already provides `until`, or when `since` is in the future (which signals
+ * an intentional query for future events).
+ */
+export function defaultUntil(filter: Filter): Filter {
+  if (typeof filter.until === "number") return filter;
+
+  const now = Math.floor(Date.now() / 1000);
+
+  if (typeof filter.since === "number" && filter.since > now) return filter;
+
+  return { ...filter, until: now };
+}
+
 // Track subscriptions per connection
 export interface Subscription {
   id: string;
@@ -223,7 +239,7 @@ export class Relay {
       const wsSent = sent.get(entry.ws);
       if (wsSent?.has(entry.subscriptionId)) return;
 
-      if (!matchFilter(entry.filter, event)) return;
+      if (!matchFilter(defaultUntil(entry.filter), event)) return;
 
       // Mark as sent
       if (wsSent) {
@@ -463,7 +479,7 @@ export class Relay {
         };
       }
 
-      const result = await this.storage.count(filters);
+      const result = await this.storage.count(filters.map(defaultUntil));
       return { success: true, ...result };
     } catch (error) {
       console.error("Failed to count events:", error);
@@ -524,7 +540,7 @@ export class Relay {
 
     // Query and return existing events using NRelay's query method
     try {
-      const events = await this.storage.query(filters);
+      const events = await this.storage.query(filters.map(defaultUntil));
       return { success: true, events };
     } catch (error) {
       console.error("Failed to query events:", error);
