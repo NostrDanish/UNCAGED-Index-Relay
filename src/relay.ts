@@ -40,6 +40,9 @@ const defaultAnalyze: AnalyzeFn = (event) => ({
   verified: verifyEvent(event),
 });
 
+/** Lenience in seconds added to time-based checks to tolerate minor clock skew. */
+const TIME_FUZZ = 60;
+
 /**
  * Default `until` to the current time for a filter, so future-dated events
  * are hidden until their `created_at` arrives. Skipped when the caller
@@ -54,6 +57,20 @@ export function defaultUntil(filter: Filter): Filter {
   if (typeof filter.since === "number" && filter.since > now) return filter;
 
   return { ...filter, until: now };
+}
+
+/**
+ * Like `defaultUntil` but with `TIME_FUZZ` lenience, used for live broadcast
+ * matching so events within the clock-skew tolerance are still delivered.
+ */
+function broadcastUntil(filter: Filter): Filter {
+  if (typeof filter.until === "number") return filter;
+
+  const now = Math.floor(Date.now() / 1000);
+
+  if (typeof filter.since === "number" && filter.since > now) return filter;
+
+  return { ...filter, until: now + TIME_FUZZ };
 }
 
 // Track subscriptions per connection
@@ -239,7 +256,7 @@ export class Relay {
       const wsSent = sent.get(entry.ws);
       if (wsSent?.has(entry.subscriptionId)) return;
 
-      if (!matchFilter(defaultUntil(entry.filter), event)) return;
+      if (!matchFilter(broadcastUntil(entry.filter), event)) return;
 
       // Mark as sent
       if (wsSent) {
@@ -390,7 +407,7 @@ export class Relay {
     // they aren't stored, so they can't be queried later when the time arrives.
     if (NKinds.ephemeral(event.kind)) {
       const now = Math.floor(Date.now() / 1000);
-      if (event.created_at > now) {
+      if (event.created_at > now + TIME_FUZZ) {
         return {
           eventId: event.id,
           accepted: false,
