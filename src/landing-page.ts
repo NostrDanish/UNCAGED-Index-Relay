@@ -43,7 +43,7 @@ export function renderLandingPage(info: NostrRelayInfo): string {
       --surface:#12121a;
       --border:#1e1e2e;
       --text:#e0e0e8;
-      --text-dim:#8a8a9f;
+      --text-dim:#7f7f96;
       --accent:#7c5cfc;
       --radius:16px;
     }
