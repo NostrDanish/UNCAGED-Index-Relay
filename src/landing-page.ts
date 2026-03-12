@@ -20,11 +20,13 @@ export function renderLandingPage(info: NostrRelayInfo): string {
   const contact = info.contact ? esc(String(info.contact)) : "";
 
   const contactHtml = contact
-    ? contact.includes("@")
-      ? `<a href="mailto:${contact}">${contact}</a>`
-      : contact.startsWith("http")
-        ? `<a href="${contact}" target="_blank" rel="noopener">${contact}</a>`
-        : contact
+    ? contact.startsWith("mailto:")
+      ? `<a href="${contact}">${esc(contact.replace(/^mailto:/, ""))}</a>`
+      : contact.includes("@")
+        ? `<a href="mailto:${contact}">${contact}</a>`
+        : contact.startsWith("http")
+          ? `<a href="${contact}" target="_blank" rel="noopener">${contact}</a>`
+          : contact
     : "";
 
   return `<!DOCTYPE html>
@@ -53,7 +55,7 @@ export function renderLandingPage(info: NostrRelayInfo): string {
     .card{width:100%;max-width:600px;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);overflow:visible}
 
     /* Banner */
-    .banner-wrap{position:relative;aspect-ratio:16/9;overflow:hidden;border-radius:var(--radius) var(--radius) 0 0;background:var(--border)}
+    .banner-wrap{position:relative;aspect-ratio:21/9;overflow:hidden;border-radius:var(--radius) var(--radius) 0 0;background:var(--border)}
     .banner-img{width:100%;height:100%;object-fit:cover;display:block}
 
     /* Icon */
