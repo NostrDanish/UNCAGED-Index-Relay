@@ -35,7 +35,17 @@ export function renderLandingPage(info: NostrRelayInfo): string {
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>${name}</title>
+  ${description ? `<meta name="description" content="${description}">` : ""}
   <link rel="icon" href="/favicon.ico">
+  ${icon ? `<link rel="apple-touch-icon" href="${icon}">` : ""}
+  <meta property="og:type" content="website">
+  <meta property="og:title" content="${name}">
+  ${description ? `<meta property="og:description" content="${description}">` : ""}
+  ${banner ? `<meta property="og:image" content="${banner}">` : icon ? `<meta property="og:image" content="${icon}">` : ""}
+  <meta name="twitter:card" content="${banner ? "summary_large_image" : "summary"}">
+  <meta name="twitter:title" content="${name}">
+  ${description ? `<meta name="twitter:description" content="${description}">` : ""}
+  ${banner ? `<meta name="twitter:image" content="${banner}">` : icon ? `<meta name="twitter:image" content="${icon}">` : ""}
   <style>
     *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
     :root{
