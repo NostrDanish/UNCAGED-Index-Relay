@@ -18,6 +18,7 @@ export function renderLandingPage(info: NostrRelayInfo): string {
   const icon = info.icon ? esc(String(info.icon)) : "";
   const version = info.version ? esc(String(info.version)) : "";
   const contact = info.contact ? esc(String(info.contact)) : "";
+  const software = info.software ? esc(String(info.software)) : "";
 
   const contactHtml = contact
     ? contact.startsWith("mailto:")
@@ -111,7 +112,7 @@ export function renderLandingPage(info: NostrRelayInfo): string {
       }
     </div>
   </div>
-  <div class="footer"><a href="https://gitlab.com/soapbox-pub/ditto-relay">Ditto Relay</a>${version ? ` <span class="version">${version}</span>` : ""}</div>
+  <div class="footer">${software ? `<a href="${software}">Ditto Relay</a>` : "Ditto Relay"}${version ? ` <span class="version">${version}</span>` : ""}</div>
 </body>
 </html>`;
 }
