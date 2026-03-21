@@ -630,7 +630,81 @@ describe("OpenSearchRelay", () => {
             if (doc) return { body: { found: true, _source: doc } };
             return { body: { found: false }, statusCode: 404 };
           },
-          updateByQuery: async () => ({ body: { updated: 0 } }),
+          updateByQuery: async ({
+            body,
+          }: {
+            body: {
+              query: {
+                bool: {
+                  must: Array<{
+                    bool?: {
+                      must: Array<{
+                        terms?: Record<string, unknown>;
+                        term?: Record<string, unknown>;
+                        range?: Record<string, unknown>;
+                      }>;
+                      must_not?: Array<{
+                        term?: Record<string, unknown>;
+                        range?: Record<string, unknown>;
+                      }>;
+                    };
+                    term?: Record<string, unknown>;
+                  }>;
+                };
+              };
+              script: { source: string };
+            };
+          }) => {
+            // Extract filters from the nested bool query.
+            let authorFilter: string[] | undefined;
+            let kindFilter: number[] | undefined;
+            let idFilter: string[] | undefined;
+            let requireReplaced = false;
+            let untilFilter: number | undefined;
+
+            for (const clause of body.query.bool.must) {
+              if (clause.term?.replaced === true) {
+                requireReplaced = true;
+              }
+              if (clause.bool?.must) {
+                for (const inner of clause.bool.must) {
+                  if (inner.terms?.pubkey)
+                    authorFilter = inner.terms.pubkey as string[];
+                  if (inner.terms?.kind)
+                    kindFilter = (inner.terms.kind as number[]).map(Number);
+                  if (inner.terms?.id) idFilter = inner.terms.id as string[];
+                  if (inner.range) {
+                    const createdAt = inner.range.created_at as
+                      | { lte?: number }
+                      | undefined;
+                    if (createdAt?.lte) untilFilter = createdAt.lte;
+                  }
+                }
+              }
+            }
+
+            let updated = 0;
+            for (const [_id, doc] of documents.entries()) {
+              const d = doc as NostrEvent & {
+                deleted?: boolean;
+                replaced?: boolean;
+              };
+              if (requireReplaced && !d.replaced) continue;
+              if (d.deleted) continue;
+              if (authorFilter && !authorFilter.includes(d.pubkey)) continue;
+              if (kindFilter && !kindFilter.includes(d.kind)) continue;
+              if (idFilter && !idFilter.includes(d.id)) continue;
+              if (untilFilter && d.created_at > untilFilter) continue;
+
+              // Execute the script (we only support "ctx._source.deleted = true")
+              if (body.script.source.includes("ctx._source.deleted = true")) {
+                (d as Record<string, unknown>).deleted = true;
+                updated++;
+              }
+            }
+
+            return { body: { updated } };
+          },
           indices: {
             exists: async () => ({ body: true }),
             create: async () => ({ body: {} }),
@@ -1103,6 +1177,210 @@ describe("OpenSearchRelay", () => {
         results.length,
         2,
         "Should return only current versions for multi-author query",
+      );
+    });
+
+    it("should return history docs when queried by ID", async () => {
+      const { client, documents } = createHistoryMockClient();
+      const relay = new OpenSearchRelay(client as unknown as Client, {
+        indexName: "test-index",
+        bulkMaxSize: 1,
+      });
+
+      const sk = generateSecretKey();
+      const now = Math.floor(Date.now() / 1000);
+
+      const event1 = finalizeEvent(
+        { kind: 0, created_at: now - 100, tags: [], content: '{"name":"V1"}' },
+        sk,
+      );
+      await relay.event(event1);
+
+      const event2 = finalizeEvent(
+        { kind: 0, created_at: now, tags: [], content: '{"name":"V2"}' },
+        sk,
+      );
+      await relay.event(event2);
+
+      // Query for the old event by its ID — should find it even though it's replaced
+      const results = await relay.query([{ ids: [event1.id] }]);
+      assert.equal(results.length, 1, "Should return the history doc by ID");
+      assert.equal(results[0].id, event1.id);
+    });
+
+    it("should soft-delete history when removing by coordinate filter (kind 5 a-tag)", async () => {
+      const { client, documents } = createHistoryMockClient();
+      const relay = new OpenSearchRelay(client as unknown as Client, {
+        indexName: "test-index",
+        bulkMaxSize: 1,
+      });
+
+      const sk = generateSecretKey();
+      const now = Math.floor(Date.now() / 1000);
+
+      // Create V1 and V2 so there's a history doc
+      const event1 = finalizeEvent(
+        { kind: 0, created_at: now - 100, tags: [], content: '{"name":"V1"}' },
+        sk,
+      );
+      await relay.event(event1);
+
+      const event2 = finalizeEvent(
+        { kind: 0, created_at: now, tags: [], content: '{"name":"V2"}' },
+        sk,
+      );
+      await relay.event(event2);
+
+      assert.equal(documents.size, 2, "Should have current + history");
+
+      // Delete via coordinate filter (as kind 5 with a-tag would produce)
+      await relay.remove([{ kinds: [0], authors: [event1.pubkey] }]);
+
+      // Both should be soft-deleted
+      const docs = Array.from(documents.values()) as Array<
+        Record<string, unknown>
+      >;
+      const nonDeleted = docs.filter((d) => d.deleted !== true);
+      assert.equal(
+        nonDeleted.length,
+        0,
+        "Both current and history should be soft-deleted",
+      );
+    });
+
+    it("should cascade deletion to history when removing by event ID", async () => {
+      const { client, documents } = createHistoryMockClient();
+      const relay = new OpenSearchRelay(client as unknown as Client, {
+        indexName: "test-index",
+        bulkMaxSize: 1,
+      });
+
+      const sk = generateSecretKey();
+      const now = Math.floor(Date.now() / 1000);
+
+      const event1 = finalizeEvent(
+        { kind: 0, created_at: now - 100, tags: [], content: '{"name":"V1"}' },
+        sk,
+      );
+      await relay.event(event1);
+
+      const event2 = finalizeEvent(
+        { kind: 0, created_at: now, tags: [], content: '{"name":"V2"}' },
+        sk,
+      );
+      await relay.event(event2);
+
+      assert.equal(documents.size, 2, "Should have current + history");
+
+      // Delete via event ID filter (as kind 5 with e-tag would produce).
+      // This targets the current version by ID, but should cascade to
+      // history via coordinate resolution.
+      await relay.remove([{ ids: [event2.id], authors: [event2.pubkey] }]);
+
+      const docs = Array.from(documents.values()) as Array<
+        Record<string, unknown>
+      >;
+      const nonDeleted = docs.filter((d) => d.deleted !== true);
+      assert.equal(
+        nonDeleted.length,
+        0,
+        "History should be cascaded-deleted when current is deleted by ID",
+      );
+    });
+
+    it("should soft-delete history on vanish (kind 62)", async () => {
+      const { client, documents } = createHistoryMockClient();
+      const relay = new OpenSearchRelay(client as unknown as Client, {
+        indexName: "test-index",
+        bulkMaxSize: 1,
+      });
+
+      const sk = generateSecretKey();
+      const now = Math.floor(Date.now() / 1000);
+
+      // Create replaceable event history
+      const event1 = finalizeEvent(
+        { kind: 0, created_at: now - 200, tags: [], content: '{"name":"V1"}' },
+        sk,
+      );
+      await relay.event(event1);
+
+      const event2 = finalizeEvent(
+        { kind: 0, created_at: now - 100, tags: [], content: '{"name":"V2"}' },
+        sk,
+      );
+      await relay.event(event2);
+
+      // Also create a regular (non-replaceable) event
+      const regularEvent = finalizeEvent(
+        { kind: 1, created_at: now - 50, tags: [], content: "Hello" },
+        sk,
+      );
+      await relay.event(regularEvent);
+
+      assert.equal(documents.size, 3, "Should have 2 kind-0 docs + 1 kind-1");
+
+      // Vanish: delete all events from this author up to now
+      await relay.remove([{ authors: [event1.pubkey], until: now }]);
+
+      const docs = Array.from(documents.values()) as Array<
+        Record<string, unknown>
+      >;
+      const nonDeleted = docs.filter((d) => d.deleted !== true);
+      assert.equal(
+        nonDeleted.length,
+        0,
+        "Vanish should soft-delete all events including history",
+      );
+    });
+
+    it("should soft-delete addressable event history when deleting by coordinate", async () => {
+      const { client, documents } = createHistoryMockClient();
+      const relay = new OpenSearchRelay(client as unknown as Client, {
+        indexName: "test-index",
+        bulkMaxSize: 1,
+      });
+
+      const sk = generateSecretKey();
+      const now = Math.floor(Date.now() / 1000);
+
+      const event1 = finalizeEvent(
+        {
+          kind: 30023,
+          created_at: now - 100,
+          tags: [["d", "my-article"]],
+          content: "V1",
+        },
+        sk,
+      );
+      await relay.event(event1);
+
+      const event2 = finalizeEvent(
+        {
+          kind: 30023,
+          created_at: now,
+          tags: [["d", "my-article"]],
+          content: "V2",
+        },
+        sk,
+      );
+      await relay.event(event2);
+
+      assert.equal(documents.size, 2, "Should have current + history");
+
+      // Delete via coordinate filter (kind 5 a-tag for addressable event)
+      await relay.remove([
+        { kinds: [30023], authors: [event1.pubkey], "#d": ["my-article"] },
+      ]);
+
+      const docs = Array.from(documents.values()) as Array<
+        Record<string, unknown>
+      >;
+      const nonDeleted = docs.filter((d) => d.deleted !== true);
+      assert.equal(
+        nonDeleted.length,
+        0,
+        "Both current and history of addressable event should be deleted",
       );
     });
   });
@@ -4963,6 +5241,7 @@ describe("OpenSearchRelay", () => {
         "content",
         "sig",
         "deleted",
+        "replaced",
         "protocol",
         "amount_msats",
         "language",

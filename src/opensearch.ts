@@ -395,6 +395,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
       tags_map: tagsMap,
       search_text: analysis?.search_text ?? buildSearchText(event),
       deleted: false,
+      replaced: false,
       ...(protocol && { protocol }),
       ...(amount_msats !== undefined && { amount_msats }),
       ...(language && { language }),
@@ -493,17 +494,22 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
   }
 
   /**
-   * Detect whether a filter targets a single replaceable/addressable event
-   * slot (representable as a single `naddr`). Such filters auto-include
-   * historical (replaced) versions.
+   * Detect whether a filter should include historical (replaced) versions.
    *
-   * A filter is an naddr-shaped history filter when:
-   * - It has exactly 1 kind that is replaceable or addressable.
-   * - It has exactly 1 author.
-   * - For addressable kinds, it has exactly 1 `#d` tag value.
-   * - For replaceable kinds, no `#d` constraint is needed.
+   * Returns true for:
+   * 1. ID-based queries (`{ ids: [...] }`) — clients asking for specific
+   *    event IDs should always get them, even if they are replaced.
+   * 2. naddr-shaped filters — exactly 1 replaceable/addressable kind +
+   *    exactly 1 author (+ optionally 1 `#d` for addressable kinds),
+   *    representable as a single `naddr`.
    */
   private isHistoryFilter(filter: NostrFilter): boolean {
+    // Any filter with explicit IDs should include replaced docs — the
+    // client asked for a specific event by ID and should get it.
+    if (filter.ids && filter.ids.length > 0) {
+      return true;
+    }
+
     if (
       !filter.kinds ||
       filter.kinds.length !== 1 ||
@@ -1343,6 +1349,12 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
    * archived as a historical document with `replaced: true`. The old
    * document is indexed under `noteEncode(old.id)` so it doesn't collide
    * with the naddr-encoded slot used by the current version.
+   *
+   * Historical documents persist indefinitely unless explicitly deleted
+   * (kind 5 or kind 62). For frequently-updated kinds (e.g. kind 0
+   * profiles, kind 3 contact lists), this means storage grows with each
+   * replacement. A TTL or max-versions-per-slot pruning strategy may be
+   * needed in the future for high-churn relays.
    */
   async flush(): Promise<void> {
     if (this.bulkTimer) {
@@ -1357,6 +1369,12 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
 
     // --- Phase 1: Fetch current documents for replaceable/addressable events
     // so we can archive the old version before overwriting.
+    //
+    // NOTE: If multiple events for the same replaceable slot arrive in one
+    // flush batch (e.g. V1, V2, V3), only the pre-batch → final transition
+    // is archived. Intermediate versions within the batch are lost. This is
+    // acceptable for normal operation but means bulk imports may lose some
+    // intermediate history.
     const replaceableEntries: Array<{ index: number; docId: string }> = [];
     for (let i = 0; i < entries.length; i++) {
       const entry = entries[i];
@@ -1764,14 +1782,18 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
 
   /**
    * Remove events matching the given filters (soft delete using deleted field).
-   * Also soft-deletes any `replaced: true` historical versions that match the
-   * same filter criteria.
+   * Also soft-deletes any `replaced: true` historical versions for the same
+   * replaceable/addressable slot, so deletion cascades to all versions.
    */
   async remove(
     filters: NostrFilter[],
     opts?: { signal?: AbortSignal },
   ): Promise<void> {
     const docIdsToDelete: string[] = [];
+
+    // Collect coordinate-based filters for replaceable/addressable events
+    // so we can cascade deletion to their history documents.
+    const coordinateFilters: NostrFilter[] = [];
 
     for (const filter of filters) {
       if (opts?.signal?.aborted) {
@@ -1786,6 +1808,24 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
         for (const event of events) {
           const docId = this.getDocumentId(event);
           docIdsToDelete.push(docId);
+
+          // For replaceable/addressable events, build a coordinate filter
+          // so history deletion works even when the original filter was
+          // ID-based (e.g. kind 5 targeting a specific event ID).
+          if (
+            NKinds.replaceable(event.kind) ||
+            NKinds.addressable(event.kind)
+          ) {
+            const coordFilter: NostrFilter = {
+              kinds: [event.kind],
+              authors: [event.pubkey],
+            };
+            if (NKinds.addressable(event.kind)) {
+              const dTag = event.tags.find(([name]) => name === "d")?.[1] || "";
+              coordFilter["#d"] = [dTag];
+            }
+            coordinateFilters.push(coordFilter);
+          }
         }
       } catch (error) {
         console.error("Failed to query events for deletion:", error);
@@ -1837,9 +1877,22 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
       }
     }
 
-    // Also soft-delete historical (replaced) versions matching these filters.
-    // Uses updateByQuery so we don't need to enumerate every history document.
-    for (const filter of filters) {
+    // Soft-delete historical (replaced) versions. We merge the original
+    // filters with coordinate filters resolved from deleted events, so
+    // that ID-based deletions cascade to history via the event's slot.
+    const allHistoryFilters = [...filters, ...coordinateFilters];
+
+    // Deduplicate filters by serializing (coordinate filters may overlap
+    // with a-tag filters already present in the original set).
+    const seen = new Set<string>();
+    const uniqueHistoryFilters = allHistoryFilters.filter((f) => {
+      const key = JSON.stringify(f);
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+
+    for (const filter of uniqueHistoryFilters) {
       if (opts?.signal?.aborted) break;
       try {
         const historyQuery = this.buildQuery(filter, { includeReplaced: true });
