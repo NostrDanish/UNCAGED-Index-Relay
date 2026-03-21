@@ -1306,6 +1306,37 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
   }
 
   /**
+   * Like `queryFilter`, but preserves the `replaced` flag from the document.
+   * Used by `remove()` to compute the correct doc ID for historical events.
+   */
+  private async queryFilterWithReplaced(
+    filter: NostrFilter,
+    signal?: AbortSignal,
+  ): Promise<Array<NostrEvent & { replaced?: boolean }>> {
+    if (filter.limit === 0) return [];
+    const limit = Math.min(filter.limit || 500, 5000);
+
+    const includeReplaced = this.isHistoryFilter(filter);
+    const query = this.buildQuery(filter, { includeReplaced });
+    const sort = [{ created_at: { order: "desc" as const } }];
+
+    const response = await this.client.search({
+      index: this.indexName,
+      body: { query, sort, size: limit },
+    });
+
+    const hits = response.body.hits.hits as Array<{
+      _source?: NostrEventDocument;
+    }>;
+    return hits
+      .filter((hit) => hit._source !== undefined)
+      .map((hit) => ({
+        ...this.documentToEvent(hit._source!),
+        replaced: hit._source!.replaced,
+      }));
+  }
+
+  /**
    * Enqueue an event for bulk indexing.
    * The returned promise resolves once the event has been flushed to OpenSearch.
    *
@@ -1801,20 +1832,25 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
       }
 
       try {
-        // Query events matching the filter
-        const events = await this.queryFilter(filter, opts?.signal);
+        // Query events matching the filter, preserving the `replaced` flag
+        // so we can compute the correct doc ID for historical events.
+        const events = await this.queryFilterWithReplaced(filter, opts?.signal);
 
-        // Get document IDs for matched events
         for (const event of events) {
-          const docId = this.getDocumentId(event);
+          // Historical (replaced) events are stored under noteEncode(id),
+          // while current replaceable/addressable events use naddr.
+          const docId = event.replaced
+            ? noteEncode(event.id)
+            : this.getDocumentId(event);
           docIdsToDelete.push(docId);
 
-          // For replaceable/addressable events, build a coordinate filter
-          // so history deletion works even when the original filter was
-          // ID-based (e.g. kind 5 targeting a specific event ID).
+          // For non-replaced replaceable/addressable events, build a
+          // coordinate filter so history deletion cascades. We only do
+          // this for current versions — deleting a specific historical
+          // event by ID should not cascade to the entire slot.
           if (
-            NKinds.replaceable(event.kind) ||
-            NKinds.addressable(event.kind)
+            !event.replaced &&
+            (NKinds.replaceable(event.kind) || NKinds.addressable(event.kind))
           ) {
             const coordFilter: NostrFilter = {
               kinds: [event.kind],

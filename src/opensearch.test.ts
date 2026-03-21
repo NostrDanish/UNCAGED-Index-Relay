@@ -509,11 +509,23 @@ describe("OpenSearchRelay", () => {
             let authorFilter: string[] | undefined;
             let kindFilter: number[] | undefined;
             let idFilter: string[] | undefined;
+            const tagFilters = new Map<string, string[]>();
             for (const clause of body.query.bool.must) {
               if (clause.terms?.pubkey) authorFilter = clause.terms.pubkey;
               if (clause.terms?.kind)
                 kindFilter = clause.terms.kind.map(Number);
               if (clause.terms?.id) idFilter = clause.terms.id;
+              // Extract tags_map filters (e.g. tags_map.d)
+              if (clause.terms) {
+                for (const [key, val] of Object.entries(clause.terms)) {
+                  if (key.startsWith("tags_map.")) {
+                    tagFilters.set(
+                      key.replace("tags_map.", ""),
+                      val as string[],
+                    );
+                  }
+                }
+              }
             }
 
             const excludeReplaced = body.query.bool.must_not?.some(
@@ -524,6 +536,7 @@ describe("OpenSearchRelay", () => {
               const d = doc as NostrEvent & {
                 deleted?: boolean;
                 replaced?: boolean;
+                tags_map?: Record<string, string[]>;
               };
 
               if (d.deleted) continue;
@@ -531,6 +544,17 @@ describe("OpenSearchRelay", () => {
               if (authorFilter && !authorFilter.includes(d.pubkey)) continue;
               if (kindFilter && !kindFilter.includes(d.kind)) continue;
               if (idFilter && !idFilter.includes(d.id)) continue;
+
+              // Check tag filters against tags_map
+              let tagMatch = true;
+              for (const [tagName, values] of tagFilters) {
+                const docValues = d.tags_map?.[tagName] ?? [];
+                if (!values.some((v) => docValues.includes(v))) {
+                  tagMatch = false;
+                  break;
+                }
+              }
+              if (!tagMatch) continue;
 
               results.push(doc);
             }
@@ -661,6 +685,7 @@ describe("OpenSearchRelay", () => {
             let idFilter: string[] | undefined;
             let requireReplaced = false;
             let untilFilter: number | undefined;
+            const tagFilters = new Map<string, string[]>();
 
             for (const clause of body.query.bool.must) {
               if (clause.term?.replaced === true) {
@@ -679,6 +704,17 @@ describe("OpenSearchRelay", () => {
                       | undefined;
                     if (createdAt?.lte) untilFilter = createdAt.lte;
                   }
+                  // Extract tags_map filters (e.g. tags_map.d)
+                  if (inner.terms) {
+                    for (const [key, val] of Object.entries(inner.terms)) {
+                      if (key.startsWith("tags_map.")) {
+                        tagFilters.set(
+                          key.replace("tags_map.", ""),
+                          val as string[],
+                        );
+                      }
+                    }
+                  }
                 }
               }
             }
@@ -688,6 +724,7 @@ describe("OpenSearchRelay", () => {
               const d = doc as NostrEvent & {
                 deleted?: boolean;
                 replaced?: boolean;
+                tags_map?: Record<string, string[]>;
               };
               if (requireReplaced && !d.replaced) continue;
               if (d.deleted) continue;
@@ -695,6 +732,17 @@ describe("OpenSearchRelay", () => {
               if (kindFilter && !kindFilter.includes(d.kind)) continue;
               if (idFilter && !idFilter.includes(d.id)) continue;
               if (untilFilter && d.created_at > untilFilter) continue;
+
+              // Check tag filters against tags_map
+              let tagMatch = true;
+              for (const [tagName, values] of tagFilters) {
+                const docValues = d.tags_map?.[tagName] ?? [];
+                if (!values.some((v) => docValues.includes(v))) {
+                  tagMatch = false;
+                  break;
+                }
+              }
+              if (!tagMatch) continue;
 
               // Execute the script (we only support "ctx._source.deleted = true")
               if (body.script.source.includes("ctx._source.deleted = true")) {
@@ -1381,6 +1429,113 @@ describe("OpenSearchRelay", () => {
         nonDeleted.length,
         0,
         "Both current and history of addressable event should be deleted",
+      );
+    });
+
+    it("should delete only the historical event when targeting it by ID (not cascade)", async () => {
+      const { client, documents } = createHistoryMockClient();
+      const relay = new OpenSearchRelay(client as unknown as Client, {
+        indexName: "test-index",
+        bulkMaxSize: 1,
+      });
+
+      const sk = generateSecretKey();
+      const now = Math.floor(Date.now() / 1000);
+
+      const event1 = finalizeEvent(
+        { kind: 0, created_at: now - 100, tags: [], content: '{"name":"V1"}' },
+        sk,
+      );
+      await relay.event(event1);
+
+      const event2 = finalizeEvent(
+        { kind: 0, created_at: now, tags: [], content: '{"name":"V2"}' },
+        sk,
+      );
+      await relay.event(event2);
+
+      assert.equal(documents.size, 2, "Should have current + history");
+
+      // Delete the historical event by its specific ID.
+      // This should only delete V1 (history), not V2 (current).
+      await relay.remove([{ ids: [event1.id], authors: [event1.pubkey] }]);
+
+      const docs = Array.from(documents.values()) as Array<
+        NostrEvent & { deleted?: boolean; replaced?: boolean }
+      >;
+      const nonDeleted = docs.filter((d) => d.deleted !== true);
+      assert.equal(
+        nonDeleted.length,
+        1,
+        "Only the historical event should be deleted",
+      );
+      assert.equal(
+        nonDeleted[0].id,
+        event2.id,
+        "Current version should survive",
+      );
+    });
+
+    it("should not cascade deletion to different d-tag addressable events", async () => {
+      const { client, documents } = createHistoryMockClient();
+      const relay = new OpenSearchRelay(client as unknown as Client, {
+        indexName: "test-index",
+        bulkMaxSize: 1,
+      });
+
+      const sk = generateSecretKey();
+      const now = Math.floor(Date.now() / 1000);
+
+      // Create two different addressable event slots
+      const article1v1 = finalizeEvent(
+        {
+          kind: 30023,
+          created_at: now - 100,
+          tags: [["d", "article-1"]],
+          content: "Article 1 V1",
+        },
+        sk,
+      );
+      await relay.event(article1v1);
+
+      const article1v2 = finalizeEvent(
+        {
+          kind: 30023,
+          created_at: now,
+          tags: [["d", "article-1"]],
+          content: "Article 1 V2",
+        },
+        sk,
+      );
+      await relay.event(article1v2);
+
+      const article2v1 = finalizeEvent(
+        {
+          kind: 30023,
+          created_at: now - 50,
+          tags: [["d", "article-2"]],
+          content: "Article 2 V1",
+        },
+        sk,
+      );
+      await relay.event(article2v1);
+
+      assert.equal(documents.size, 3, "2 article-1 docs + 1 article-2 doc");
+
+      // Delete article-1 by coordinate — should not affect article-2
+      await relay.remove([
+        { kinds: [30023], authors: [article1v1.pubkey], "#d": ["article-1"] },
+      ]);
+
+      const docs = Array.from(documents.values()) as Array<
+        NostrEvent & { deleted?: boolean }
+      >;
+      const nonDeleted = docs.filter((d) => d.deleted !== true);
+      assert.equal(nonDeleted.length, 1, "Only article-2 should survive");
+      assert.equal(
+        nonDeleted[0].id,
+        article2v1.id,
+        "Surviving event should be article-2",
       );
     });
   });
