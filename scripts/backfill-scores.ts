@@ -316,7 +316,7 @@ async function main() {
       }
     }
 
-    // Single bulk update for all score fields.
+    // Single bulk update for all score fields (all events use noteEncode doc IDs).
     const body: Array<Record<string, unknown>> = [];
 
     for (const [id, s] of scores) {
@@ -339,51 +339,14 @@ async function main() {
     if (body.length > 0) {
       const updateResponse = await client.bulk({ body, refresh: false });
 
-      // Handle failures (replaceable/addressable events with non-note1 IDs).
       if (updateResponse.body.errors) {
-        const failedIds: string[] = [];
         const items: Array<Record<string, { error?: unknown }>> =
           updateResponse.body.items;
-        const idList = [...scores.keys()];
-
         for (let i = 0; i < items.length; i++) {
           const result = items[i].update;
           if (result?.error) {
-            failedIds.push(idList[i]);
+            console.warn(`Score update failed:`, JSON.stringify(result.error));
           }
-        }
-
-        if (failedIds.length > 0) {
-          const scoreParams: Record<string, ScoreEntry> = {};
-          for (const id of failedIds) {
-            const s = scores.get(id);
-            if (s) scoreParams[id] = s;
-          }
-
-          await client.updateByQuery({
-            index: indexName,
-            body: {
-              query: { terms: { id: failedIds } },
-              script: {
-                source: `
-                  def s = params.scores.get(ctx._source.id);
-                  if (s != null) {
-                    ctx._source.engagers = s.engagers;
-                    ctx._source.comment_cnt = s.comment_cnt;
-                    ctx._source.reaction_cnt = s.reaction_cnt;
-                    ctx._source.repost_cnt = s.repost_cnt;
-                    ctx._source.quote_cnt = s.quote_cnt;
-                    ctx._source.zap_amount_msats = s.zap_amount_msats;
-                    ctx._source.zap_cnt = s.zap_cnt;
-                  }
-                `,
-                lang: "painless",
-                params: { scores: scoreParams },
-              },
-            },
-            refresh: false,
-            conflicts: "proceed",
-          });
         }
       }
     }
