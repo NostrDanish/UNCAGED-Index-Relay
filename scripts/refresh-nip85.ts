@@ -371,7 +371,7 @@ async function computeFollowerCounts(
 }
 
 /**
- * Bulk-update engagement score fields on event documents by note1-encoded doc ID.
+ * Bulk-update engagement score fields on event documents by hex event ID.
  */
 async function updateDocumentScores(
   client: OpenSearchClient,
