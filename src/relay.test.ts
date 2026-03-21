@@ -63,7 +63,7 @@ describe("Relay", () => {
       assert.equal(info.name, "Ditto Relay");
       assert.equal(info.software, "https://gitlab.com/soapbox-pub/ditto-relay");
       assert.equal(info.version, "0.1.0");
-      assert.deepEqual(info.supported_nips, [1, 9, 11, 40, 42, 45, 50, 70]);
+      assert.deepEqual(info.supported_nips, [1, 9, 11, 40, 42, 45, 50, 62, 70]);
     });
 
     it("should allow customizing relay info", () => {
@@ -218,6 +218,172 @@ describe("Relay", () => {
       assert.deepEqual(removeFilters[0].kinds, [30023]);
       assert.deepEqual(removeFilters[0].authors, [myPubkey]);
       assert.deepEqual(removeFilters[0]["#d"], ["my-article"]);
+    });
+
+    it("should handle vanish request targeting this relay (kind 62, NIP-62)", async () => {
+      const sk = generateSecretKey();
+      const myPubkey = finalizeEvent(
+        { kind: 1, created_at: 0, tags: [], content: "" },
+        sk,
+      ).pubkey;
+
+      const removeCalls: Filter[][] = [];
+      mockStorage.remove = async (filters: Filter[]) => {
+        removeCalls.push(filters);
+      };
+
+      const vanishEvent = finalizeEvent(
+        {
+          kind: 62,
+          created_at: Math.floor(Date.now() / 1000),
+          tags: [["relay", "wss://relay.test/"]],
+          content: "Requesting removal of all my data.",
+        },
+        sk,
+      );
+
+      await relay.handleEvent(mockWs, vanishEvent);
+
+      // Event should be accepted and stored for bookkeeping
+      assert.equal(sentMessages.length, 1);
+      assert.deepEqual(sentMessages[0], ["OK", vanishEvent.id, true, ""]);
+
+      // Remove should be called twice: once for all events, once for gift wraps
+      assert.equal(removeCalls.length, 2);
+
+      // First call: delete all events from this pubkey
+      assert.deepEqual(removeCalls[0], [
+        { authors: [myPubkey], until: vanishEvent.created_at },
+      ]);
+
+      // Second call: delete gift wraps (kind 1059) p-tagging this pubkey
+      assert.deepEqual(removeCalls[1], [
+        { kinds: [1059], "#p": [myPubkey], until: vanishEvent.created_at },
+      ]);
+    });
+
+    it("should handle vanish request with ALL_RELAYS tag (NIP-62)", async () => {
+      const sk = generateSecretKey();
+      const myPubkey = finalizeEvent(
+        { kind: 1, created_at: 0, tags: [], content: "" },
+        sk,
+      ).pubkey;
+
+      const removeCalls: Filter[][] = [];
+      mockStorage.remove = async (filters: Filter[]) => {
+        removeCalls.push(filters);
+      };
+
+      const vanishEvent = finalizeEvent(
+        {
+          kind: 62,
+          created_at: Math.floor(Date.now() / 1000),
+          tags: [["relay", "ALL_RELAYS"]],
+          content: "Requesting complete deletion from all relays.",
+        },
+        sk,
+      );
+
+      await relay.handleEvent(mockWs, vanishEvent);
+
+      assert.equal(sentMessages.length, 1);
+      assert.deepEqual(sentMessages[0], ["OK", vanishEvent.id, true, ""]);
+
+      // Should process vanish for ALL_RELAYS
+      assert.equal(removeCalls.length, 2);
+      assert.deepEqual(removeCalls[0], [
+        { authors: [myPubkey], until: vanishEvent.created_at },
+      ]);
+      assert.deepEqual(removeCalls[1], [
+        { kinds: [1059], "#p": [myPubkey], until: vanishEvent.created_at },
+      ]);
+    });
+
+    it("should ignore vanish request targeting a different relay (NIP-62)", async () => {
+      const sk = generateSecretKey();
+
+      let removeCalled = false;
+      mockStorage.remove = async (_filters: Filter[]) => {
+        removeCalled = true;
+      };
+
+      const vanishEvent = finalizeEvent(
+        {
+          kind: 62,
+          created_at: Math.floor(Date.now() / 1000),
+          tags: [["relay", "wss://other-relay.example.com/"]],
+          content: "Requesting removal from a different relay.",
+        },
+        sk,
+      );
+
+      await relay.handleEvent(mockWs, vanishEvent);
+
+      // Event should be accepted (stored for bookkeeping)
+      assert.equal(sentMessages.length, 1);
+      assert.deepEqual(sentMessages[0], ["OK", vanishEvent.id, true, ""]);
+
+      // Remove should NOT be called since this relay is not targeted
+      assert.ok(!removeCalled);
+    });
+
+    it("should reject vanish request with no relay tags (NIP-62)", async () => {
+      const sk = generateSecretKey();
+
+      const vanishEvent = finalizeEvent(
+        {
+          kind: 62,
+          created_at: Math.floor(Date.now() / 1000),
+          tags: [],
+          content: "Invalid vanish request.",
+        },
+        sk,
+      );
+
+      await relay.handleEvent(mockWs, vanishEvent);
+
+      // Event should be rejected
+      assert.equal(sentMessages.length, 1);
+      assert.deepEqual(sentMessages[0], [
+        "OK",
+        vanishEvent.id,
+        false,
+        "invalid: kind 62 event must include at least one relay tag",
+      ]);
+    });
+
+    it("should handle vanish request with relay URL without trailing slash (NIP-62)", async () => {
+      const sk = generateSecretKey();
+      const myPubkey = finalizeEvent(
+        { kind: 1, created_at: 0, tags: [], content: "" },
+        sk,
+      ).pubkey;
+
+      const removeCalls: Filter[][] = [];
+      mockStorage.remove = async (filters: Filter[]) => {
+        removeCalls.push(filters);
+      };
+
+      const vanishEvent = finalizeEvent(
+        {
+          kind: 62,
+          created_at: Math.floor(Date.now() / 1000),
+          tags: [["relay", "wss://relay.test"]], // No trailing slash
+          content: "Requesting removal.",
+        },
+        sk,
+      );
+
+      await relay.handleEvent(mockWs, vanishEvent);
+
+      assert.equal(sentMessages.length, 1);
+      assert.deepEqual(sentMessages[0], ["OK", vanishEvent.id, true, ""]);
+
+      // Should still match due to trailing slash tolerance
+      assert.equal(removeCalls.length, 2);
+      assert.deepEqual(removeCalls[0], [
+        { authors: [myPubkey], until: vanishEvent.created_at },
+      ]);
     });
 
     it("should handle storage errors gracefully", async () => {

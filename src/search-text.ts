@@ -51,6 +51,7 @@ const SKIP_CONTENT_KINDS = new Set([
   39089, // Starter Packs
   39092, // Media Starter Packs
   // Other non-searchable content
+  62, // Request to Vanish (NIP-62) — content is a reason/legal notice, not searchable
   9735, // Zap Receipt (NIP-57) — content is empty
 ]);
 

@@ -116,7 +116,7 @@ export class Relay {
     this.relayInfo = {
       name: "Ditto Relay",
       description: "A Nostr relay backed by OpenSearch",
-      supported_nips: [1, 9, 11, 40, 42, 45, 50, 70],
+      supported_nips: [1, 9, 11, 40, 42, 45, 50, 62, 70],
       software: "https://gitlab.com/soapbox-pub/ditto-relay",
       version: "0.1.0",
       limitation: {
@@ -380,6 +380,61 @@ export class Relay {
         }
       } catch (error) {
         console.error("Failed to process deletion event:", error);
+        return {
+          eventId: event.id,
+          accepted: false,
+          message: `error: ${error instanceof Error ? error.message : String(error)}`,
+        };
+      }
+    }
+
+    // Handle Request to Vanish events (kind 62, NIP-62)
+    // Delete all events from the pubkey up to created_at if our relay is tagged.
+    if (event.kind === 62) {
+      try {
+        const relayTags = event.tags
+          .filter((tag) => tag[0] === "relay" && tag.length >= 2)
+          .map((tag) => tag[1]);
+
+        // NIP-62: The tag list MUST include at least one relay value.
+        if (relayTags.length === 0) {
+          return {
+            eventId: event.id,
+            accepted: false,
+            message:
+              "invalid: kind 62 event must include at least one relay tag",
+          };
+        }
+
+        // Check if this relay is targeted (exact URL match or ALL_RELAYS)
+        const isTargeted = relayTags.some(
+          (url) =>
+            url === "ALL_RELAYS" || this.relayUrlMatches(url, this.relayUrl),
+        );
+
+        if (isTargeted && this.storage.remove) {
+          // Delete all events from this pubkey up to created_at
+          await this.storage.remove([
+            {
+              authors: [event.pubkey],
+              until: event.created_at,
+            },
+          ]);
+
+          // NIP-62: Relays SHOULD delete all NIP-59 Gift Wraps (kind 1059)
+          // that p-tagged the pubkey.
+          await this.storage.remove([
+            {
+              kinds: [1059],
+              "#p": [event.pubkey],
+              until: event.created_at,
+            },
+          ]);
+
+          console.log(`🗑️  Processed vanish request from ${event.pubkey}`);
+        }
+      } catch (error) {
+        console.error("Failed to process vanish request:", error);
         return {
           eventId: event.id,
           accepted: false,
