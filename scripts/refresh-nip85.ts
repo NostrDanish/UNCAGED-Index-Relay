@@ -21,7 +21,7 @@ import process from "node:process";
 import type { NostrFilter } from "@nostrify/nostrify";
 import type { ClientOptions } from "@opensearch-project/opensearch";
 import { Client as OpenSearchClient } from "@opensearch-project/opensearch";
-import { noteEncode } from "nostr-tools/nip19";
+
 import { Config } from "../src/config.ts";
 import { Nip85 } from "../src/nip85.ts";
 import type { EventScores } from "../src/opensearch.ts";
@@ -385,7 +385,7 @@ async function updateDocumentScores(
   for (const [id, s] of eventScores) {
     if (!isValidEventId(id)) continue;
     body.push({
-      update: { _index: indexName, _id: noteEncode(id) },
+      update: { _index: indexName, _id: id },
     });
     body.push({
       doc: {

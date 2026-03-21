@@ -9,7 +9,7 @@ import type {
 import { NIP50, NKinds, NSchema as n } from "@nostrify/nostrify";
 import type { Client, ClientOptions } from "@opensearch-project/opensearch";
 import { Client as OpenSearchClient } from "@opensearch-project/opensearch";
-import { noteEncode } from "nostr-tools/nip19";
+
 import type { Config } from "./config.ts";
 import { detectMedia } from "./media.ts";
 import {
@@ -254,14 +254,9 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     return tagsMap;
   }
 
-  /**
-   * Generate OpenSearch document ID for an event.
-   * Every event uses `noteEncode(event.id)` — a unique, deterministic ID
-   * derived from the event's hex ID. Replaceable/addressable slot logic
-   * is handled via the `replaced` field and `updateByQuery`, not doc IDs.
-   */
+  /** Generate OpenSearch document ID for an event (the hex event ID). */
   private getDocumentId(event: NostrEvent): string {
-    return noteEncode(event.id);
+    return event.id;
   }
 
   /**
@@ -1326,7 +1321,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
   /**
    * Flush the bulk queue to OpenSearch.
    *
-   * All events are indexed uniformly under `noteEncode(event.id)` doc IDs.
+   * All events are indexed uniformly under their hex event ID as the doc ID.
    * For replaceable/addressable events, after the bulk index, an
    * `updateByQuery` marks older versions of the same slot as
    * `replaced: true` and strips their score fields.
@@ -2378,14 +2373,14 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     }
 
     // Phase 4: Bulk update the dirty events with computed scores.
-    // All events use noteEncode(id) as their doc ID.
+    // Phase 4: Bulk update the dirty events with computed scores.
     const body: Array<Record<string, unknown>> = [];
 
     for (const [id, s] of scores) {
       body.push({
         update: {
           _index: this.indexName,
-          _id: noteEncode(id),
+          _id: id,
         },
       });
       body.push({

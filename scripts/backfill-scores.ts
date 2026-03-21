@@ -16,7 +16,7 @@
 import process from "node:process";
 import type { ClientOptions } from "@opensearch-project/opensearch";
 import { Client as OpenSearchClient } from "@opensearch-project/opensearch";
-import { noteEncode } from "nostr-tools/nip19";
+
 import { Config } from "../src/config.ts";
 import { OpenSearchRelay } from "../src/opensearch.ts";
 
@@ -316,12 +316,12 @@ async function main() {
       }
     }
 
-    // Single bulk update for all score fields (all events use noteEncode doc IDs).
+    // Single bulk update for all score fields (doc IDs are hex event IDs).
     const body: Array<Record<string, unknown>> = [];
 
     for (const [id, s] of scores) {
       body.push({
-        update: { _index: indexName, _id: noteEncode(id) },
+        update: { _index: indexName, _id: id },
       });
       body.push({
         doc: {
