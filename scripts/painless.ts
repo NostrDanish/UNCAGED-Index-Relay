@@ -63,6 +63,17 @@ export function buildReindexPainlessScript(): string {
   return `
     ${tagsMapScript}
 
+    // --- Re-key document ID to hex event ID ---
+    // Old replaceable/addressable events were stored under naddr-encoded _id
+    // values. The relay now uses the raw hex event ID as _id for all events.
+    ctx._id = ctx._source.id;
+
+    // --- Default replaced field ---
+    // Existing documents won't have this field; default to false (current).
+    if (!ctx._source.containsKey('replaced')) {
+      ctx._source.replaced = false;
+    }
+
     // --- Field renames ---
     // Split top_score into followers (kind 0) and engagers (non-kind-0).
     if (ctx._source.containsKey('top_score')) {
