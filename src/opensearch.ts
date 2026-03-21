@@ -1353,9 +1353,20 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
       body.push(entry.doc as unknown as Record<string, unknown>);
     }
 
+    // If the batch contains replaceable/addressable events, Phase 2 needs
+    // to search the index to find the slot winner. Use `refresh: "wait_for"`
+    // so the just-indexed documents are visible to the search. Without this,
+    // the default ~1s refresh interval can cause Phase 2 to miss the new
+    // events, leaving stale duplicates with `replaced: false`.
+    const hasReplaceable = entries.some(
+      (e) =>
+        NKinds.replaceable(e.event.kind) || NKinds.addressable(e.event.kind),
+    );
+    const refreshPolicy = hasReplaceable ? ("wait_for" as const) : false;
+
     const flushEnd = opensearchFlushDurationHistogram.startTimer();
     try {
-      const response = await this.client.bulk({ body, refresh: false });
+      const response = await this.client.bulk({ body, refresh: refreshPolicy });
       flushEnd();
 
       if (response.body.errors) {
@@ -1396,6 +1407,17 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
 
     // --- Phase 2: For replaceable/addressable events, mark older versions
     // of the same slot as `replaced: true` via updateByQuery.
+    //
+    // Each unique slot requires 1 search + 1 updateByQuery round-trip.
+    // For normal operation this is fine, but bulk imports touching many
+    // replaceable slots (e.g. a kind 3 contact-list storm) may benefit
+    // from batching via msearch in the future.
+    //
+    // Between Phase 1 and Phase 2 completion, queries for a replaceable
+    // slot may briefly return both old and new versions with
+    // `replaced: false`. This window is short and Nostr clients are
+    // expected to handle duplicate events.
+    //
     // Collect unique slots from the batch.
     const slots = new Map<
       string,
