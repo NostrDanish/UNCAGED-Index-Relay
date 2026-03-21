@@ -1496,34 +1496,48 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
 
         const winnerId = hits[0]._source.id;
 
-        // Mark all other events in the slot as replaced.
-        await this.client.updateByQuery({
-          index: this.indexName,
-          body: {
-            query: {
-              bool: {
-                must: slotMust,
-                must_not: [{ term: { id: winnerId } }],
+        // Remove old versions from the slot. For high-churn kinds in
+        // HISTORY_EXCLUDED_KINDS, delete them outright to avoid storage
+        // bloat. For all other kinds, mark them as `replaced: true` to
+        // preserve queryable history.
+        const loserQuery = {
+          bool: {
+            must: slotMust,
+            must_not: [{ term: { id: winnerId } }],
+          },
+        };
+
+        if (OpenSearchRelay.HISTORY_EXCLUDED_KINDS.has(slot.kind)) {
+          await this.client.deleteByQuery({
+            index: this.indexName,
+            body: { query: loserQuery },
+            refresh: false,
+            conflicts: "proceed",
+          });
+        } else {
+          await this.client.updateByQuery({
+            index: this.indexName,
+            body: {
+              query: loserQuery,
+              script: {
+                source: `
+                  ctx._source.replaced = true;
+                  ctx._source.followers = 0;
+                  ctx._source.engagers = 0;
+                  ctx._source.comment_cnt = 0;
+                  ctx._source.reaction_cnt = 0;
+                  ctx._source.repost_cnt = 0;
+                  ctx._source.quote_cnt = 0;
+                  ctx._source.zap_amount_msats = 0;
+                  ctx._source.zap_cnt = 0;
+                `,
+                lang: "painless",
               },
             },
-            script: {
-              source: `
-                ctx._source.replaced = true;
-                ctx._source.followers = 0;
-                ctx._source.engagers = 0;
-                ctx._source.comment_cnt = 0;
-                ctx._source.reaction_cnt = 0;
-                ctx._source.repost_cnt = 0;
-                ctx._source.quote_cnt = 0;
-                ctx._source.zap_amount_msats = 0;
-                ctx._source.zap_cnt = 0;
-              `,
-              lang: "painless",
-            },
-          },
-          refresh: false,
-          conflicts: "proceed",
-        });
+            refresh: false,
+            conflicts: "proceed",
+          });
+        }
       } catch (error) {
         // Non-fatal — the events are indexed, just not marked as replaced yet.
         // The next flush or a query with `replaced: false` filter will still
@@ -1532,6 +1546,15 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
       }
     }
   }
+
+  /**
+   * Replaceable/addressable kinds that should NOT preserve historical
+   * versions. When a newer event replaces an older one in these kinds,
+   * the old version is deleted instead of being marked `replaced: true`.
+   * This avoids unbounded storage growth for high-churn kinds like
+   * NIP-85 record events (30382–30385).
+   */
+  static HISTORY_EXCLUDED_KINDS = new Set([30382, 30383, 30384, 30385]);
 
   /** Kinds whose `e`-tag references affect engagement scores. */
   private static REFERENCING_KINDS = new Set([1, 6, 7, 16, 17, 1111, 9735]);

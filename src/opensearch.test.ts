@@ -674,6 +674,24 @@ describe("OpenSearchRelay", () => {
             return { body: { found: false }, statusCode: 404 };
           },
           // biome-ignore lint/suspicious/noExplicitAny: mock accepts any query shape
+          deleteByQuery: async ({ body }: { body: any }) => {
+            const filters = extractFilters(body.query.bool);
+            let deleted = 0;
+
+            for (const [id, doc] of documents.entries()) {
+              const d = doc as NostrEvent & {
+                deleted?: boolean;
+                replaced?: boolean;
+                tags_map?: Record<string, string[]>;
+              };
+              if (!matchesFilters(d, filters)) continue;
+              documents.delete(id);
+              deleted++;
+            }
+
+            return { body: { deleted } };
+          },
+          // biome-ignore lint/suspicious/noExplicitAny: mock accepts any query shape
           updateByQuery: async ({ body }: { body: any }) => {
             const filters = extractFilters(body.query.bool);
             let updated = 0;
@@ -1505,6 +1523,113 @@ describe("OpenSearchRelay", () => {
         nonDeleted[0].id,
         article2v1.id,
         "Surviving event should be article-2",
+      );
+    });
+
+    it("should delete old versions (not archive) for HISTORY_EXCLUDED_KINDS", async () => {
+      const { client, documents } = createHistoryMockClient();
+      const relay = new OpenSearchRelay(client as unknown as Client, {
+        indexName: "test-index",
+        bulkMaxSize: 1,
+      });
+
+      const sk = generateSecretKey();
+
+      // Kind 30382 is in HISTORY_EXCLUDED_KINDS
+      const v1 = finalizeEvent(
+        {
+          kind: 30382,
+          created_at: 1000,
+          content: "record-v1",
+          tags: [["d", "target-pubkey"]],
+        },
+        sk,
+      );
+      await relay.event(v1);
+      assert.equal(documents.size, 1);
+
+      const v2 = finalizeEvent(
+        {
+          kind: 30382,
+          created_at: 2000,
+          content: "record-v2",
+          tags: [["d", "target-pubkey"]],
+        },
+        sk,
+      );
+      await relay.event(v2);
+
+      // Old version should be deleted, not archived
+      assert.equal(
+        documents.size,
+        1,
+        "Old version should be deleted, not kept as history",
+      );
+
+      const remaining = Array.from(documents.values()) as Array<
+        NostrEvent & { replaced?: boolean }
+      >;
+      assert.equal(
+        remaining[0].id,
+        v2.id,
+        "Only the newest version should remain",
+      );
+      assert.equal(
+        remaining[0].replaced,
+        false,
+        "Current version should not be replaced",
+      );
+    });
+
+    it("should still archive old versions for kinds NOT in HISTORY_EXCLUDED_KINDS", async () => {
+      const { client, documents } = createHistoryMockClient();
+      const relay = new OpenSearchRelay(client as unknown as Client, {
+        indexName: "test-index",
+        bulkMaxSize: 1,
+      });
+
+      const sk = generateSecretKey();
+
+      // Kind 30023 is NOT in HISTORY_EXCLUDED_KINDS
+      const v1 = finalizeEvent(
+        {
+          kind: 30023,
+          created_at: 1000,
+          content: "article-v1",
+          tags: [["d", "my-article"]],
+        },
+        sk,
+      );
+      await relay.event(v1);
+
+      const v2 = finalizeEvent(
+        {
+          kind: 30023,
+          created_at: 2000,
+          content: "article-v2",
+          tags: [["d", "my-article"]],
+        },
+        sk,
+      );
+      await relay.event(v2);
+
+      // Old version should be archived (replaced), not deleted
+      assert.equal(documents.size, 2, "Both versions should exist");
+
+      const docs = Array.from(documents.values()) as Array<
+        NostrEvent & { replaced?: boolean }
+      >;
+      const current = docs.find((d) => d.id === v2.id);
+      const archived = docs.find((d) => d.id === v1.id);
+      assert.equal(
+        current?.replaced,
+        false,
+        "Current version should not be replaced",
+      );
+      assert.equal(
+        archived?.replaced,
+        true,
+        "Old version should be marked replaced",
       );
     });
   });
