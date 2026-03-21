@@ -29,6 +29,8 @@ interface NostrEventDocument extends NostrEvent {
   /** Indexed full-text search field, built per-kind from event content. */
   search_text: string;
   deleted?: boolean;
+  /** Whether this document is a historical version replaced by a newer event. */
+  replaced?: boolean;
   protocol?: string;
   amount_msats?: number;
   language?: string;
@@ -488,6 +490,41 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
       filter.kinds.length === 1 &&
       filter.kinds[0] === 0
     );
+  }
+
+  /**
+   * Detect whether a filter targets a single replaceable/addressable event
+   * slot (representable as a single `naddr`). Such filters auto-include
+   * historical (replaced) versions.
+   *
+   * A filter is an naddr-shaped history filter when:
+   * - It has exactly 1 kind that is replaceable or addressable.
+   * - It has exactly 1 author.
+   * - For addressable kinds, it has exactly 1 `#d` tag value.
+   * - For replaceable kinds, no `#d` constraint is needed.
+   */
+  private isHistoryFilter(filter: NostrFilter): boolean {
+    if (
+      !filter.kinds ||
+      filter.kinds.length !== 1 ||
+      !filter.authors ||
+      filter.authors.length !== 1
+    ) {
+      return false;
+    }
+
+    const kind = filter.kinds[0];
+
+    if (NKinds.replaceable(kind)) {
+      return true;
+    }
+
+    if (NKinds.addressable(kind)) {
+      const dValues = (filter as Record<string, unknown>)["#d"];
+      return Array.isArray(dValues) && dValues.length === 1;
+    }
+
+    return false;
   }
 
   /**
@@ -997,13 +1034,25 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
   }
 
   /**
-   * Build OpenSearch query from Nostr filter
+   * Build OpenSearch query from Nostr filter.
+   *
+   * When `includeReplaced` is true, historical (replaced) versions of
+   * replaceable/addressable events are included in results. By default
+   * they are excluded.
    */
-  private buildQuery(filter: NostrFilter): Record<string, unknown> {
+  private buildQuery(
+    filter: NostrFilter,
+    opts?: { includeReplaced?: boolean },
+  ): Record<string, unknown> {
     const must: Record<string, unknown>[] = [
       { term: { deleted: false } }, // Always exclude deleted events
     ];
     const mustNot: Record<string, unknown>[] = [];
+
+    // Exclude replaced (historical) versions unless explicitly requested.
+    if (!opts?.includeReplaced) {
+      mustNot.push({ term: { replaced: true } });
+    }
 
     // NIP-40: Exclude expired events
     const now = Math.floor(Date.now() / 1000);
@@ -1208,7 +1257,9 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
       }
     }
 
-    const query = this.buildQuery(filter);
+    // Auto-include historical versions for naddr-shaped filters.
+    const includeReplaced = this.isHistoryFilter(filter);
+    const query = this.buildQuery(filter, { includeReplaced });
     const distinctAuthor = this.hasDistinctAuthor(filter);
 
     // Sort by created_at (newest first)
@@ -1286,6 +1337,12 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
 
   /**
    * Flush the bulk queue to OpenSearch.
+   *
+   * For replaceable/addressable events, this method fetches the current
+   * documents via `mget` before upserting so that the old version can be
+   * archived as a historical document with `replaced: true`. The old
+   * document is indexed under `noteEncode(old.id)` so it doesn't collide
+   * with the naddr-encoded slot used by the current version.
    */
   async flush(): Promise<void> {
     if (this.bulkTimer) {
@@ -1297,7 +1354,49 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
 
     const entries = this.bulkQueue.splice(0);
     opensearchBulkQueueGauge.set(this.bulkQueue.length);
+
+    // --- Phase 1: Fetch current documents for replaceable/addressable events
+    // so we can archive the old version before overwriting.
+    const replaceableEntries: Array<{ index: number; docId: string }> = [];
+    for (let i = 0; i < entries.length; i++) {
+      const entry = entries[i];
+      if (
+        NKinds.replaceable(entry.event.kind) ||
+        NKinds.addressable(entry.event.kind)
+      ) {
+        replaceableEntries.push({ index: i, docId: entry.docId });
+      }
+    }
+
+    // Map from naddr doc ID -> existing document (if any).
+    const existingDocs = new Map<string, NostrEventDocument>();
+    if (replaceableEntries.length > 0) {
+      // Deduplicate doc IDs (multiple events in one batch for the same slot).
+      const uniqueDocIds = [...new Set(replaceableEntries.map((r) => r.docId))];
+      try {
+        const mgetResponse = await this.client.mget({
+          index: this.indexName,
+          body: {
+            ids: uniqueDocIds,
+          },
+        });
+        for (const doc of mgetResponse.body.docs) {
+          const d = doc as { found?: boolean; _id: string; _source?: unknown };
+          if (d.found && d._source) {
+            existingDocs.set(d._id, d._source as NostrEventDocument);
+          }
+        }
+      } catch {
+        // mget failure is non-fatal — we just skip archiving old versions.
+        console.warn("mget failed during flush; skipping history archival");
+      }
+    }
+
+    // --- Phase 2: Build bulk body.
+    // `bulkItemEntryIndex[i]` maps bulk response item `i` to the entries
+    // index, or -1 for history archive operations (which are fire-and-forget).
     const body: Array<Record<string, unknown>> = [];
+    const bulkItemEntryIndex: number[] = [];
 
     const replaceable_upsert_script = `
       if (ctx._source.deleted == true) {
@@ -1327,11 +1426,50 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
       }
     `;
 
-    for (const entry of entries) {
+    for (let i = 0; i < entries.length; i++) {
+      const entry = entries[i];
       if (
         NKinds.replaceable(entry.event.kind) ||
         NKinds.addressable(entry.event.kind)
       ) {
+        // Archive the existing document as a replaced historical version
+        // before the upsert overwrites it. Only archive if:
+        // - A current document exists for this slot
+        // - It is not soft-deleted
+        // - The new event would actually replace it (newer or same-time-lower-id)
+        // - The old event has a different id (not a duplicate)
+        const existing = existingDocs.get(entry.docId);
+        if (
+          existing &&
+          !existing.deleted &&
+          existing.id !== entry.event.id &&
+          (entry.event.created_at > existing.created_at ||
+            (entry.event.created_at === existing.created_at &&
+              entry.event.id < existing.id))
+        ) {
+          // Strip score fields from the historical copy — scores only
+          // apply to the current (active) version of the event.
+          const historyDoc: Record<string, unknown> = { ...existing };
+          historyDoc.replaced = true;
+          delete historyDoc.followers;
+          delete historyDoc.engagers;
+          delete historyDoc.comment_cnt;
+          delete historyDoc.reaction_cnt;
+          delete historyDoc.repost_cnt;
+          delete historyDoc.quote_cnt;
+          delete historyDoc.zap_amount_msats;
+          delete historyDoc.zap_cnt;
+
+          body.push({
+            index: {
+              _index: this.indexName,
+              _id: noteEncode(existing.id),
+            },
+          });
+          body.push(historyDoc);
+          bulkItemEntryIndex.push(-1); // fire-and-forget history entry
+        }
+
         // Scripted upsert for replaceable/addressable events
         body.push({
           update: { _index: this.indexName, _id: entry.docId },
@@ -1344,12 +1482,14 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
           },
           upsert: entry.doc,
         });
+        bulkItemEntryIndex.push(i);
       } else {
         // Regular index
         body.push({
           index: { _index: this.indexName, _id: entry.docId },
         });
         body.push(entry.doc as unknown as Record<string, unknown>);
+        bulkItemEntryIndex.push(i);
       }
     }
 
@@ -1362,20 +1502,24 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
         // Resolve/reject individual entries based on per-item results
         const items: Array<Record<string, { error?: unknown }>> =
           response.body.items;
-        for (let i = 0; i < entries.length; i++) {
+        for (let i = 0; i < items.length; i++) {
+          const entryIdx = bulkItemEntryIndex[i];
+          if (entryIdx < 0) continue; // history archive — ignore errors
           const item = items[i];
           const result =
             (item.index as { error?: unknown } | undefined) ??
             (item.update as { error?: unknown } | undefined);
           if (result?.error) {
-            entries[i].reject(
+            entries[entryIdx].reject(
               new Error(`Bulk index failed: ${JSON.stringify(result.error)}`),
             );
           } else {
-            opensearchEventsCounter.inc({ kind: entries[i].event.kind });
-            entries[i].resolve();
+            opensearchEventsCounter.inc({ kind: entries[entryIdx].event.kind });
+            entries[entryIdx].resolve();
           }
         }
+        // Resolve any entries that didn't appear in the error path
+        // (entries whose bulk item had no error are already resolved above)
       } else {
         for (const entry of entries) {
           opensearchEventsCounter.inc({ kind: entry.event.kind });
@@ -1619,7 +1763,9 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
   }
 
   /**
-   * Remove events matching the given filters (soft delete using deleted field)
+   * Remove events matching the given filters (soft delete using deleted field).
+   * Also soft-deletes any `replaced: true` historical versions that match the
+   * same filter criteria.
    */
   async remove(
     filters: NostrFilter[],
@@ -1690,6 +1836,35 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
         throw error;
       }
     }
+
+    // Also soft-delete historical (replaced) versions matching these filters.
+    // Uses updateByQuery so we don't need to enumerate every history document.
+    for (const filter of filters) {
+      if (opts?.signal?.aborted) break;
+      try {
+        const historyQuery = this.buildQuery(filter, { includeReplaced: true });
+        // Narrow to only replaced documents.
+        const wrappedQuery = {
+          bool: {
+            must: [historyQuery, { term: { replaced: true } }],
+          },
+        };
+        await this.client.updateByQuery({
+          index: this.indexName,
+          body: {
+            query: wrappedQuery,
+            script: {
+              source: "ctx._source.deleted = true",
+              lang: "painless",
+            },
+          },
+          refresh: true,
+          conflicts: "proceed",
+        });
+      } catch (error) {
+        console.error("Failed to delete historical versions:", error);
+      }
+    }
   }
 
   /** Custom analyzer settings for edge-ngram prefix matching on profile names. */
@@ -1750,6 +1925,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     },
     sig: { type: "keyword" },
     deleted: { type: "boolean" },
+    replaced: { type: "boolean" },
     protocol: { type: "keyword" },
     amount_msats: { type: "long" },
     language: { type: "keyword" },
@@ -1907,13 +2083,20 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     const searches: Promise<DirtyHit[]>[] = [];
 
     // (a) Events referenced by engagement events (by event ID).
+    // Exclude replaced (historical) versions — scores only apply to the
+    // current version of each event.
     if (pending.ids.size > 0) {
       searches.push(
         this.client
           .search({
             index: this.indexName,
             body: {
-              query: { terms: { id: [...pending.ids] } },
+              query: {
+                bool: {
+                  must: [{ terms: { id: [...pending.ids] } }],
+                  must_not: [{ term: { replaced: true } }],
+                },
+              },
               _source: ["id", "kind", "pubkey"],
               size: pending.ids.size,
             },
@@ -1938,6 +2121,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
                     { term: { kind: 0 } },
                     { terms: { pubkey: [...pending.pubkeys] } },
                   ],
+                  must_not: [{ term: { replaced: true } }],
                 },
               },
               _source: ["id", "kind", "pubkey"],
@@ -1957,11 +2141,14 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     const seen = new Set<string>();
     const dirtyKind0: Array<{ id: string; pubkey: string }> = [];
     const dirtyNonKind0Ids: string[] = [];
+    /** Full hit info keyed by event ID — used in Phase 4 for doc ID computation. */
+    const dirtyHitByEventId = new Map<string, DirtyHit>();
 
     for (const hits of results) {
       for (const hit of hits) {
         if (seen.has(hit.id)) continue;
         seen.add(hit.id);
+        dirtyHitByEventId.set(hit.id, hit);
         if (hit.kind === 0) {
           dirtyKind0.push({ id: hit.id, pubkey: hit.pubkey });
         } else {
@@ -2224,13 +2411,29 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     }
 
     // Phase 4: Bulk update the dirty events with computed scores.
+    // Use the full DirtyHit info to compute the correct document ID —
+    // replaceable/addressable events use naddr encoding, not noteEncode,
+    // because noteEncode would target historical (replaced) documents.
     const body: Array<Record<string, unknown>> = [];
 
     for (const [id, s] of scores) {
+      const hit = dirtyHitByEventId.get(id);
+      let docId: string;
+      if (
+        hit &&
+        (NKinds.replaceable(hit.kind) || NKinds.addressable(hit.kind))
+      ) {
+        // For replaceable/addressable events we must use updateByQuery
+        // since we don't have the d-tag value needed for naddr encoding.
+        // Skip them here; they'll be handled by the fallback below.
+        continue;
+      } else {
+        docId = noteEncode(id);
+      }
       body.push({
         update: {
           _index: this.indexName,
-          _id: noteEncode(id),
+          _id: docId,
         },
       });
       body.push({
@@ -2247,16 +2450,28 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
       });
     }
 
+    // Collect replaceable/addressable event IDs that were skipped above —
+    // these need updateByQuery since we don't have their d-tag to compute
+    // the naddr doc ID, and noteEncode would target history documents.
+    const replaceableScoreIds: string[] = [];
+    for (const [id] of scores) {
+      const hit = dirtyHitByEventId.get(id);
+      if (
+        hit &&
+        (NKinds.replaceable(hit.kind) || NKinds.addressable(hit.kind))
+      ) {
+        replaceableScoreIds.push(id);
+      }
+    }
+
     if (body.length > 0) {
       const updateResponse = await this.client.bulk({
         body,
         refresh: false,
       });
 
-      // Some updates may fail if the doc ID doesn't match (e.g. replaceable
-      // events use naddr encoding). Fall back to update_by_query for those.
+      // Some bulk updates may still fail for unexpected reasons.
       if (updateResponse.body.errors) {
-        const failedIds: string[] = [];
         const items: Array<
           Record<string, { error?: unknown; status?: number }>
         > = updateResponse.body.items;
@@ -2264,58 +2479,66 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
         for (let i = 0; i < items.length; i++) {
           const result = items[i].update;
           if (result?.error) {
-            failedIds.push(allDirtyIds[i]);
+            console.warn(
+              `Score update failed for doc:`,
+              JSON.stringify(result.error),
+            );
           }
-        }
-
-        // Batch-update failed IDs using a single Painless script that
-        // looks up each event's scores from a params map.
-        if (failedIds.length > 0) {
-          const scoreParams: Record<
-            string,
-            {
-              followers: number;
-              engagers: number;
-              comment_cnt: number;
-              reaction_cnt: number;
-              repost_cnt: number;
-              quote_cnt: number;
-              zap_amount_msats: number;
-              zap_cnt: number;
-            }
-          > = {};
-          for (const id of failedIds) {
-            const s = scores.get(id);
-            if (s) scoreParams[id] = s;
-          }
-
-          await this.client.updateByQuery({
-            index: this.indexName,
-            body: {
-              query: { terms: { id: failedIds } },
-              script: {
-                source: `
-                  def s = params.scores.get(ctx._source.id);
-                  if (s != null) {
-                    ctx._source.followers = s.followers;
-                    ctx._source.engagers = s.engagers;
-                    ctx._source.comment_cnt = s.comment_cnt;
-                    ctx._source.reaction_cnt = s.reaction_cnt;
-                    ctx._source.repost_cnt = s.repost_cnt;
-                    ctx._source.quote_cnt = s.quote_cnt;
-                    ctx._source.zap_amount_msats = s.zap_amount_msats;
-                    ctx._source.zap_cnt = s.zap_cnt;
-                  }
-                `,
-                lang: "painless",
-                params: { scores: scoreParams },
-              },
-            },
-            refresh: false,
-            conflicts: "proceed",
-          });
         }
       }
+    }
+
+    // Update replaceable/addressable events via updateByQuery (matches by
+    // event ID field, excludes replaced history documents).
+    if (replaceableScoreIds.length > 0) {
+      const scoreParams: Record<
+        string,
+        {
+          followers: number;
+          engagers: number;
+          comment_cnt: number;
+          reaction_cnt: number;
+          repost_cnt: number;
+          quote_cnt: number;
+          zap_amount_msats: number;
+          zap_cnt: number;
+        }
+      > = {};
+      for (const id of replaceableScoreIds) {
+        const s = scores.get(id);
+        if (s) scoreParams[id] = s;
+      }
+
+      await this.client.updateByQuery({
+        index: this.indexName,
+        body: {
+          query: {
+            bool: {
+              must: [{ terms: { id: replaceableScoreIds } }],
+              must_not: [{ term: { replaced: true } }],
+            },
+          },
+          script: {
+            source: `
+              def s = params.scores.get(ctx._source.id);
+              if (s != null) {
+                ctx._source.followers = s.followers;
+                ctx._source.engagers = s.engagers;
+                ctx._source.comment_cnt = s.comment_cnt;
+                ctx._source.reaction_cnt = s.reaction_cnt;
+                ctx._source.repost_cnt = s.repost_cnt;
+                ctx._source.quote_cnt = s.quote_cnt;
+                ctx._source.zap_amount_msats = s.zap_amount_msats;
+                ctx._source.zap_cnt = s.zap_cnt;
+              }
+            `,
+            lang: "painless",
+            params: { scores: scoreParams },
+          },
+        },
+        refresh: false,
+        conflicts: "proceed",
+      });
     }
 
     const kind0Count = dirtyKind0.length;
