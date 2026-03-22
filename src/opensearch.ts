@@ -1561,13 +1561,12 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
             conflicts: "proceed",
           });
         }
-        // Mark the winner as dirty so scores get recomputed on the
-        // next recomputeScores() cycle. Kind 0 profiles are keyed by
-        // pubkey (follower counts); all others by event ID (engagement).
+        // Mark kind 0 pubkey as dirty so follower count gets recomputed
+        // on the next recomputeScores() cycle. Follower counts are
+        // pubkey-based (from kind 3 contact lists), so they transfer
+        // to the new profile event automatically.
         if (slot.kind === 0) {
           this.pendingDirtyPubkeys.add(slot.pubkey);
-        } else {
-          this.pendingDirtyIds.add(winnerId);
         }
       } catch (error) {
         // Non-fatal — the events are indexed, just not marked as replaced yet.

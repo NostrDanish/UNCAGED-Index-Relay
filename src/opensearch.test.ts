@@ -1837,45 +1837,6 @@ describe("OpenSearchRelay", () => {
         "Pubkey should be marked dirty after kind 0 replacement",
       );
     });
-
-    it("should mark non-kind-0 winner as dirty for score recomputation on replacement", async () => {
-      const { client, documents } = createHistoryMockClient();
-      const relay = new OpenSearchRelay(client as unknown as Client, {
-        indexName: "test-index",
-        bulkMaxSize: 1,
-      });
-
-      const sk = generateSecretKey();
-
-      const v1 = finalizeEvent(
-        {
-          kind: 30023,
-          created_at: 1000,
-          content: "article-v1",
-          tags: [["d", "slug"]],
-        },
-        sk,
-      );
-      await relay.event(v1);
-
-      const v2 = finalizeEvent(
-        {
-          kind: 30023,
-          created_at: 2000,
-          content: "article-v2",
-          tags: [["d", "slug"]],
-        },
-        sk,
-      );
-      await relay.event(v2);
-
-      // biome-ignore lint/suspicious/noExplicitAny: access private field for testing
-      const dirtyIds = (relay as any).pendingDirtyIds as Set<string>;
-      assert.ok(
-        dirtyIds.has(v2.id),
-        "Winner event ID should be marked dirty after replacement",
-      );
-    });
   });
 
   describe("NIP-50 sort", () => {
