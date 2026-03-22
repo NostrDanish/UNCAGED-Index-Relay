@@ -1526,7 +1526,7 @@ describe("OpenSearchRelay", () => {
       );
     });
 
-    it("should delete old versions (not archive) for HISTORY_EXCLUDED_KINDS", async () => {
+    it("should delete old versions for excluded kinds (default: 30382-30385)", async () => {
       const { client, documents } = createHistoryMockClient();
       const relay = new OpenSearchRelay(client as unknown as Client, {
         indexName: "test-index",
@@ -1535,7 +1535,7 @@ describe("OpenSearchRelay", () => {
 
       const sk = generateSecretKey();
 
-      // Kind 30382 is in HISTORY_EXCLUDED_KINDS
+      // Kind 30382 is excluded by default
       const v1 = finalizeEvent(
         {
           kind: 30382,
@@ -1559,7 +1559,6 @@ describe("OpenSearchRelay", () => {
       );
       await relay.event(v2);
 
-      // Old version should be deleted, not archived
       assert.equal(
         documents.size,
         1,
@@ -1581,7 +1580,7 @@ describe("OpenSearchRelay", () => {
       );
     });
 
-    it("should still archive old versions for kinds NOT in HISTORY_EXCLUDED_KINDS", async () => {
+    it("should archive old versions for kinds not in the exclude list", async () => {
       const { client, documents } = createHistoryMockClient();
       const relay = new OpenSearchRelay(client as unknown as Client, {
         indexName: "test-index",
@@ -1590,7 +1589,6 @@ describe("OpenSearchRelay", () => {
 
       const sk = generateSecretKey();
 
-      // Kind 30023 is NOT in HISTORY_EXCLUDED_KINDS
       const v1 = finalizeEvent(
         {
           kind: 30023,
@@ -1613,7 +1611,6 @@ describe("OpenSearchRelay", () => {
       );
       await relay.event(v2);
 
-      // Old version should be archived (replaced), not deleted
       assert.equal(documents.size, 2, "Both versions should exist");
 
       const docs = Array.from(documents.values()) as Array<
@@ -1630,6 +1627,184 @@ describe("OpenSearchRelay", () => {
         archived?.replaced,
         true,
         "Old version should be marked replaced",
+      );
+    });
+
+    it("should delete all old versions when history is disabled", async () => {
+      const { client, documents } = createHistoryMockClient();
+      const relay = new OpenSearchRelay(client as unknown as Client, {
+        indexName: "test-index",
+        bulkMaxSize: 1,
+        historyEnabled: false,
+      });
+
+      const sk = generateSecretKey();
+
+      const v1 = finalizeEvent(
+        {
+          kind: 30023,
+          created_at: 1000,
+          content: "article-v1",
+          tags: [["d", "my-article"]],
+        },
+        sk,
+      );
+      await relay.event(v1);
+
+      const v2 = finalizeEvent(
+        {
+          kind: 30023,
+          created_at: 2000,
+          content: "article-v2",
+          tags: [["d", "my-article"]],
+        },
+        sk,
+      );
+      await relay.event(v2);
+
+      assert.equal(
+        documents.size,
+        1,
+        "History disabled: old version should be deleted",
+      );
+      const remaining = Array.from(documents.values()) as Array<NostrEvent>;
+      assert.equal(remaining[0].id, v2.id);
+    });
+
+    it("should only archive whitelisted kinds when whitelist is set", async () => {
+      const { client, documents } = createHistoryMockClient();
+      const relay = new OpenSearchRelay(client as unknown as Client, {
+        indexName: "test-index",
+        bulkMaxSize: 1,
+        historyKindsWhitelist: new Set([30023]),
+      });
+
+      const sk = generateSecretKey();
+
+      // Kind 30023 is whitelisted — should archive
+      const articleV1 = finalizeEvent(
+        {
+          kind: 30023,
+          created_at: 1000,
+          content: "article-v1",
+          tags: [["d", "my-article"]],
+        },
+        sk,
+      );
+      await relay.event(articleV1);
+
+      const articleV2 = finalizeEvent(
+        {
+          kind: 30023,
+          created_at: 2000,
+          content: "article-v2",
+          tags: [["d", "my-article"]],
+        },
+        sk,
+      );
+      await relay.event(articleV2);
+
+      assert.equal(
+        documents.size,
+        2,
+        "Whitelisted kind 30023: both versions should exist",
+      );
+
+      // Kind 0 is NOT whitelisted — should delete old version
+      const profileV1 = finalizeEvent(
+        { kind: 0, created_at: 1000, content: "{}", tags: [] },
+        sk,
+      );
+      await relay.event(profileV1);
+      assert.equal(documents.size, 3);
+
+      const profileV2 = finalizeEvent(
+        { kind: 0, created_at: 2000, content: "{}", tags: [] },
+        sk,
+      );
+      await relay.event(profileV2);
+
+      assert.equal(
+        documents.size,
+        3,
+        "Non-whitelisted kind 0: old version should be deleted",
+      );
+
+      const docs = Array.from(documents.values()) as Array<
+        NostrEvent & { replaced?: boolean }
+      >;
+      const profiles = docs.filter((d) => d.kind === 0);
+      assert.equal(profiles.length, 1, "Only current profile should remain");
+      assert.equal(profiles[0].id, profileV2.id);
+    });
+
+    it("should use custom exclude list from config", async () => {
+      const { client, documents } = createHistoryMockClient();
+      // Exclude kind 30023 (not the default), don't exclude 30382
+      const relay = new OpenSearchRelay(client as unknown as Client, {
+        indexName: "test-index",
+        bulkMaxSize: 1,
+        historyKindsExcluded: new Set([30023]),
+      });
+
+      const sk = generateSecretKey();
+
+      // Kind 30023 is now excluded — should delete old version
+      const articleV1 = finalizeEvent(
+        {
+          kind: 30023,
+          created_at: 1000,
+          content: "article-v1",
+          tags: [["d", "my-article"]],
+        },
+        sk,
+      );
+      await relay.event(articleV1);
+
+      const articleV2 = finalizeEvent(
+        {
+          kind: 30023,
+          created_at: 2000,
+          content: "article-v2",
+          tags: [["d", "my-article"]],
+        },
+        sk,
+      );
+      await relay.event(articleV2);
+
+      assert.equal(
+        documents.size,
+        1,
+        "Excluded kind 30023: old version should be deleted",
+      );
+
+      // Kind 30382 is NOT excluded with this config — should archive
+      const recordV1 = finalizeEvent(
+        {
+          kind: 30382,
+          created_at: 1000,
+          content: "record-v1",
+          tags: [["d", "some-pubkey"]],
+        },
+        sk,
+      );
+      await relay.event(recordV1);
+
+      const recordV2 = finalizeEvent(
+        {
+          kind: 30382,
+          created_at: 2000,
+          content: "record-v2",
+          tags: [["d", "some-pubkey"]],
+        },
+        sk,
+      );
+      await relay.event(recordV2);
+
+      assert.equal(
+        documents.size,
+        3,
+        "Non-excluded kind 30382: both versions should exist",
       );
     });
   });

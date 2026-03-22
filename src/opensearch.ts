@@ -99,6 +99,13 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
   private client: Client;
   private indexName: string;
 
+  /** Whether to preserve historical versions of replaceable/addressable events. */
+  private historyEnabled: boolean;
+  /** When set, only these kinds preserve history (whitelist takes precedence over exclude). */
+  private historyKindsWhitelist: Set<number> | undefined;
+  /** Kinds excluded from history preservation (ignored when whitelist is set). */
+  private historyKindsExcluded: Set<number>;
+
   /** Bulk indexing queue. */
   private bulkQueue: BulkEntry[] = [];
   private bulkTimer: ReturnType<typeof setTimeout> | null = null;
@@ -137,12 +144,23 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
 
   constructor(
     client: Client,
-    opts?: { indexName?: string; bulkMaxSize?: number; bulkFlushMs?: number },
+    opts?: {
+      indexName?: string;
+      bulkMaxSize?: number;
+      bulkFlushMs?: number;
+      historyEnabled?: boolean;
+      historyKindsWhitelist?: Set<number>;
+      historyKindsExcluded?: Set<number>;
+    },
   ) {
     this.client = client;
     this.indexName = opts?.indexName || "nostr-events";
     this.bulkMaxSize = opts?.bulkMaxSize ?? 100;
     this.bulkFlushMs = opts?.bulkFlushMs ?? 200;
+    this.historyEnabled = opts?.historyEnabled ?? true;
+    this.historyKindsWhitelist = opts?.historyKindsWhitelist;
+    this.historyKindsExcluded =
+      opts?.historyKindsExcluded ?? new Set([30382, 30383, 30384, 30385]);
   }
 
   /**
@@ -161,7 +179,12 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     }
 
     const client = new OpenSearchClient(clientOptions);
-    return new OpenSearchRelay(client, { indexName: config.opensearchIndex });
+    return new OpenSearchRelay(client, {
+      indexName: config.opensearchIndex,
+      historyEnabled: config.historyEnabled,
+      historyKindsWhitelist: config.historyKindsWhitelist,
+      historyKindsExcluded: config.historyKindsExcluded,
+    });
   }
 
   /**
@@ -1507,7 +1530,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
           },
         };
 
-        if (OpenSearchRelay.HISTORY_EXCLUDED_KINDS.has(slot.kind)) {
+        if (!this.shouldPreserveHistory(slot.kind)) {
           await this.client.deleteByQuery({
             index: this.indexName,
             body: { query: loserQuery },
@@ -1548,13 +1571,20 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
   }
 
   /**
-   * Replaceable/addressable kinds that should NOT preserve historical
-   * versions. When a newer event replaces an older one in these kinds,
-   * the old version is deleted instead of being marked `replaced: true`.
-   * This avoids unbounded storage growth for high-churn kinds like
-   * NIP-85 record events (30382–30385).
+   * Determine whether a given kind should preserve historical versions
+   * when replaced. The logic is:
+   *
+   * 1. If history is globally disabled → false
+   * 2. If a whitelist is set → true only if the kind is in the whitelist
+   * 3. Otherwise → true unless the kind is in the exclude list
    */
-  static HISTORY_EXCLUDED_KINDS = new Set([30382, 30383, 30384, 30385]);
+  private shouldPreserveHistory(kind: number): boolean {
+    if (!this.historyEnabled) return false;
+    if (this.historyKindsWhitelist) {
+      return this.historyKindsWhitelist.has(kind);
+    }
+    return !this.historyKindsExcluded.has(kind);
+  }
 
   /** Kinds whose `e`-tag references affect engagement scores. */
   private static REFERENCING_KINDS = new Set([1, 6, 7, 16, 17, 1111, 9735]);
