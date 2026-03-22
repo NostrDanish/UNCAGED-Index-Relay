@@ -9,7 +9,7 @@ scalability and full-text search capabilities.
 - **OpenSearch Backend**: Scalable, distributed storage with powerful search
   capabilities
 - **Replaceable Events**: Proper handling of replaceable and parameterized
-  replaceable events
+  replaceable events, with optional version history preservation
 - **NIP-09 Support**: Event deletion with proper authorization
 - **NIP-11 Support**: Relay information document
 - **NIP-42 Support**: Client authentication
@@ -40,6 +40,8 @@ Events are stored in OpenSearch with the following enhancements:
 - **media**: Whether the event has media attachments (images, video, audio)
 - **video**: Whether all media attachments are video
 - **amount_msats**: Zap amount in millisatoshis (kind 9735)
+- **replaced**: Whether the event is a historical version superseded by a newer
+  replaceable event
 
 ### Replaceable Events (NIP-01)
 
@@ -48,8 +50,24 @@ Events are stored in OpenSearch with the following enhancements:
 - **Kinds 30000-39999**: Parameterized replaceable events (identified by pubkey,
   kind, and d-tag)
 
-When a newer replaceable event is received, the older one is automatically
-deleted.
+When a newer replaceable event is received, the older version is preserved as
+history by default rather than deleted. Historical versions are marked with a
+`replaced` flag and hidden from normal queries, so standard relay behavior is
+unchanged. Clients can retrieve the full version history of a replaceable slot
+by querying with filters that target a specific slot (e.g. a single kind +
+author, or a single kind + author + `#d` tag for addressable events). Queries
+by event ID also return historical versions.
+
+History preservation is controlled by three environment variables:
+
+| Variable | Description | Default |
+|---|---|---|
+| `HISTORY_ENABLED` | Global on/off switch for history | `true` |
+| `HISTORY_KINDS_WHITELIST` | Comma-separated list of kinds to preserve (if set, only these kinds get history) | unset (all kinds) |
+| `HISTORY_KINDS_EXCLUDED` | Comma-separated list of kinds to exclude from history (ignored if whitelist is set) | `30382,30383,30384,30385` |
+
+When history is disabled for a kind (or globally), older versions are deleted as
+usual.
 
 ### Event Deletion (NIP-09)
 
@@ -108,6 +126,11 @@ OPENSEARCH_NODE=http://localhost:9200
 OPENSEARCH_INDEX=nostr-events
 OPENSEARCH_USERNAME=admin
 OPENSEARCH_PASSWORD=admin
+
+# History (replaceable event versioning)
+HISTORY_ENABLED=true
+# HISTORY_KINDS_WHITELIST=0,3,10002
+# HISTORY_KINDS_EXCLUDED=30382,30383,30384,30385
 ```
 
 ## Running
