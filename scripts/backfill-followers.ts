@@ -160,7 +160,7 @@ async function main() {
     }
 
     // Update kind 0 events for these pubkeys using update_by_query.
-    // We can't use noteEncode because kind 0 documents use naddr encoding.
+    // This matches by pubkey field rather than doc ID for efficiency.
     const pubkeys = [...followerCounts.keys()];
     const countParams: Record<string, number> = {};
     for (const [pk, count] of followerCounts) {

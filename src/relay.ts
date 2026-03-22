@@ -350,6 +350,8 @@ export class Relay {
                 const filter: Filter = {
                   kinds: [kind],
                   authors: [pubkey],
+                  // NIP-09: delete all versions up to the deletion request timestamp.
+                  until: event.created_at,
                 };
                 // Only add d-tag filter for addressable events (with non-empty d-tag)
                 if (dTag) {

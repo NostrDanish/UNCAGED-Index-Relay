@@ -82,6 +82,43 @@ export class Config {
     return ms;
   }
 
+  /** Whether to preserve historical versions of replaceable/addressable events. Default: true. */
+  get historyEnabled(): boolean {
+    const value = this.env.get("HISTORY_ENABLED");
+    if (!value) return true;
+    return value.toLowerCase() === "true" || value === "1";
+  }
+
+  /**
+   * Comma-separated list of kind numbers to preserve history for.
+   * When set, ONLY these kinds will have history preserved (whitelist mode).
+   * Takes precedence over `historyKindsExcluded`.
+   */
+  get historyKindsWhitelist(): Set<number> | undefined {
+    const value = this.env.get("HISTORY_KINDS_WHITELIST");
+    if (!value) return undefined;
+    const kinds = value
+      .split(",")
+      .map((s) => parseInt(s.trim(), 10))
+      .filter((n) => !Number.isNaN(n));
+    return kinds.length > 0 ? new Set(kinds) : undefined;
+  }
+
+  /**
+   * Comma-separated list of kind numbers to exclude from history preservation.
+   * Ignored when `historyKindsWhitelist` is set.
+   * Default: 30382,30383,30384,30385 (NIP-85 record events).
+   */
+  get historyKindsExcluded(): Set<number> {
+    const value = this.env.get("HISTORY_KINDS_EXCLUDED");
+    if (value === undefined) return new Set([30382, 30383, 30384, 30385]);
+    const kinds = value
+      .split(",")
+      .map((s) => parseInt(s.trim(), 10))
+      .filter((n) => !Number.isNaN(n));
+    return new Set(kinds);
+  }
+
   get nostrSigner(): NostrSigner {
     const value = this.env.get("NOSTR_NSEC");
     if (!value) {

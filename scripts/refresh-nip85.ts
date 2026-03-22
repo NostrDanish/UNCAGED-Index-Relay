@@ -21,7 +21,7 @@ import process from "node:process";
 import type { NostrFilter } from "@nostrify/nostrify";
 import type { ClientOptions } from "@opensearch-project/opensearch";
 import { Client as OpenSearchClient } from "@opensearch-project/opensearch";
-import { noteEncode } from "nostr-tools/nip19";
+
 import { Config } from "../src/config.ts";
 import { Nip85 } from "../src/nip85.ts";
 import type { EventScores } from "../src/opensearch.ts";
@@ -371,9 +371,7 @@ async function computeFollowerCounts(
 }
 
 /**
- * Write computed scores back to OpenSearch documents.
- * Uses bulk update by note1-encoded doc ID, with a Painless fallback
- * for replaceable/addressable events whose doc IDs are naddr-encoded.
+ * Bulk-update engagement score fields on event documents by hex event ID.
  */
 async function updateDocumentScores(
   client: OpenSearchClient,
@@ -383,13 +381,11 @@ async function updateDocumentScores(
   if (eventScores.size === 0) return;
 
   const body: Array<Record<string, unknown>> = [];
-  const idList: string[] = [];
 
   for (const [id, s] of eventScores) {
     if (!isValidEventId(id)) continue;
-    idList.push(id);
     body.push({
-      update: { _index: indexName, _id: noteEncode(id) },
+      update: { _index: indexName, _id: id },
     });
     body.push({
       doc: {
@@ -408,50 +404,14 @@ async function updateDocumentScores(
 
   const updateResponse = await client.bulk({ body, refresh: false });
 
-  // Handle failures (replaceable/addressable events with non-note1 doc IDs).
   if (updateResponse.body.errors) {
-    const failedIds: string[] = [];
     const items: Array<Record<string, { error?: unknown }>> =
       updateResponse.body.items;
-
     for (let i = 0; i < items.length; i++) {
       const result = items[i].update;
       if (result?.error) {
-        failedIds.push(idList[i]);
+        console.warn(`Score update failed:`, JSON.stringify(result.error));
       }
-    }
-
-    if (failedIds.length > 0) {
-      const scoreParams: Record<string, FullScores> = {};
-      for (const id of failedIds) {
-        const s = eventScores.get(id);
-        if (s) scoreParams[id] = s;
-      }
-
-      await client.updateByQuery({
-        index: indexName,
-        body: {
-          query: { terms: { id: failedIds } },
-          script: {
-            source: `
-              def s = params.scores.get(ctx._source.id);
-              if (s != null) {
-                ctx._source.engagers = s.engagers;
-                ctx._source.comment_cnt = s.comment_cnt;
-                ctx._source.reaction_cnt = s.reaction_cnt;
-                ctx._source.repost_cnt = s.repost_cnt;
-                ctx._source.quote_cnt = s.quote_cnt;
-                ctx._source.zap_amount_msats = s.zap_amount_msats;
-                ctx._source.zap_cnt = s.zap_cnt;
-              }
-            `,
-            lang: "painless",
-            params: { scores: scoreParams },
-          },
-        },
-        refresh: false,
-        conflicts: "proceed",
-      });
     }
   }
 }

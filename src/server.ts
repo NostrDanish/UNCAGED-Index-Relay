@@ -38,6 +38,9 @@ const opensearchClient = new OpenSearchClient(opensearchClientOptions);
 // Initialize OpenSearch relay
 const opensearchRelay = new OpenSearchRelay(opensearchClient, {
   indexName: config.opensearchIndex,
+  historyEnabled: config.historyEnabled,
+  historyKindsWhitelist: config.historyKindsWhitelist,
+  historyKindsExcluded: config.historyKindsExcluded,
 });
 
 const relay = new Relay(opensearchRelay, {

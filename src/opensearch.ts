@@ -9,7 +9,7 @@ import type {
 import { NIP50, NKinds, NSchema as n } from "@nostrify/nostrify";
 import type { Client, ClientOptions } from "@opensearch-project/opensearch";
 import { Client as OpenSearchClient } from "@opensearch-project/opensearch";
-import { naddrEncode, noteEncode } from "nostr-tools/nip19";
+
 import type { Config } from "./config.ts";
 import { detectMedia } from "./media.ts";
 import {
@@ -29,6 +29,8 @@ interface NostrEventDocument extends NostrEvent {
   /** Indexed full-text search field, built per-kind from event content. */
   search_text: string;
   deleted?: boolean;
+  /** Whether this document is a historical version replaced by a newer event. */
+  replaced?: boolean;
   protocol?: string;
   amount_msats?: number;
   language?: string;
@@ -97,6 +99,13 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
   private client: Client;
   private indexName: string;
 
+  /** Whether to preserve historical versions of replaceable/addressable events. */
+  private historyEnabled: boolean;
+  /** When set, only these kinds preserve history (whitelist takes precedence over exclude). */
+  private historyKindsWhitelist: Set<number> | undefined;
+  /** Kinds excluded from history preservation (ignored when whitelist is set). */
+  private historyKindsExcluded: Set<number>;
+
   /** Bulk indexing queue. */
   private bulkQueue: BulkEntry[] = [];
   private bulkTimer: ReturnType<typeof setTimeout> | null = null;
@@ -135,12 +144,23 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
 
   constructor(
     client: Client,
-    opts?: { indexName?: string; bulkMaxSize?: number; bulkFlushMs?: number },
+    opts?: {
+      indexName?: string;
+      bulkMaxSize?: number;
+      bulkFlushMs?: number;
+      historyEnabled?: boolean;
+      historyKindsWhitelist?: Set<number>;
+      historyKindsExcluded?: Set<number>;
+    },
   ) {
     this.client = client;
     this.indexName = opts?.indexName || "nostr-events";
     this.bulkMaxSize = opts?.bulkMaxSize ?? 100;
     this.bulkFlushMs = opts?.bulkFlushMs ?? 200;
+    this.historyEnabled = opts?.historyEnabled ?? true;
+    this.historyKindsWhitelist = opts?.historyKindsWhitelist;
+    this.historyKindsExcluded =
+      opts?.historyKindsExcluded ?? new Set([30382, 30383, 30384, 30385]);
   }
 
   /**
@@ -159,7 +179,12 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     }
 
     const client = new OpenSearchClient(clientOptions);
-    return new OpenSearchRelay(client, { indexName: config.opensearchIndex });
+    return new OpenSearchRelay(client, {
+      indexName: config.opensearchIndex,
+      historyEnabled: config.historyEnabled,
+      historyKindsWhitelist: config.historyKindsWhitelist,
+      historyKindsExcluded: config.historyKindsExcluded,
+    });
   }
 
   /**
@@ -252,32 +277,9 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     return tagsMap;
   }
 
-  /**
-   * Generate OpenSearch document ID for an event using NIP-19 encoding
-   * - Regular events: note1... (noteEncode)
-   * - Replaceable events: naddr1... with kind:pubkey
-   * - Addressable events: naddr1... with kind:pubkey:d-tag
-   */
+  /** Generate OpenSearch document ID for an event (the hex event ID). */
   private getDocumentId(event: NostrEvent): string {
-    if (NKinds.replaceable(event.kind)) {
-      return naddrEncode({
-        kind: event.kind,
-        pubkey: event.pubkey,
-        identifier: "", // Empty identifier for non-parameterized replaceable events
-      });
-    }
-
-    if (NKinds.addressable(event.kind)) {
-      const identifier = event.tags.find(([name]) => name === "d")?.[1] || "";
-      return naddrEncode({
-        kind: event.kind,
-        pubkey: event.pubkey,
-        identifier,
-      });
-    }
-
-    // All other events -> note1 (encoded event ID)
-    return noteEncode(event.id);
+    return event.id;
   }
 
   /**
@@ -393,6 +395,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
       tags_map: tagsMap,
       search_text: analysis?.search_text ?? buildSearchText(event),
       deleted: false,
+      replaced: false,
       ...(protocol && { protocol }),
       ...(amount_msats !== undefined && { amount_msats }),
       ...(language && { language }),
@@ -488,6 +491,46 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
       filter.kinds.length === 1 &&
       filter.kinds[0] === 0
     );
+  }
+
+  /**
+   * Detect whether a filter should include historical (replaced) versions.
+   *
+   * Returns true for:
+   * 1. ID-based queries (`{ ids: [...] }`) — clients asking for specific
+   *    event IDs should always get them, even if they are replaced.
+   * 2. naddr-shaped filters — exactly 1 replaceable/addressable kind +
+   *    exactly 1 author (+ optionally 1 `#d` for addressable kinds),
+   *    representable as a single `naddr`.
+   */
+  private isHistoryFilter(filter: NostrFilter): boolean {
+    // Any filter with explicit IDs should include replaced docs — the
+    // client asked for a specific event by ID and should get it.
+    if (filter.ids && filter.ids.length > 0) {
+      return true;
+    }
+
+    if (
+      !filter.kinds ||
+      filter.kinds.length !== 1 ||
+      !filter.authors ||
+      filter.authors.length !== 1
+    ) {
+      return false;
+    }
+
+    const kind = filter.kinds[0];
+
+    if (NKinds.replaceable(kind)) {
+      return true;
+    }
+
+    if (NKinds.addressable(kind)) {
+      const dValues = (filter as Record<string, unknown>)["#d"];
+      return Array.isArray(dValues) && dValues.length === 1;
+    }
+
+    return false;
   }
 
   /**
@@ -997,13 +1040,25 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
   }
 
   /**
-   * Build OpenSearch query from Nostr filter
+   * Build OpenSearch query from Nostr filter.
+   *
+   * When `includeReplaced` is true, historical (replaced) versions of
+   * replaceable/addressable events are included in results. By default
+   * they are excluded.
    */
-  private buildQuery(filter: NostrFilter): Record<string, unknown> {
+  private buildQuery(
+    filter: NostrFilter,
+    opts?: { includeReplaced?: boolean },
+  ): Record<string, unknown> {
     const must: Record<string, unknown>[] = [
       { term: { deleted: false } }, // Always exclude deleted events
     ];
     const mustNot: Record<string, unknown>[] = [];
+
+    // Exclude replaced (historical) versions unless explicitly requested.
+    if (!opts?.includeReplaced) {
+      mustNot.push({ term: { replaced: true } });
+    }
 
     // NIP-40: Exclude expired events
     const now = Math.floor(Date.now() / 1000);
@@ -1208,7 +1263,9 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
       }
     }
 
-    const query = this.buildQuery(filter);
+    // Auto-include historical versions for naddr-shaped filters.
+    const includeReplaced = this.isHistoryFilter(filter);
+    const query = this.buildQuery(filter, { includeReplaced });
     const distinctAuthor = this.hasDistinctAuthor(filter);
 
     // Sort by created_at (newest first)
@@ -1286,6 +1343,17 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
 
   /**
    * Flush the bulk queue to OpenSearch.
+   *
+   * All events are indexed uniformly under their hex event ID as the doc ID.
+   * For replaceable/addressable events, after the bulk index, an
+   * `updateByQuery` marks older versions of the same slot as
+   * `replaced: true` and strips their score fields.
+   *
+   * Historical documents persist indefinitely unless explicitly deleted
+   * (kind 5 or kind 62). For frequently-updated kinds (e.g. kind 0
+   * profiles, kind 3 contact lists), this means storage grows with each
+   * replacement. A TTL or max-versions-per-slot pruning strategy may be
+   * needed in the future for high-churn relays.
    */
   async flush(): Promise<void> {
     if (this.bulkTimer) {
@@ -1297,76 +1365,40 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
 
     const entries = this.bulkQueue.splice(0);
     opensearchBulkQueueGauge.set(this.bulkQueue.length);
+
+    // --- Phase 1: Build bulk body. All events are plain index operations.
     const body: Array<Record<string, unknown>> = [];
 
-    const replaceable_upsert_script = `
-      if (ctx._source.deleted == true) {
-        ctx.op = 'none';
-      } else if (params.event.created_at > ctx._source.created_at ||
-                 (params.event.created_at == ctx._source.created_at &&
-                  params.event.id.compareTo(ctx._source.id) < 0)) {
-        def old_followers = ctx._source.containsKey('followers') ? ctx._source.followers : 0;
-        def old_engagers = ctx._source.containsKey('engagers') ? ctx._source.engagers : 0;
-        def old_comment_cnt = ctx._source.containsKey('comment_cnt') ? ctx._source.comment_cnt : 0;
-        def old_reaction_cnt = ctx._source.containsKey('reaction_cnt') ? ctx._source.reaction_cnt : 0;
-        def old_repost_cnt = ctx._source.containsKey('repost_cnt') ? ctx._source.repost_cnt : 0;
-        def old_quote_cnt = ctx._source.containsKey('quote_cnt') ? ctx._source.quote_cnt : 0;
-        def old_zap_amount_msats = ctx._source.zap_amount_msats;
-        def old_zap_cnt = ctx._source.containsKey('zap_cnt') ? ctx._source.zap_cnt : 0;
-        ctx._source = params.event;
-        ctx._source.followers = old_followers;
-        ctx._source.engagers = old_engagers;
-        ctx._source.comment_cnt = old_comment_cnt;
-        ctx._source.reaction_cnt = old_reaction_cnt;
-        ctx._source.repost_cnt = old_repost_cnt;
-        ctx._source.quote_cnt = old_quote_cnt;
-        ctx._source.zap_amount_msats = old_zap_amount_msats;
-        ctx._source.zap_cnt = old_zap_cnt;
-      } else {
-        ctx.op = 'none';
-      }
-    `;
-
     for (const entry of entries) {
-      if (
-        NKinds.replaceable(entry.event.kind) ||
-        NKinds.addressable(entry.event.kind)
-      ) {
-        // Scripted upsert for replaceable/addressable events
-        body.push({
-          update: { _index: this.indexName, _id: entry.docId },
-        });
-        body.push({
-          script: {
-            source: replaceable_upsert_script,
-            lang: "painless",
-            params: { event: entry.doc },
-          },
-          upsert: entry.doc,
-        });
-      } else {
-        // Regular index
-        body.push({
-          index: { _index: this.indexName, _id: entry.docId },
-        });
-        body.push(entry.doc as unknown as Record<string, unknown>);
-      }
+      body.push({
+        index: { _index: this.indexName, _id: entry.docId },
+      });
+      body.push(entry.doc as unknown as Record<string, unknown>);
     }
+
+    // If the batch contains replaceable/addressable events, Phase 2 needs
+    // to search the index to find the slot winner. Use `refresh: "wait_for"`
+    // so the just-indexed documents are visible to the search. Without this,
+    // the default ~1s refresh interval can cause Phase 2 to miss the new
+    // events, leaving stale duplicates with `replaced: false`.
+    const hasReplaceable = entries.some(
+      (e) =>
+        NKinds.replaceable(e.event.kind) || NKinds.addressable(e.event.kind),
+    );
+    const refreshPolicy = hasReplaceable ? ("wait_for" as const) : false;
 
     const flushEnd = opensearchFlushDurationHistogram.startTimer();
     try {
-      const response = await this.client.bulk({ body, refresh: false });
+      const response = await this.client.bulk({ body, refresh: refreshPolicy });
       flushEnd();
 
       if (response.body.errors) {
         // Resolve/reject individual entries based on per-item results
         const items: Array<Record<string, { error?: unknown }>> =
           response.body.items;
-        for (let i = 0; i < entries.length; i++) {
+        for (let i = 0; i < items.length; i++) {
           const item = items[i];
-          const result =
-            (item.index as { error?: unknown } | undefined) ??
-            (item.update as { error?: unknown } | undefined);
+          const result = item.index as { error?: unknown } | undefined;
           if (result?.error) {
             entries[i].reject(
               new Error(`Bulk index failed: ${JSON.stringify(result.error)}`),
@@ -1395,6 +1427,163 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
         entry.reject(err);
       }
     }
+
+    // --- Phase 2: For replaceable/addressable events, mark older versions
+    // of the same slot as `replaced: true` via updateByQuery.
+    //
+    // Each unique slot requires 1 search + 1 updateByQuery round-trip.
+    // For normal operation this is fine, but bulk imports touching many
+    // replaceable slots (e.g. a kind 3 contact-list storm) may benefit
+    // from batching via msearch in the future.
+    //
+    // Between Phase 1 and Phase 2 completion, queries for a replaceable
+    // slot may briefly return both old and new versions with
+    // `replaced: false`. This window is short and Nostr clients are
+    // expected to handle duplicate events.
+    //
+    // Collect unique slots from the batch.
+    const slots = new Map<
+      string,
+      {
+        kind: number;
+        pubkey: string;
+        dTag: string;
+        eventId: string;
+        createdAt: number;
+      }
+    >();
+
+    for (const entry of entries) {
+      if (
+        !NKinds.replaceable(entry.event.kind) &&
+        !NKinds.addressable(entry.event.kind)
+      ) {
+        continue;
+      }
+
+      const dTag = NKinds.addressable(entry.event.kind)
+        ? entry.event.tags.find(([name]) => name === "d")?.[1] || ""
+        : "";
+      const slotKey = `${entry.event.kind}:${entry.event.pubkey}:${dTag}`;
+
+      const existing = slots.get(slotKey);
+      // If multiple events for the same slot in one batch, keep the newest
+      // (or lowest ID at same timestamp) — that's the one that should remain
+      // as the current version.
+      if (
+        !existing ||
+        entry.event.created_at > existing.createdAt ||
+        (entry.event.created_at === existing.createdAt &&
+          entry.event.id < existing.eventId)
+      ) {
+        slots.set(slotKey, {
+          kind: entry.event.kind,
+          pubkey: entry.event.pubkey,
+          dTag,
+          eventId: entry.event.id,
+          createdAt: entry.event.created_at,
+        });
+      }
+    }
+
+    // For each slot, find the actual current winner (newest non-deleted,
+    // non-replaced event) and mark all others as replaced.
+    for (const [, slot] of slots) {
+      const slotMust: Record<string, unknown>[] = [
+        { term: { kind: slot.kind } },
+        { term: { pubkey: slot.pubkey } },
+        { term: { deleted: false } },
+        { term: { replaced: false } },
+      ];
+
+      if (NKinds.addressable(slot.kind)) {
+        slotMust.push({ term: { "tags_map.d": slot.dTag } });
+      }
+
+      try {
+        // Find the newest event in the slot to determine the true winner.
+        const searchResponse = await this.client.search({
+          index: this.indexName,
+          body: {
+            query: { bool: { must: slotMust } },
+            sort: [{ created_at: { order: "desc" } }, { id: { order: "asc" } }],
+            size: 1,
+            _source: ["id"],
+          },
+        });
+
+        const hits = searchResponse.body.hits.hits as Array<{
+          _source?: { id: string };
+        }>;
+        if (!hits[0]?._source?.id) continue;
+
+        const winnerId = hits[0]._source.id;
+
+        // Remove old versions from the slot. For high-churn kinds in
+        // HISTORY_EXCLUDED_KINDS, delete them outright to avoid storage
+        // bloat. For all other kinds, mark them as `replaced: true` to
+        // preserve queryable history.
+        const loserQuery = {
+          bool: {
+            must: slotMust,
+            must_not: [{ term: { id: winnerId } }],
+          },
+        };
+
+        if (!this.shouldPreserveHistory(slot.kind)) {
+          await this.client.deleteByQuery({
+            index: this.indexName,
+            body: { query: loserQuery },
+            refresh: false,
+            conflicts: "proceed",
+          });
+        } else {
+          await this.client.updateByQuery({
+            index: this.indexName,
+            body: {
+              query: loserQuery,
+              script: {
+                source: `
+                  ctx._source.replaced = true;
+                  ctx._source.followers = 0;
+                  ctx._source.engagers = 0;
+                  ctx._source.comment_cnt = 0;
+                  ctx._source.reaction_cnt = 0;
+                  ctx._source.repost_cnt = 0;
+                  ctx._source.quote_cnt = 0;
+                  ctx._source.zap_amount_msats = 0;
+                  ctx._source.zap_cnt = 0;
+                `,
+                lang: "painless",
+              },
+            },
+            refresh: false,
+            conflicts: "proceed",
+          });
+        }
+      } catch (error) {
+        // Non-fatal — the events are indexed, just not marked as replaced yet.
+        // The next flush or a query with `replaced: false` filter will still
+        // return the correct current version (newest by created_at).
+        console.warn("Failed to mark old versions as replaced:", error);
+      }
+    }
+  }
+
+  /**
+   * Determine whether a given kind should preserve historical versions
+   * when replaced. The logic is:
+   *
+   * 1. If history is globally disabled → false
+   * 2. If a whitelist is set → true only if the kind is in the whitelist
+   * 3. Otherwise → true unless the kind is in the exclude list
+   */
+  private shouldPreserveHistory(kind: number): boolean {
+    if (!this.historyEnabled) return false;
+    if (this.historyKindsWhitelist) {
+      return this.historyKindsWhitelist.has(kind);
+    }
+    return !this.historyKindsExcluded.has(kind);
   }
 
   /** Kinds whose `e`-tag references affect engagement scores. */
@@ -1619,7 +1808,9 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
   }
 
   /**
-   * Remove events matching the given filters (soft delete using deleted field)
+   * Remove events matching the given filters (soft delete using deleted field).
+   * Also soft-deletes any `replaced: true` historical versions matching the
+   * same filter criteria via `updateByQuery`.
    */
   async remove(
     filters: NostrFilter[],
@@ -1633,13 +1824,10 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
       }
 
       try {
-        // Query events matching the filter
         const events = await this.queryFilter(filter, opts?.signal);
 
-        // Get document IDs for matched events
         for (const event of events) {
-          const docId = this.getDocumentId(event);
-          docIdsToDelete.push(docId);
+          docIdsToDelete.push(this.getDocumentId(event));
         }
       } catch (error) {
         console.error("Failed to query events for deletion:", error);
@@ -1688,6 +1876,33 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
       } catch (error) {
         console.error("Bulk update failed:", error);
         throw error;
+      }
+    }
+
+    // Also soft-delete historical (replaced) versions matching these filters.
+    for (const filter of filters) {
+      if (opts?.signal?.aborted) break;
+      try {
+        const historyQuery = this.buildQuery(filter, { includeReplaced: true });
+        const wrappedQuery = {
+          bool: {
+            must: [historyQuery, { term: { replaced: true } }],
+          },
+        };
+        await this.client.updateByQuery({
+          index: this.indexName,
+          body: {
+            query: wrappedQuery,
+            script: {
+              source: "ctx._source.deleted = true",
+              lang: "painless",
+            },
+          },
+          refresh: true,
+          conflicts: "proceed",
+        });
+      } catch (error) {
+        console.error("Failed to delete historical versions:", error);
       }
     }
   }
@@ -1750,6 +1965,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     },
     sig: { type: "keyword" },
     deleted: { type: "boolean" },
+    replaced: { type: "boolean" },
     protocol: { type: "keyword" },
     amount_msats: { type: "long" },
     language: { type: "keyword" },
@@ -1907,13 +2123,20 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     const searches: Promise<DirtyHit[]>[] = [];
 
     // (a) Events referenced by engagement events (by event ID).
+    // Exclude replaced (historical) versions — scores only apply to the
+    // current version of each event.
     if (pending.ids.size > 0) {
       searches.push(
         this.client
           .search({
             index: this.indexName,
             body: {
-              query: { terms: { id: [...pending.ids] } },
+              query: {
+                bool: {
+                  must: [{ terms: { id: [...pending.ids] } }],
+                  must_not: [{ term: { replaced: true } }],
+                },
+              },
               _source: ["id", "kind", "pubkey"],
               size: pending.ids.size,
             },
@@ -1938,6 +2161,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
                     { term: { kind: 0 } },
                     { terms: { pubkey: [...pending.pubkeys] } },
                   ],
+                  must_not: [{ term: { replaced: true } }],
                 },
               },
               _source: ["id", "kind", "pubkey"],
@@ -2224,13 +2448,14 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     }
 
     // Phase 4: Bulk update the dirty events with computed scores.
+    // Phase 4: Bulk update the dirty events with computed scores.
     const body: Array<Record<string, unknown>> = [];
 
     for (const [id, s] of scores) {
       body.push({
         update: {
           _index: this.indexName,
-          _id: noteEncode(id),
+          _id: id,
         },
       });
       body.push({
@@ -2253,10 +2478,8 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
         refresh: false,
       });
 
-      // Some updates may fail if the doc ID doesn't match (e.g. replaceable
-      // events use naddr encoding). Fall back to update_by_query for those.
+      // Some bulk updates may still fail for unexpected reasons.
       if (updateResponse.body.errors) {
-        const failedIds: string[] = [];
         const items: Array<
           Record<string, { error?: unknown; status?: number }>
         > = updateResponse.body.items;
@@ -2264,56 +2487,11 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
         for (let i = 0; i < items.length; i++) {
           const result = items[i].update;
           if (result?.error) {
-            failedIds.push(allDirtyIds[i]);
+            console.warn(
+              `Score update failed for doc:`,
+              JSON.stringify(result.error),
+            );
           }
-        }
-
-        // Batch-update failed IDs using a single Painless script that
-        // looks up each event's scores from a params map.
-        if (failedIds.length > 0) {
-          const scoreParams: Record<
-            string,
-            {
-              followers: number;
-              engagers: number;
-              comment_cnt: number;
-              reaction_cnt: number;
-              repost_cnt: number;
-              quote_cnt: number;
-              zap_amount_msats: number;
-              zap_cnt: number;
-            }
-          > = {};
-          for (const id of failedIds) {
-            const s = scores.get(id);
-            if (s) scoreParams[id] = s;
-          }
-
-          await this.client.updateByQuery({
-            index: this.indexName,
-            body: {
-              query: { terms: { id: failedIds } },
-              script: {
-                source: `
-                  def s = params.scores.get(ctx._source.id);
-                  if (s != null) {
-                    ctx._source.followers = s.followers;
-                    ctx._source.engagers = s.engagers;
-                    ctx._source.comment_cnt = s.comment_cnt;
-                    ctx._source.reaction_cnt = s.reaction_cnt;
-                    ctx._source.repost_cnt = s.repost_cnt;
-                    ctx._source.quote_cnt = s.quote_cnt;
-                    ctx._source.zap_amount_msats = s.zap_amount_msats;
-                    ctx._source.zap_cnt = s.zap_cnt;
-                  }
-                `,
-                lang: "painless",
-                params: { scores: scoreParams },
-              },
-            },
-            refresh: false,
-            conflicts: "proceed",
-          });
         }
       }
     }

@@ -138,4 +138,87 @@ describe("Config", () => {
       assert.deepEqual(config.preferredLanguages, ["en", "pt", "es"]);
     });
   });
+
+  describe("historyEnabled", () => {
+    it("should default to true", () => {
+      const config = new Config(new Map());
+      assert.equal(config.historyEnabled, true);
+    });
+
+    it("should be false when set to 'false'", () => {
+      const config = new Config(new Map([["HISTORY_ENABLED", "false"]]));
+      assert.equal(config.historyEnabled, false);
+    });
+
+    it("should be true when set to 'true'", () => {
+      const config = new Config(new Map([["HISTORY_ENABLED", "true"]]));
+      assert.equal(config.historyEnabled, true);
+    });
+
+    it("should accept '1' as true and '0' as false", () => {
+      assert.equal(
+        new Config(new Map([["HISTORY_ENABLED", "1"]])).historyEnabled,
+        true,
+      );
+      assert.equal(
+        new Config(new Map([["HISTORY_ENABLED", "0"]])).historyEnabled,
+        false,
+      );
+    });
+  });
+
+  describe("historyKindsWhitelist", () => {
+    it("should return undefined when not set", () => {
+      const config = new Config(new Map());
+      assert.equal(config.historyKindsWhitelist, undefined);
+    });
+
+    it("should parse comma-separated kind numbers", () => {
+      const config = new Config(
+        new Map([["HISTORY_KINDS_WHITELIST", "0,3,30023"]]),
+      );
+      assert.deepEqual(config.historyKindsWhitelist, new Set([0, 3, 30023]));
+    });
+
+    it("should handle whitespace", () => {
+      const config = new Config(
+        new Map([["HISTORY_KINDS_WHITELIST", " 0 , 3 , 30023 "]]),
+      );
+      assert.deepEqual(config.historyKindsWhitelist, new Set([0, 3, 30023]));
+    });
+
+    it("should filter out non-numbers", () => {
+      const config = new Config(
+        new Map([["HISTORY_KINDS_WHITELIST", "0,abc,3"]]),
+      );
+      assert.deepEqual(config.historyKindsWhitelist, new Set([0, 3]));
+    });
+
+    it("should return undefined for empty string", () => {
+      const config = new Config(new Map([["HISTORY_KINDS_WHITELIST", ""]]));
+      assert.equal(config.historyKindsWhitelist, undefined);
+    });
+  });
+
+  describe("historyKindsExcluded", () => {
+    it("should default to NIP-85 kinds (30382-30385)", () => {
+      const config = new Config(new Map());
+      assert.deepEqual(
+        config.historyKindsExcluded,
+        new Set([30382, 30383, 30384, 30385]),
+      );
+    });
+
+    it("should parse comma-separated kind numbers", () => {
+      const config = new Config(
+        new Map([["HISTORY_KINDS_EXCLUDED", "3,10002"]]),
+      );
+      assert.deepEqual(config.historyKindsExcluded, new Set([3, 10002]));
+    });
+
+    it("should return empty set for empty string", () => {
+      const config = new Config(new Map([["HISTORY_KINDS_EXCLUDED", ""]]));
+      assert.deepEqual(config.historyKindsExcluded, new Set());
+    });
+  });
 });
