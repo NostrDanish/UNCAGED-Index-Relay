@@ -2,7 +2,7 @@ import { strict as assert } from "node:assert";
 import { describe, it } from "node:test";
 import type { Client } from "@opensearch-project/opensearch";
 import type { NostrEvent } from "nostr-tools";
-import { finalizeEvent, generateSecretKey } from "nostr-tools";
+import { finalizeEvent, generateSecretKey, getPublicKey } from "nostr-tools";
 import { Config } from "./config.ts";
 import { OpenSearchRelay } from "./opensearch.ts";
 
@@ -1805,6 +1805,75 @@ describe("OpenSearchRelay", () => {
         documents.size,
         3,
         "Non-excluded kind 30382: both versions should exist",
+      );
+    });
+
+    it("should mark kind 0 pubkey as dirty for score recomputation on replacement", async () => {
+      const { client, documents } = createHistoryMockClient();
+      const relay = new OpenSearchRelay(client as unknown as Client, {
+        indexName: "test-index",
+        bulkMaxSize: 1,
+      });
+
+      const sk = generateSecretKey();
+      const pubkey = getPublicKey(sk);
+
+      const v1 = finalizeEvent(
+        { kind: 0, created_at: 1000, content: "{}", tags: [] },
+        sk,
+      );
+      await relay.event(v1);
+
+      const v2 = finalizeEvent(
+        { kind: 0, created_at: 2000, content: "{}", tags: [] },
+        sk,
+      );
+      await relay.event(v2);
+
+      // biome-ignore lint/suspicious/noExplicitAny: access private field for testing
+      const dirtyPubkeys = (relay as any).pendingDirtyPubkeys as Set<string>;
+      assert.ok(
+        dirtyPubkeys.has(pubkey),
+        "Pubkey should be marked dirty after kind 0 replacement",
+      );
+    });
+
+    it("should mark non-kind-0 winner as dirty for score recomputation on replacement", async () => {
+      const { client, documents } = createHistoryMockClient();
+      const relay = new OpenSearchRelay(client as unknown as Client, {
+        indexName: "test-index",
+        bulkMaxSize: 1,
+      });
+
+      const sk = generateSecretKey();
+
+      const v1 = finalizeEvent(
+        {
+          kind: 30023,
+          created_at: 1000,
+          content: "article-v1",
+          tags: [["d", "slug"]],
+        },
+        sk,
+      );
+      await relay.event(v1);
+
+      const v2 = finalizeEvent(
+        {
+          kind: 30023,
+          created_at: 2000,
+          content: "article-v2",
+          tags: [["d", "slug"]],
+        },
+        sk,
+      );
+      await relay.event(v2);
+
+      // biome-ignore lint/suspicious/noExplicitAny: access private field for testing
+      const dirtyIds = (relay as any).pendingDirtyIds as Set<string>;
+      assert.ok(
+        dirtyIds.has(v2.id),
+        "Winner event ID should be marked dirty after replacement",
       );
     });
   });
