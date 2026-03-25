@@ -7,9 +7,19 @@ import { Config } from "./config.ts";
 import { OpenSearchRelay } from "./opensearch.ts";
 
 describe("OpenSearchRelay", () => {
+  /** Minimum env required to construct a Config (RELAY_URL and NOSTR_NSEC are mandatory). */
+  const baseEnv = (...overrides: [string, string][]): Map<string, string> =>
+    new Map<string, string>([
+      ["RELAY_URL", "wss://relay.example.com/"],
+      [
+        "NOSTR_NSEC",
+        "nsec1l2xejwnzu9sjl9ve3eryktge5u05esdez9ll3wt9gly9n7yraq4sph4kgh",
+      ],
+      ...overrides,
+    ]);
+
   it("should create relay with default config", () => {
-    const mockEnv = new Map();
-    const config = new Config(mockEnv);
+    const config = new Config(baseEnv());
 
     const relay = OpenSearchRelay.fromConfig(config);
 
@@ -17,8 +27,9 @@ describe("OpenSearchRelay", () => {
   });
 
   it("should create relay with custom node", () => {
-    const mockEnv = new Map([["OPENSEARCH_NODE", "http://example.com:9200"]]);
-    const config = new Config(mockEnv);
+    const config = new Config(
+      baseEnv(["OPENSEARCH_NODE", "http://example.com:9200"]),
+    );
 
     const relay = OpenSearchRelay.fromConfig(config);
 
@@ -26,11 +37,12 @@ describe("OpenSearchRelay", () => {
   });
 
   it("should create relay with auth when credentials provided", () => {
-    const mockEnv = new Map([
-      ["OPENSEARCH_USERNAME", "admin"],
-      ["OPENSEARCH_PASSWORD", "password123"],
-    ]);
-    const config = new Config(mockEnv);
+    const config = new Config(
+      baseEnv(
+        ["OPENSEARCH_USERNAME", "admin"],
+        ["OPENSEARCH_PASSWORD", "password123"],
+      ),
+    );
 
     const relay = OpenSearchRelay.fromConfig(config);
 

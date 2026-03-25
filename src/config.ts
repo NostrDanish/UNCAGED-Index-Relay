@@ -3,150 +3,159 @@ import { NSecSigner } from "@nostrify/nostrify";
 import { nip19 } from "nostr-tools";
 
 export class Config {
-  private env: { get(key: string): string | undefined };
-
-  constructor(env: { get(key: string): string | undefined }) {
-    this.env = env;
-  }
-
-  get port(): number {
-    const value = this.env.get("PORT");
-    if (!value) {
-      return 13131; // Default port
-    }
-    const port = parseInt(value, 10);
-    if (Number.isNaN(port) || port < 1 || port > 65535) {
-      throw new Error("PORT must be a valid port number (1-65535).");
-    }
-    return port;
-  }
-
-  get relayUrl(): string {
-    const value = this.env.get("RELAY_URL");
-    if (!value) {
-      throw new Error("RELAY_URL is required.");
-    }
-    return value;
-  }
-
-  get publicUrl(): string {
-    const value = this.env.get("PUBLIC_URL");
-    if (!value) {
-      return this.relayUrl.replace(/^ws/, "http"); // Default to relay URL with http scheme
-    }
-    return value;
-  }
-
-  get relayPubkey(): string | undefined {
-    return this.env.get("RELAY_PUBKEY");
-  }
-
-  get relayContact(): string | undefined {
-    return this.env.get("RELAY_CONTACT");
-  }
-
-  get opensearchNode(): string {
-    return this.env.get("OPENSEARCH_NODE") || "http://localhost:9200";
-  }
-
-  get opensearchIndex(): string {
-    return this.env.get("OPENSEARCH_INDEX") || "nostr-events";
-  }
-
-  get opensearchUsername(): string | undefined {
-    return this.env.get("OPENSEARCH_USERNAME");
-  }
-
-  get opensearchPassword(): string | undefined {
-    return this.env.get("OPENSEARCH_PASSWORD");
-  }
-
+  readonly port: number;
+  readonly relayUrl: string;
+  readonly publicUrl: string;
+  readonly relayPubkey: string | undefined;
+  readonly relayContact: string | undefined;
+  readonly opensearchNode: string;
+  readonly opensearchIndex: string;
+  readonly opensearchUsername: string | undefined;
+  readonly opensearchPassword: string | undefined;
   /** Comma-separated list of ISO 639-1 language codes for per-language trends. */
-  get preferredLanguages(): string[] {
-    const value = this.env.get("DITTO_LANGUAGES");
-    if (!value) return [];
-    return value
-      .split(",")
-      .map((s) => s.trim())
-      .filter((s) => /^[a-z]{2}$/.test(s));
-  }
-
+  readonly preferredLanguages: string[];
   /** Interval in ms between trend computations. 0 to disable. Default: 15 minutes. */
-  get trendsIntervalMs(): number {
-    const value = this.env.get("TRENDS_INTERVAL_MS");
-    if (!value) return 900_000; // 15 minutes
-    const ms = parseInt(value, 10);
-    if (Number.isNaN(ms) || ms < 0) {
-      throw new Error("TRENDS_INTERVAL_MS must be a non-negative integer.");
-    }
-    return ms;
-  }
-
+  readonly trendsIntervalMs: number;
   /** Whether to preserve historical versions of replaceable/addressable events. Default: true. */
-  get historyEnabled(): boolean {
-    const value = this.env.get("HISTORY_ENABLED");
-    if (!value) return true;
-    return value.toLowerCase() === "true" || value === "1";
-  }
-
+  readonly historyEnabled: boolean;
   /**
-   * Comma-separated list of kind numbers to preserve history for.
+   * Set of kind numbers to preserve history for.
    * When set, ONLY these kinds will have history preserved (whitelist mode).
    * Takes precedence over `historyKindsExcluded`.
    */
-  get historyKindsWhitelist(): Set<number> | undefined {
-    const value = this.env.get("HISTORY_KINDS_WHITELIST");
-    if (!value) return undefined;
-    const kinds = value
-      .split(",")
-      .map((s) => parseInt(s.trim(), 10))
-      .filter((n) => !Number.isNaN(n));
-    return kinds.length > 0 ? new Set(kinds) : undefined;
-  }
-
+  readonly historyKindsWhitelist: Set<number> | undefined;
   /**
-   * Comma-separated list of kind numbers to exclude from history preservation.
+   * Set of kind numbers to exclude from history preservation.
    * Ignored when `historyKindsWhitelist` is set.
    * Default: 30382,30383,30384,30385 (NIP-85 record events).
    */
-  get historyKindsExcluded(): Set<number> {
-    const value = this.env.get("HISTORY_KINDS_EXCLUDED");
-    if (value === undefined) return new Set([30382, 30383, 30384, 30385]);
-    const kinds = value
-      .split(",")
-      .map((s) => parseInt(s.trim(), 10))
-      .filter((n) => !Number.isNaN(n));
-    return new Set(kinds);
-  }
-
+  readonly historyKindsExcluded: Set<number>;
   /**
-   * Comma-separated list of kind numbers that require AUTH for REQ/COUNT queries.
+   * Set of kind numbers that require AUTH for REQ/COUNT queries.
    * Filters including these kinds must have `authors` or `#p` arrays where ALL
    * entries are authenticated pubkeys on the connection.
    * These kinds are also excluded from queries that don't explicitly include them.
    * Default: 4,1059 (NIP-04 DMs and NIP-59 Gift Wraps).
    */
-  get authKinds(): Set<number> {
-    const value = this.env.get("AUTH_KINDS");
-    if (value === undefined) return new Set([4, 1059]);
-    const kinds = value
-      .split(",")
-      .map((s) => parseInt(s.trim(), 10))
-      .filter((n) => !Number.isNaN(n));
-    return new Set(kinds);
-  }
+  readonly authKinds: Set<number>;
+  readonly nostrSigner: NostrSigner;
 
-  get nostrSigner(): NostrSigner {
-    const value = this.env.get("NOSTR_NSEC");
-    if (!value) {
+  constructor(env: { get(key: string): string | undefined }) {
+    // port
+    const portValue = env.get("PORT");
+    if (!portValue) {
+      this.port = 13131;
+    } else {
+      const port = parseInt(portValue, 10);
+      if (Number.isNaN(port) || port < 1 || port > 65535) {
+        throw new Error("PORT must be a valid port number (1-65535).");
+      }
+      this.port = port;
+    }
+
+    // relayUrl
+    const relayUrlValue = env.get("RELAY_URL");
+    if (!relayUrlValue) {
+      throw new Error("RELAY_URL is required.");
+    }
+    this.relayUrl = relayUrlValue;
+
+    // publicUrl
+    const publicUrlValue = env.get("PUBLIC_URL");
+    this.publicUrl = publicUrlValue ?? this.relayUrl.replace(/^ws/, "http");
+
+    // relayPubkey
+    this.relayPubkey = env.get("RELAY_PUBKEY");
+
+    // relayContact
+    this.relayContact = env.get("RELAY_CONTACT");
+
+    // opensearch
+    this.opensearchNode = env.get("OPENSEARCH_NODE") || "http://localhost:9200";
+    this.opensearchIndex = env.get("OPENSEARCH_INDEX") || "nostr-events";
+    this.opensearchUsername = env.get("OPENSEARCH_USERNAME");
+    this.opensearchPassword = env.get("OPENSEARCH_PASSWORD");
+
+    // preferredLanguages
+    const langValue = env.get("DITTO_LANGUAGES");
+    if (!langValue) {
+      this.preferredLanguages = [];
+    } else {
+      this.preferredLanguages = langValue
+        .split(",")
+        .map((s) => s.trim())
+        .filter((s) => /^[a-z]{2}$/.test(s));
+    }
+
+    // trendsIntervalMs
+    const trendsValue = env.get("TRENDS_INTERVAL_MS");
+    if (!trendsValue) {
+      this.trendsIntervalMs = 900_000;
+    } else {
+      const ms = parseInt(trendsValue, 10);
+      if (Number.isNaN(ms) || ms < 0) {
+        throw new Error("TRENDS_INTERVAL_MS must be a non-negative integer.");
+      }
+      this.trendsIntervalMs = ms;
+    }
+
+    // historyEnabled
+    const historyValue = env.get("HISTORY_ENABLED");
+    if (!historyValue) {
+      this.historyEnabled = true;
+    } else {
+      this.historyEnabled =
+        historyValue.toLowerCase() === "true" || historyValue === "1";
+    }
+
+    // historyKindsWhitelist
+    const whitelistValue = env.get("HISTORY_KINDS_WHITELIST");
+    if (!whitelistValue) {
+      this.historyKindsWhitelist = undefined;
+    } else {
+      const kinds = whitelistValue
+        .split(",")
+        .map((s) => parseInt(s.trim(), 10))
+        .filter((n) => !Number.isNaN(n));
+      this.historyKindsWhitelist =
+        kinds.length > 0 ? new Set(kinds) : undefined;
+    }
+
+    // historyKindsExcluded
+    const excludedValue = env.get("HISTORY_KINDS_EXCLUDED");
+    if (excludedValue === undefined) {
+      this.historyKindsExcluded = new Set([30382, 30383, 30384, 30385]);
+    } else {
+      const kinds = excludedValue
+        .split(",")
+        .map((s) => parseInt(s.trim(), 10))
+        .filter((n) => !Number.isNaN(n));
+      this.historyKindsExcluded = new Set(kinds);
+    }
+
+    // authKinds
+    const authValue = env.get("AUTH_KINDS");
+    if (authValue === undefined) {
+      this.authKinds = new Set([4, 1059]);
+    } else {
+      const kinds = authValue
+        .split(",")
+        .map((s) => parseInt(s.trim(), 10))
+        .filter((n) => !Number.isNaN(n));
+      this.authKinds = new Set(kinds);
+    }
+
+    // nostrSigner
+    const nsecValue = env.get("NOSTR_NSEC");
+    if (!nsecValue) {
       throw new Error("NOSTR_NSEC is required.");
     }
-    const decoded = nip19.decode(value);
+    const decoded = nip19.decode(nsecValue);
     if (decoded.type !== "nsec") {
       throw new Error(
         "NOSTR_NSEC must be a valid nsec (bech32-encoded secret key).",
       );
     }
-    return new NSecSigner(decoded.data);
+    this.nostrSigner = new NSecSigner(decoded.data);
   }
 }
