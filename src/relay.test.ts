@@ -2469,6 +2469,237 @@ describe("Relay with authKinds", () => {
     });
   });
 
+  describe("REQ by ID for auth kinds", () => {
+    it("should withhold auth-kind event and send AUTH challenge when unauthenticated", async () => {
+      const sk = generateSecretKey();
+      const dmEvent = finalizeEvent(
+        {
+          kind: 4,
+          created_at: Math.floor(Date.now() / 1000),
+          tags: [["p", "recipient".padStart(64, "0")]],
+          content: "secret dm",
+        },
+        sk,
+      );
+
+      mockStorage.query = async () => [dmEvent];
+      await relay.handleReq(mockWs, "sub1", [{ ids: [dmEvent.id] }]);
+
+      // Event should be withheld, AUTH challenge sent, then CLOSED (not EOSE)
+      const eventMsgs = sentMessages.filter((m) => m[0] === "EVENT");
+      assert.equal(eventMsgs.length, 0);
+
+      const authMsg = sentMessages.find((m) => m[0] === "AUTH");
+      assert.ok(authMsg, "AUTH challenge should be sent");
+
+      const closed = sentMessages.find((m) => m[0] === "CLOSED");
+      assert.ok(closed, "CLOSED should be sent");
+      assert.equal(closed[1], "sub1");
+      assert.ok((closed[2] as string).startsWith("auth-required:"));
+
+      // No EOSE — subscription was closed
+      const eose = sentMessages.find((m) => m[0] === "EOSE");
+      assert.equal(eose, undefined);
+    });
+
+    it("should return auth-kind event when authenticated as author", async () => {
+      const sk = generateSecretKey();
+      const pubkey = finalizeEvent(
+        { kind: 1, created_at: 0, tags: [], content: "" },
+        sk,
+      ).pubkey;
+
+      const dmEvent = finalizeEvent(
+        {
+          kind: 4,
+          created_at: Math.floor(Date.now() / 1000),
+          tags: [["p", "recipient".padStart(64, "0")]],
+          content: "secret dm",
+        },
+        sk,
+      );
+
+      mockWs.data.authedPubkeys.add(pubkey);
+      mockStorage.query = async () => [dmEvent];
+      await relay.handleReq(mockWs, "sub1", [{ ids: [dmEvent.id] }]);
+
+      const eventMsgs = sentMessages.filter((m) => m[0] === "EVENT");
+      assert.equal(eventMsgs.length, 1);
+      assert.equal((eventMsgs[0][2] as NostrEvent).id, dmEvent.id);
+    });
+
+    it("should return auth-kind event when authenticated as p-tag recipient", async () => {
+      const authorSk = generateSecretKey();
+      const recipientSk = generateSecretKey();
+      const recipientPk = finalizeEvent(
+        { kind: 1, created_at: 0, tags: [], content: "" },
+        recipientSk,
+      ).pubkey;
+
+      const dmEvent = finalizeEvent(
+        {
+          kind: 4,
+          created_at: Math.floor(Date.now() / 1000),
+          tags: [["p", recipientPk]],
+          content: "dm to recipient",
+        },
+        authorSk,
+      );
+
+      mockWs.data.authedPubkeys.add(recipientPk);
+      mockStorage.query = async () => [dmEvent];
+      await relay.handleReq(mockWs, "sub1", [{ ids: [dmEvent.id] }]);
+
+      const eventMsgs = sentMessages.filter((m) => m[0] === "EVENT");
+      assert.equal(eventMsgs.length, 1);
+      assert.equal((eventMsgs[0][2] as NostrEvent).id, dmEvent.id);
+    });
+
+    it("should withhold auth-kind event when authenticated as unrelated pubkey", async () => {
+      const authorSk = generateSecretKey();
+      const unrelatedSk = generateSecretKey();
+      const unrelatedPk = finalizeEvent(
+        { kind: 1, created_at: 0, tags: [], content: "" },
+        unrelatedSk,
+      ).pubkey;
+
+      const dmEvent = finalizeEvent(
+        {
+          kind: 4,
+          created_at: Math.floor(Date.now() / 1000),
+          tags: [["p", "recipient".padStart(64, "0")]],
+          content: "secret dm",
+        },
+        authorSk,
+      );
+
+      mockWs.data.authedPubkeys.add(unrelatedPk);
+      mockStorage.query = async () => [dmEvent];
+      await relay.handleReq(mockWs, "sub1", [{ ids: [dmEvent.id] }]);
+
+      const eventMsgs = sentMessages.filter((m) => m[0] === "EVENT");
+      assert.equal(eventMsgs.length, 0);
+
+      // Gets CLOSED with auth-required, not EOSE
+      const closed = sentMessages.find((m) => m[0] === "CLOSED");
+      assert.ok(closed);
+      assert.ok((closed[2] as string).startsWith("auth-required:"));
+    });
+
+    it("should return non-auth-kind event by ID without authentication", async () => {
+      const sk = generateSecretKey();
+      const noteEvent = finalizeEvent(
+        {
+          kind: 1,
+          created_at: Math.floor(Date.now() / 1000),
+          tags: [],
+          content: "public note",
+        },
+        sk,
+      );
+
+      mockStorage.query = async () => [noteEvent];
+      await relay.handleReq(mockWs, "sub1", [{ ids: [noteEvent.id] }]);
+
+      const eventMsgs = sentMessages.filter((m) => m[0] === "EVENT");
+      assert.equal(eventMsgs.length, 1);
+      assert.equal((eventMsgs[0][2] as NostrEvent).id, noteEvent.id);
+
+      // No AUTH challenge
+      const authMsg = sentMessages.find((m) => m[0] === "AUTH");
+      assert.equal(authMsg, undefined);
+    });
+
+    it("should return kind 1059 gift wrap by ID when authenticated as p-tag recipient", async () => {
+      const authorSk = generateSecretKey();
+      const recipientSk = generateSecretKey();
+      const recipientPk = finalizeEvent(
+        { kind: 1, created_at: 0, tags: [], content: "" },
+        recipientSk,
+      ).pubkey;
+
+      const giftWrap = finalizeEvent(
+        {
+          kind: 1059,
+          created_at: Math.floor(Date.now() / 1000),
+          tags: [["p", recipientPk]],
+          content: "wrapped content",
+        },
+        authorSk,
+      );
+
+      mockWs.data.authedPubkeys.add(recipientPk);
+      mockStorage.query = async () => [giftWrap];
+      await relay.handleReq(mockWs, "sub1", [{ ids: [giftWrap.id] }]);
+
+      const eventMsgs = sentMessages.filter((m) => m[0] === "EVENT");
+      assert.equal(eventMsgs.length, 1);
+      assert.equal((eventMsgs[0][2] as NostrEvent).kind, 1059);
+    });
+  });
+
+  describe("broadcast auth-kind event to authorized subscriber only", () => {
+    function createMockWs(): {
+      ws: ServerWebSocket<WebSocketData>;
+      messages: unknown[][];
+    } {
+      const messages: unknown[][] = [];
+      const ws = {
+        send: (message: string) => {
+          messages.push(JSON.parse(message));
+        },
+        data: {
+          subscriptions: new Map(),
+          challenge: "",
+          challengeSent: false,
+          authedPubkeys: new Set(),
+        },
+      } as unknown as ServerWebSocket<WebSocketData>;
+      return { ws, messages };
+    }
+
+    it("should not broadcast auth-kind event to subscriber who is not a party", async () => {
+      const authorSk = generateSecretKey();
+      const authorPk = finalizeEvent(
+        { kind: 1, created_at: 0, tags: [], content: "" },
+        authorSk,
+      ).pubkey;
+
+      // Subscriber is authenticated as a different pubkey
+      const subscriberSk = generateSecretKey();
+      const subscriberPk = finalizeEvent(
+        { kind: 1, created_at: 0, tags: [], content: "" },
+        subscriberSk,
+      ).pubkey;
+
+      const sub = createMockWs();
+      sub.ws.data.authedPubkeys.add(subscriberPk);
+      relay.handleOpen(sub.ws);
+      mockStorage.query = async () => [];
+      // Subscribe to kind 4 for subscriber's own pubkey
+      await relay.handleReq(sub.ws, "sub1", [
+        { kinds: [4], authors: [subscriberPk] },
+      ]);
+      sub.messages.length = 0;
+
+      // Author sends a DM to someone else (not the subscriber)
+      relay.handleOpen(mockWs);
+      const dmEvent = finalizeEvent(
+        {
+          kind: 4,
+          created_at: Math.floor(Date.now() / 1000),
+          tags: [["p", "someone_else".padStart(64, "0")]],
+          content: "not for you",
+        },
+        authorSk,
+      );
+      await relay.handleEvent(mockWs, dmEvent);
+
+      const eventMsgs = sub.messages.filter((m) => m[0] === "EVENT");
+      assert.equal(eventMsgs.length, 0);
+    });
+  });
+
   describe("mixed filters", () => {
     it("should reject when any filter in the array contains auth kind without auth", async () => {
       mockStorage.query = async () => [];

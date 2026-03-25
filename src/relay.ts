@@ -246,11 +246,13 @@ export class Relay {
       const wsSent = sent.get(entry.ws);
       if (wsSent?.has(entry.subscriptionId)) return;
 
-      // Exclude auth-protected kinds from subscriptions that didn't explicitly request them.
+      // Exclude auth-protected kinds from subscriptions that didn't explicitly request them,
+      // and verify the subscriber is a party to the event (author or p-tagged).
       if (this.authKinds.has(event.kind)) {
         const hasKind =
           entry.filter.kinds && entry.filter.kinds.includes(event.kind);
         if (!hasKind) return;
+        if (!this.isAuthorizedForEvent(entry.ws, event)) return;
       }
 
       if (!matchFilter(clampUntil(entry.filter, TIME_FUZZ), event)) return;
@@ -625,6 +627,23 @@ export class Relay {
   }
 
   /**
+   * Check whether the connection is authorized to see the given auth-kind event.
+   * Returns true if the connection has an authenticated pubkey that is either
+   * the event's author or listed in a `p` tag.
+   */
+  private isAuthorizedForEvent(
+    ws: ServerWebSocket<WebSocketData>,
+    event: NostrEvent,
+  ): boolean {
+    const authed = ws.data.authedPubkeys;
+    if (authed.has(event.pubkey)) return true;
+    for (const tag of event.tags) {
+      if (tag[0] === "p" && tag[1] && authed.has(tag[1])) return true;
+    }
+    return false;
+  }
+
+  /**
    * Handle a COUNT message according to NIP-45
    */
   private async handleCountMessage(
@@ -838,6 +857,23 @@ export class Relay {
           "CLOSED",
           result.error.subscriptionId,
           result.error.message,
+        ]);
+        return;
+      }
+
+      // Check if any returned events are auth-kind events the client can't see.
+      // If so, reject the entire request — don't send partial results.
+      if (
+        result.events.some(
+          (e) =>
+            this.authKinds.has(e.kind) && !this.isAuthorizedForEvent(ws, e),
+        )
+      ) {
+        this.ensureChallengeSent(ws);
+        this.sendMessage(ws, [
+          "CLOSED",
+          subscriptionId,
+          "auth-required: some results require authentication",
         ]);
         return;
       }

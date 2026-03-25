@@ -1085,8 +1085,12 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     // Kind filter
     if (filter.kinds && filter.kinds.length > 0) {
       must.push({ terms: { kind: filter.kinds } });
-    } else if (this.authKinds.size > 0) {
+    } else if (
+      this.authKinds.size > 0 &&
+      !(filter.ids && filter.ids.length > 0)
+    ) {
       // Exclude auth-protected kinds from queries that don't explicitly request them.
+      // When specific IDs are requested, skip exclusion — the relay layer handles auth.
       mustNot.push({ terms: { kind: [...this.authKinds] } });
     }
 
