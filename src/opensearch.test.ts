@@ -5846,4 +5846,73 @@ describe("OpenSearchRelay", () => {
       assert.equal(OpenSearchRelay.parseBolt11Amount(bolt11), 21_000);
     });
   });
+
+  describe("authKinds exclusion with ids filter", () => {
+    it("should exclude auth kinds from queries without ids or explicit kinds", async () => {
+      let capturedBody: Record<string, unknown> | undefined;
+      const mockClient = {
+        search: async ({ body }: { body: Record<string, unknown> }) => {
+          capturedBody = body;
+          return {
+            body: { hits: { hits: [], total: { value: 0 } } },
+          };
+        },
+      } as unknown as Client;
+
+      const relay = new OpenSearchRelay(mockClient, {
+        authKinds: new Set([4, 1059]),
+      });
+
+      await relay.query([{ authors: ["a".repeat(64)] }]);
+
+      assert.ok(capturedBody);
+      const boolQuery = (capturedBody.query as Record<string, unknown>)
+        .bool as Record<string, unknown>;
+      const mustNot = boolQuery.must_not as Array<Record<string, unknown>>;
+
+      // Should have a must_not clause excluding auth kinds
+      const kindExclusion = mustNot.find(
+        (c) => (c.terms as Record<string, unknown>)?.kind,
+      );
+      assert.ok(kindExclusion, "should exclude auth kinds");
+      const excludedKinds = (kindExclusion!.terms as Record<string, number[]>)
+        .kind;
+      assert.ok(excludedKinds.includes(4));
+      assert.ok(excludedKinds.includes(1059));
+    });
+
+    it("should NOT exclude auth kinds when ids are present", async () => {
+      let capturedBody: Record<string, unknown> | undefined;
+      const mockClient = {
+        search: async ({ body }: { body: Record<string, unknown> }) => {
+          capturedBody = body;
+          return {
+            body: { hits: { hits: [], total: { value: 0 } } },
+          };
+        },
+      } as unknown as Client;
+
+      const relay = new OpenSearchRelay(mockClient, {
+        authKinds: new Set([4, 1059]),
+      });
+
+      await relay.query([{ ids: ["abc".repeat(20) + "abcd"] }]);
+
+      assert.ok(capturedBody);
+      const boolQuery = (capturedBody.query as Record<string, unknown>)
+        .bool as Record<string, unknown>;
+      const mustNot =
+        (boolQuery.must_not as Array<Record<string, unknown>>) || [];
+
+      // Should NOT have a must_not clause excluding auth kinds
+      const kindExclusion = mustNot.find(
+        (c) => (c.terms as Record<string, unknown>)?.kind,
+      );
+      assert.equal(
+        kindExclusion,
+        undefined,
+        "should not exclude auth kinds when ids present",
+      );
+    });
+  });
 });

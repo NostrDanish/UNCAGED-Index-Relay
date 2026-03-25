@@ -2061,3 +2061,674 @@ describe("Relay", () => {
     });
   });
 });
+
+describe("Relay with authKinds", () => {
+  let relay: Relay;
+  let mockStorage: AnalyzableRelay;
+  let mockWs: ServerWebSocket<WebSocketData>;
+  let sentMessages: unknown[][];
+
+  beforeEach(() => {
+    sentMessages = [];
+    console.error = () => {};
+    console.log = () => {};
+
+    mockStorage = {
+      event: async (_event: NostrEvent) => {},
+      query: async (_filters: Filter[]) => [],
+      remove: async (_filters: Filter[]) => {},
+    } as unknown as AnalyzableRelay;
+
+    mockWs = {
+      send: (message: string) => {
+        sentMessages.push(JSON.parse(message));
+      },
+      data: {
+        subscriptions: new Map(),
+        challenge: "test-challenge",
+        challengeSent: false,
+        authedPubkeys: new Set(),
+      },
+    } as unknown as ServerWebSocket<WebSocketData>;
+
+    relay = new Relay(mockStorage, {
+      relayUrl: "wss://relay.test/",
+      authKinds: new Set([4, 1059]),
+    });
+  });
+
+  afterEach(() => {
+    console.error = () => {};
+    console.log = () => {};
+  });
+
+  describe("REQ with auth kinds", () => {
+    it("should reject REQ for auth kind without authors or #p (unauthenticated)", async () => {
+      mockStorage.query = async () => [];
+      await relay.handleReq(mockWs, "sub1", [{ kinds: [4] }]);
+
+      assert.equal(sentMessages.length, 2); // AUTH challenge + CLOSED
+      assert.equal(sentMessages[0][0], "AUTH");
+      assert.equal(sentMessages[1][0], "CLOSED");
+      assert.equal(sentMessages[1][1], "sub1");
+      assert.ok((sentMessages[1][2] as string).startsWith("auth-required:"));
+    });
+
+    it("should reject REQ for kind 1059 without authors or #p (unauthenticated)", async () => {
+      mockStorage.query = async () => [];
+      await relay.handleReq(mockWs, "sub1", [{ kinds: [1059] }]);
+
+      assert.equal(sentMessages.length, 2); // AUTH challenge + CLOSED
+      assert.equal(sentMessages[0][0], "AUTH");
+      assert.equal(sentMessages[1][0], "CLOSED");
+      assert.ok((sentMessages[1][2] as string).startsWith("auth-required:"));
+    });
+
+    it("should reject REQ with auth kind and unauthenticated authors", async () => {
+      mockStorage.query = async () => [];
+      const sk = generateSecretKey();
+      const pubkey = finalizeEvent(
+        { kind: 1, created_at: 0, tags: [], content: "" },
+        sk,
+      ).pubkey;
+
+      await relay.handleReq(mockWs, "sub1", [
+        { kinds: [4], authors: [pubkey] },
+      ]);
+
+      assert.equal(sentMessages.length, 2); // AUTH challenge + CLOSED
+      assert.equal(sentMessages[0][0], "AUTH"); // challenge sent
+      assert.equal(sentMessages[1][0], "CLOSED");
+      assert.ok((sentMessages[1][2] as string).startsWith("auth-required:"));
+    });
+
+    it("should reject REQ with auth kind and unauthenticated #p", async () => {
+      mockStorage.query = async () => [];
+      const sk = generateSecretKey();
+      const pubkey = finalizeEvent(
+        { kind: 1, created_at: 0, tags: [], content: "" },
+        sk,
+      ).pubkey;
+
+      await relay.handleReq(mockWs, "sub1", [
+        { kinds: [1059], "#p": [pubkey] },
+      ]);
+
+      assert.equal(sentMessages.length, 2); // AUTH challenge + CLOSED
+      assert.equal(sentMessages[0][0], "AUTH");
+      assert.equal(sentMessages[1][0], "CLOSED");
+      assert.ok((sentMessages[1][2] as string).startsWith("auth-required:"));
+    });
+
+    it("should allow REQ for auth kind with authenticated authors", async () => {
+      const sk = generateSecretKey();
+      const pubkey = finalizeEvent(
+        { kind: 1, created_at: 0, tags: [], content: "" },
+        sk,
+      ).pubkey;
+
+      // Authenticate the pubkey
+      mockWs.data.authedPubkeys.add(pubkey);
+
+      mockStorage.query = async () => [];
+      await relay.handleReq(mockWs, "sub1", [
+        { kinds: [4], authors: [pubkey] },
+      ]);
+
+      // Should get EOSE (no CLOSED)
+      const eose = sentMessages.find((m) => m[0] === "EOSE");
+      assert.ok(eose);
+      assert.equal(eose[1], "sub1");
+    });
+
+    it("should allow REQ for auth kind with authenticated #p", async () => {
+      const sk = generateSecretKey();
+      const pubkey = finalizeEvent(
+        { kind: 1, created_at: 0, tags: [], content: "" },
+        sk,
+      ).pubkey;
+
+      mockWs.data.authedPubkeys.add(pubkey);
+
+      mockStorage.query = async () => [];
+      await relay.handleReq(mockWs, "sub1", [
+        { kinds: [1059], "#p": [pubkey] },
+      ]);
+
+      const eose = sentMessages.find((m) => m[0] === "EOSE");
+      assert.ok(eose);
+    });
+
+    it("should reject when one of multiple authors is not authenticated", async () => {
+      const sk1 = generateSecretKey();
+      const pk1 = finalizeEvent(
+        { kind: 1, created_at: 0, tags: [], content: "" },
+        sk1,
+      ).pubkey;
+      const sk2 = generateSecretKey();
+      const pk2 = finalizeEvent(
+        { kind: 1, created_at: 0, tags: [], content: "" },
+        sk2,
+      ).pubkey;
+
+      // Only authenticate pk1
+      mockWs.data.authedPubkeys.add(pk1);
+
+      mockStorage.query = async () => [];
+      await relay.handleReq(mockWs, "sub1", [
+        { kinds: [4], authors: [pk1, pk2] },
+      ]);
+
+      const closed = sentMessages.find((m) => m[0] === "CLOSED");
+      assert.ok(closed);
+      assert.ok((closed[2] as string).startsWith("auth-required:"));
+    });
+
+    it("should allow non-auth kinds without authentication", async () => {
+      mockStorage.query = async () => [];
+      await relay.handleReq(mockWs, "sub1", [{ kinds: [1] }]);
+
+      const eose = sentMessages.find((m) => m[0] === "EOSE");
+      assert.ok(eose);
+    });
+
+    it("should pass through events from catch-all REQ (storage handles auth-kind exclusion)", async () => {
+      const sk = generateSecretKey();
+      const kind1Event = finalizeEvent(
+        {
+          kind: 1,
+          created_at: Math.floor(Date.now() / 1000),
+          tags: [],
+          content: "public",
+        },
+        sk,
+      );
+
+      // Storage only returns non-auth-kind events for catch-all queries
+      // (auth-kind exclusion is handled at the storage/OpenSearch level)
+      mockStorage.query = async () => [kind1Event];
+      await relay.handleReq(mockWs, "sub1", [{ authors: [kind1Event.pubkey] }]);
+
+      const eventMsgs = sentMessages.filter((m) => m[0] === "EVENT");
+      assert.equal(eventMsgs.length, 1);
+      assert.equal((eventMsgs[0][2] as NostrEvent).kind, 1);
+    });
+
+    it("should allow auth-kind events when explicitly requested with auth", async () => {
+      const sk = generateSecretKey();
+      const pubkey = finalizeEvent(
+        { kind: 1, created_at: 0, tags: [], content: "" },
+        sk,
+      ).pubkey;
+
+      mockWs.data.authedPubkeys.add(pubkey);
+
+      const kind4Event = finalizeEvent(
+        {
+          kind: 4,
+          created_at: Math.floor(Date.now() / 1000),
+          tags: [],
+          content: "dm",
+        },
+        sk,
+      );
+
+      mockStorage.query = async () => [kind4Event];
+      await relay.handleReq(mockWs, "sub1", [
+        { kinds: [4], authors: [pubkey] },
+      ]);
+
+      const eventMsgs = sentMessages.filter((m) => m[0] === "EVENT");
+      assert.equal(eventMsgs.length, 1);
+      assert.equal((eventMsgs[0][2] as NostrEvent).kind, 4);
+    });
+  });
+
+  describe("COUNT with auth kinds", () => {
+    it("should reject COUNT for auth kind without authors or #p (unauthenticated)", async () => {
+      mockStorage.count = async () => ({ count: 10 });
+      await relay.handleCount(mockWs, "c1", [{ kinds: [4] }]);
+
+      assert.equal(sentMessages.length, 2); // AUTH challenge + CLOSED
+      assert.equal(sentMessages[0][0], "AUTH");
+      assert.equal(sentMessages[1][0], "CLOSED");
+      assert.ok((sentMessages[1][2] as string).startsWith("auth-required:"));
+    });
+
+    it("should reject COUNT for auth kind with unauthenticated authors", async () => {
+      const sk = generateSecretKey();
+      const pubkey = finalizeEvent(
+        { kind: 1, created_at: 0, tags: [], content: "" },
+        sk,
+      ).pubkey;
+
+      mockStorage.count = async () => ({ count: 10 });
+      await relay.handleCount(mockWs, "c1", [
+        { kinds: [1059], authors: [pubkey] },
+      ]);
+
+      assert.equal(sentMessages.length, 2); // AUTH + CLOSED
+      assert.equal(sentMessages[0][0], "AUTH");
+      assert.equal(sentMessages[1][0], "CLOSED");
+      assert.ok((sentMessages[1][2] as string).startsWith("auth-required:"));
+    });
+
+    it("should allow COUNT for auth kind with authenticated authors", async () => {
+      const sk = generateSecretKey();
+      const pubkey = finalizeEvent(
+        { kind: 1, created_at: 0, tags: [], content: "" },
+        sk,
+      ).pubkey;
+
+      mockWs.data.authedPubkeys.add(pubkey);
+      mockStorage.count = async () => ({ count: 5 });
+      await relay.handleCount(mockWs, "c1", [
+        { kinds: [4], authors: [pubkey] },
+      ]);
+
+      assert.equal(sentMessages.length, 1);
+      assert.equal(sentMessages[0][0], "COUNT");
+      assert.deepEqual(sentMessages[0][2], { count: 5 });
+    });
+
+    it("should pass through catch-all COUNT (storage handles auth-kind exclusion)", async () => {
+      mockStorage.count = async () => ({ count: 100 });
+
+      await relay.handleCount(mockWs, "c1", [{ authors: ["abc".repeat(10)] }]);
+
+      assert.equal(sentMessages.length, 1);
+      assert.equal(sentMessages[0][0], "COUNT");
+      assert.equal((sentMessages[0][2] as { count: number }).count, 100);
+    });
+  });
+
+  describe("broadcast with auth kinds", () => {
+    function createMockWs(): {
+      ws: ServerWebSocket<WebSocketData>;
+      messages: unknown[][];
+    } {
+      const messages: unknown[][] = [];
+      const ws = {
+        send: (message: string) => {
+          messages.push(JSON.parse(message));
+        },
+        data: {
+          subscriptions: new Map(),
+          challenge: "",
+          challengeSent: false,
+          authedPubkeys: new Set(),
+        },
+      } as unknown as ServerWebSocket<WebSocketData>;
+      return { ws, messages };
+    }
+
+    it("should not broadcast auth-kind events to catch-all subscriptions", async () => {
+      const sub = createMockWs();
+      relay.handleOpen(sub.ws);
+      mockStorage.query = async () => [];
+      await relay.handleReq(sub.ws, "sub1", [{}]); // catch-all
+      sub.messages.length = 0;
+
+      relay.handleOpen(mockWs);
+      const sk = generateSecretKey();
+      const dmEvent = finalizeEvent(
+        {
+          kind: 4,
+          created_at: Math.floor(Date.now() / 1000),
+          tags: [],
+          content: "secret dm",
+        },
+        sk,
+      );
+      await relay.handleEvent(mockWs, dmEvent);
+
+      // Subscriber with catch-all should NOT receive kind 4
+      const eventMsgs = sub.messages.filter((m) => m[0] === "EVENT");
+      assert.equal(eventMsgs.length, 0);
+    });
+
+    it("should not broadcast auth-kind events to subscriptions that don't include auth kinds", async () => {
+      const sub = createMockWs();
+      relay.handleOpen(sub.ws);
+      mockStorage.query = async () => [];
+      await relay.handleReq(sub.ws, "sub1", [{ kinds: [1, 7] }]); // no auth kinds
+      sub.messages.length = 0;
+
+      relay.handleOpen(mockWs);
+      const sk = generateSecretKey();
+      const giftWrap = finalizeEvent(
+        {
+          kind: 1059,
+          created_at: Math.floor(Date.now() / 1000),
+          tags: [],
+          content: "wrapped",
+        },
+        sk,
+      );
+      await relay.handleEvent(mockWs, giftWrap);
+
+      const eventMsgs = sub.messages.filter((m) => m[0] === "EVENT");
+      assert.equal(eventMsgs.length, 0);
+    });
+
+    it("should broadcast auth-kind events to subscriptions that explicitly include the kind", async () => {
+      const sk = generateSecretKey();
+      const pubkey = finalizeEvent(
+        { kind: 1, created_at: 0, tags: [], content: "" },
+        sk,
+      ).pubkey;
+
+      const sub = createMockWs();
+      sub.ws.data.authedPubkeys.add(pubkey);
+      relay.handleOpen(sub.ws);
+      mockStorage.query = async () => [];
+      await relay.handleReq(sub.ws, "sub1", [
+        { kinds: [4], authors: [pubkey] },
+      ]);
+      sub.messages.length = 0;
+
+      relay.handleOpen(mockWs);
+      const dmEvent = finalizeEvent(
+        {
+          kind: 4,
+          created_at: Math.floor(Date.now() / 1000),
+          tags: [],
+          content: "dm for subscriber",
+        },
+        sk,
+      );
+      await relay.handleEvent(mockWs, dmEvent);
+
+      const eventMsgs = sub.messages.filter((m) => m[0] === "EVENT");
+      assert.equal(eventMsgs.length, 1);
+      assert.equal((eventMsgs[0][2] as NostrEvent).kind, 4);
+    });
+
+    it("should broadcast non-auth kinds normally", async () => {
+      const sub = createMockWs();
+      relay.handleOpen(sub.ws);
+      mockStorage.query = async () => [];
+      await relay.handleReq(sub.ws, "sub1", [{ kinds: [1] }]);
+      sub.messages.length = 0;
+
+      relay.handleOpen(mockWs);
+      const sk = generateSecretKey();
+      const event = finalizeEvent(
+        {
+          kind: 1,
+          created_at: Math.floor(Date.now() / 1000),
+          tags: [],
+          content: "hello",
+        },
+        sk,
+      );
+      await relay.handleEvent(mockWs, event);
+
+      const eventMsgs = sub.messages.filter((m) => m[0] === "EVENT");
+      assert.equal(eventMsgs.length, 1);
+    });
+  });
+
+  describe("REQ by ID for auth kinds", () => {
+    it("should withhold auth-kind event and send AUTH challenge when unauthenticated", async () => {
+      const sk = generateSecretKey();
+      const dmEvent = finalizeEvent(
+        {
+          kind: 4,
+          created_at: Math.floor(Date.now() / 1000),
+          tags: [["p", "recipient".padStart(64, "0")]],
+          content: "secret dm",
+        },
+        sk,
+      );
+
+      mockStorage.query = async () => [dmEvent];
+      await relay.handleReq(mockWs, "sub1", [{ ids: [dmEvent.id] }]);
+
+      // Event should be withheld, AUTH challenge sent, then CLOSED (not EOSE)
+      const eventMsgs = sentMessages.filter((m) => m[0] === "EVENT");
+      assert.equal(eventMsgs.length, 0);
+
+      const authMsg = sentMessages.find((m) => m[0] === "AUTH");
+      assert.ok(authMsg, "AUTH challenge should be sent");
+
+      const closed = sentMessages.find((m) => m[0] === "CLOSED");
+      assert.ok(closed, "CLOSED should be sent");
+      assert.equal(closed[1], "sub1");
+      assert.ok((closed[2] as string).startsWith("auth-required:"));
+
+      // No EOSE — subscription was closed
+      const eose = sentMessages.find((m) => m[0] === "EOSE");
+      assert.equal(eose, undefined);
+    });
+
+    it("should return auth-kind event when authenticated as author", async () => {
+      const sk = generateSecretKey();
+      const pubkey = finalizeEvent(
+        { kind: 1, created_at: 0, tags: [], content: "" },
+        sk,
+      ).pubkey;
+
+      const dmEvent = finalizeEvent(
+        {
+          kind: 4,
+          created_at: Math.floor(Date.now() / 1000),
+          tags: [["p", "recipient".padStart(64, "0")]],
+          content: "secret dm",
+        },
+        sk,
+      );
+
+      mockWs.data.authedPubkeys.add(pubkey);
+      mockStorage.query = async () => [dmEvent];
+      await relay.handleReq(mockWs, "sub1", [{ ids: [dmEvent.id] }]);
+
+      const eventMsgs = sentMessages.filter((m) => m[0] === "EVENT");
+      assert.equal(eventMsgs.length, 1);
+      assert.equal((eventMsgs[0][2] as NostrEvent).id, dmEvent.id);
+    });
+
+    it("should return auth-kind event when authenticated as p-tag recipient", async () => {
+      const authorSk = generateSecretKey();
+      const recipientSk = generateSecretKey();
+      const recipientPk = finalizeEvent(
+        { kind: 1, created_at: 0, tags: [], content: "" },
+        recipientSk,
+      ).pubkey;
+
+      const dmEvent = finalizeEvent(
+        {
+          kind: 4,
+          created_at: Math.floor(Date.now() / 1000),
+          tags: [["p", recipientPk]],
+          content: "dm to recipient",
+        },
+        authorSk,
+      );
+
+      mockWs.data.authedPubkeys.add(recipientPk);
+      mockStorage.query = async () => [dmEvent];
+      await relay.handleReq(mockWs, "sub1", [{ ids: [dmEvent.id] }]);
+
+      const eventMsgs = sentMessages.filter((m) => m[0] === "EVENT");
+      assert.equal(eventMsgs.length, 1);
+      assert.equal((eventMsgs[0][2] as NostrEvent).id, dmEvent.id);
+    });
+
+    it("should withhold auth-kind event when authenticated as unrelated pubkey", async () => {
+      const authorSk = generateSecretKey();
+      const unrelatedSk = generateSecretKey();
+      const unrelatedPk = finalizeEvent(
+        { kind: 1, created_at: 0, tags: [], content: "" },
+        unrelatedSk,
+      ).pubkey;
+
+      const dmEvent = finalizeEvent(
+        {
+          kind: 4,
+          created_at: Math.floor(Date.now() / 1000),
+          tags: [["p", "recipient".padStart(64, "0")]],
+          content: "secret dm",
+        },
+        authorSk,
+      );
+
+      mockWs.data.authedPubkeys.add(unrelatedPk);
+      mockStorage.query = async () => [dmEvent];
+      await relay.handleReq(mockWs, "sub1", [{ ids: [dmEvent.id] }]);
+
+      const eventMsgs = sentMessages.filter((m) => m[0] === "EVENT");
+      assert.equal(eventMsgs.length, 0);
+
+      // Gets CLOSED with auth-required, not EOSE
+      const closed = sentMessages.find((m) => m[0] === "CLOSED");
+      assert.ok(closed);
+      assert.ok((closed[2] as string).startsWith("auth-required:"));
+    });
+
+    it("should return non-auth-kind event by ID without authentication", async () => {
+      const sk = generateSecretKey();
+      const noteEvent = finalizeEvent(
+        {
+          kind: 1,
+          created_at: Math.floor(Date.now() / 1000),
+          tags: [],
+          content: "public note",
+        },
+        sk,
+      );
+
+      mockStorage.query = async () => [noteEvent];
+      await relay.handleReq(mockWs, "sub1", [{ ids: [noteEvent.id] }]);
+
+      const eventMsgs = sentMessages.filter((m) => m[0] === "EVENT");
+      assert.equal(eventMsgs.length, 1);
+      assert.equal((eventMsgs[0][2] as NostrEvent).id, noteEvent.id);
+
+      // No AUTH challenge
+      const authMsg = sentMessages.find((m) => m[0] === "AUTH");
+      assert.equal(authMsg, undefined);
+    });
+
+    it("should return kind 1059 gift wrap by ID when authenticated as p-tag recipient", async () => {
+      const authorSk = generateSecretKey();
+      const recipientSk = generateSecretKey();
+      const recipientPk = finalizeEvent(
+        { kind: 1, created_at: 0, tags: [], content: "" },
+        recipientSk,
+      ).pubkey;
+
+      const giftWrap = finalizeEvent(
+        {
+          kind: 1059,
+          created_at: Math.floor(Date.now() / 1000),
+          tags: [["p", recipientPk]],
+          content: "wrapped content",
+        },
+        authorSk,
+      );
+
+      mockWs.data.authedPubkeys.add(recipientPk);
+      mockStorage.query = async () => [giftWrap];
+      await relay.handleReq(mockWs, "sub1", [{ ids: [giftWrap.id] }]);
+
+      const eventMsgs = sentMessages.filter((m) => m[0] === "EVENT");
+      assert.equal(eventMsgs.length, 1);
+      assert.equal((eventMsgs[0][2] as NostrEvent).kind, 1059);
+    });
+  });
+
+  describe("broadcast auth-kind event to authorized subscriber only", () => {
+    function createMockWs(): {
+      ws: ServerWebSocket<WebSocketData>;
+      messages: unknown[][];
+    } {
+      const messages: unknown[][] = [];
+      const ws = {
+        send: (message: string) => {
+          messages.push(JSON.parse(message));
+        },
+        data: {
+          subscriptions: new Map(),
+          challenge: "",
+          challengeSent: false,
+          authedPubkeys: new Set(),
+        },
+      } as unknown as ServerWebSocket<WebSocketData>;
+      return { ws, messages };
+    }
+
+    it("should not broadcast auth-kind event to subscriber who is not a party", async () => {
+      const authorSk = generateSecretKey();
+      const authorPk = finalizeEvent(
+        { kind: 1, created_at: 0, tags: [], content: "" },
+        authorSk,
+      ).pubkey;
+
+      // Subscriber is authenticated as a different pubkey
+      const subscriberSk = generateSecretKey();
+      const subscriberPk = finalizeEvent(
+        { kind: 1, created_at: 0, tags: [], content: "" },
+        subscriberSk,
+      ).pubkey;
+
+      const sub = createMockWs();
+      sub.ws.data.authedPubkeys.add(subscriberPk);
+      relay.handleOpen(sub.ws);
+      mockStorage.query = async () => [];
+      // Subscribe to kind 4 for subscriber's own pubkey
+      await relay.handleReq(sub.ws, "sub1", [
+        { kinds: [4], authors: [subscriberPk] },
+      ]);
+      sub.messages.length = 0;
+
+      // Author sends a DM to someone else (not the subscriber)
+      relay.handleOpen(mockWs);
+      const dmEvent = finalizeEvent(
+        {
+          kind: 4,
+          created_at: Math.floor(Date.now() / 1000),
+          tags: [["p", "someone_else".padStart(64, "0")]],
+          content: "not for you",
+        },
+        authorSk,
+      );
+      await relay.handleEvent(mockWs, dmEvent);
+
+      const eventMsgs = sub.messages.filter((m) => m[0] === "EVENT");
+      assert.equal(eventMsgs.length, 0);
+    });
+  });
+
+  describe("mixed filters", () => {
+    it("should reject when any filter in the array contains auth kind without auth", async () => {
+      mockStorage.query = async () => [];
+      await relay.handleReq(mockWs, "sub1", [
+        { kinds: [1] }, // fine
+        { kinds: [4] }, // needs auth
+      ]);
+
+      assert.equal(sentMessages.length, 2); // AUTH challenge + CLOSED
+      assert.equal(sentMessages[0][0], "AUTH");
+      assert.equal(sentMessages[1][0], "CLOSED");
+      assert.ok((sentMessages[1][2] as string).startsWith("auth-required:"));
+    });
+
+    it("should allow mixed kinds in a single filter when auth kind has valid authors", async () => {
+      const sk = generateSecretKey();
+      const pubkey = finalizeEvent(
+        { kind: 1, created_at: 0, tags: [], content: "" },
+        sk,
+      ).pubkey;
+
+      mockWs.data.authedPubkeys.add(pubkey);
+      mockStorage.query = async () => [];
+      await relay.handleReq(mockWs, "sub1", [
+        { kinds: [1, 4], authors: [pubkey] },
+      ]);
+
+      const eose = sentMessages.find((m) => m[0] === "EOSE");
+      assert.ok(eose);
+    });
+  });
+});

@@ -41,11 +41,13 @@ const opensearchRelay = new OpenSearchRelay(opensearchClient, {
   historyEnabled: config.historyEnabled,
   historyKindsWhitelist: config.historyKindsWhitelist,
   historyKindsExcluded: config.historyKindsExcluded,
+  authKinds: config.authKinds,
 });
 
 const relay = new Relay(opensearchRelay, {
   analyze: (event) => analyzePool.analyze(event),
   relayUrl: config.relayUrl,
+  authKinds: config.authKinds,
   relayInfo: {
     pubkey: config.relayPubkey,
     contact: config.relayContact,

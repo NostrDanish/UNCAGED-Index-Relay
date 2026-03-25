@@ -200,6 +200,33 @@ describe("Config", () => {
     });
   });
 
+  describe("authKinds", () => {
+    it("should default to kinds 4 and 1059", () => {
+      const config = new Config(new Map());
+      assert.deepEqual(config.authKinds, new Set([4, 1059]));
+    });
+
+    it("should parse comma-separated kind numbers", () => {
+      const config = new Config(new Map([["AUTH_KINDS", "4,1059,104"]]));
+      assert.deepEqual(config.authKinds, new Set([4, 1059, 104]));
+    });
+
+    it("should return empty set for empty string", () => {
+      const config = new Config(new Map([["AUTH_KINDS", ""]]));
+      assert.deepEqual(config.authKinds, new Set());
+    });
+
+    it("should handle whitespace", () => {
+      const config = new Config(new Map([["AUTH_KINDS", " 4 , 1059 "]]));
+      assert.deepEqual(config.authKinds, new Set([4, 1059]));
+    });
+
+    it("should filter out non-numbers", () => {
+      const config = new Config(new Map([["AUTH_KINDS", "4,abc,1059"]]));
+      assert.deepEqual(config.authKinds, new Set([4, 1059]));
+    });
+  });
+
   describe("historyKindsExcluded", () => {
     it("should default to NIP-85 kinds (30382-30385)", () => {
       const config = new Config(new Map());

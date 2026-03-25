@@ -142,6 +142,9 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
    */
   onDirtyIdentifiers?: (identifiers: Set<string>) => void;
 
+  /** Kinds excluded from queries that don't explicitly request them (e.g. DMs, gift wraps). */
+  private authKinds: Set<number>;
+
   constructor(
     client: Client,
     opts?: {
@@ -151,6 +154,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
       historyEnabled?: boolean;
       historyKindsWhitelist?: Set<number>;
       historyKindsExcluded?: Set<number>;
+      authKinds?: Set<number>;
     },
   ) {
     this.client = client;
@@ -161,6 +165,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     this.historyKindsWhitelist = opts?.historyKindsWhitelist;
     this.historyKindsExcluded =
       opts?.historyKindsExcluded ?? new Set([30382, 30383, 30384, 30385]);
+    this.authKinds = opts?.authKinds ?? new Set();
   }
 
   /**
@@ -184,6 +189,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
       historyEnabled: config.historyEnabled,
       historyKindsWhitelist: config.historyKindsWhitelist,
       historyKindsExcluded: config.historyKindsExcluded,
+      authKinds: config.authKinds,
     });
   }
 
@@ -1079,6 +1085,13 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     // Kind filter
     if (filter.kinds && filter.kinds.length > 0) {
       must.push({ terms: { kind: filter.kinds } });
+    } else if (
+      this.authKinds.size > 0 &&
+      !(filter.ids && filter.ids.length > 0)
+    ) {
+      // Exclude auth-protected kinds from queries that don't explicitly request them.
+      // When specific IDs are requested, skip exclusion — the relay layer handles auth.
+      mustNot.push({ terms: { kind: [...this.authKinds] } });
     }
 
     // Time range filters (clamp to safe range for OpenSearch long type)

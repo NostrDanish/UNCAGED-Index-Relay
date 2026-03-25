@@ -119,6 +119,23 @@ export class Config {
     return new Set(kinds);
   }
 
+  /**
+   * Comma-separated list of kind numbers that require AUTH for REQ/COUNT queries.
+   * Filters including these kinds must have `authors` or `#p` arrays where ALL
+   * entries are authenticated pubkeys on the connection.
+   * These kinds are also excluded from queries that don't explicitly include them.
+   * Default: 4,1059 (NIP-04 DMs and NIP-59 Gift Wraps).
+   */
+  get authKinds(): Set<number> {
+    const value = this.env.get("AUTH_KINDS");
+    if (value === undefined) return new Set([4, 1059]);
+    const kinds = value
+      .split(",")
+      .map((s) => parseInt(s.trim(), 10))
+      .filter((n) => !Number.isNaN(n));
+    return new Set(kinds);
+  }
+
   get nostrSigner(): NostrSigner {
     const value = this.env.get("NOSTR_NSEC");
     if (!value) {

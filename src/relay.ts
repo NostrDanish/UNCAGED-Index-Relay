@@ -88,6 +88,8 @@ export class Relay {
   private analyze: AnalyzeFn;
   /** The relay's public URL, used for NIP-42 AUTH verification. */
   private relayUrl: string;
+  /** Kinds that require AUTH for REQ/COUNT queries and are excluded from unscoped queries. */
+  private authKinds: Set<number>;
 
   /** All open WebSocket connections. */
   private connections = new Set<ServerWebSocket<WebSocketData>>();
@@ -108,11 +110,13 @@ export class Relay {
       relayInfo?: Partial<NostrRelayInfo>;
       analyze?: AnalyzeFn;
       relayUrl: string;
+      authKinds?: Set<number>;
     },
   ) {
     this.storage = storage;
     this.analyze = opts.analyze ?? defaultAnalyze;
     this.relayUrl = opts.relayUrl;
+    this.authKinds = opts.authKinds ?? new Set();
     this.relayInfo = {
       name: "Ditto Relay",
       description: "A Nostr relay backed by OpenSearch",
@@ -241,6 +245,15 @@ export class Relay {
       // Skip if already sent to this (ws, subId)
       const wsSent = sent.get(entry.ws);
       if (wsSent?.has(entry.subscriptionId)) return;
+
+      // Exclude auth-protected kinds from subscriptions that didn't explicitly request them,
+      // and verify the subscriber is a party to the event (author or p-tagged).
+      if (this.authKinds.has(event.kind)) {
+        const hasKind =
+          entry.filter.kinds && entry.filter.kinds.includes(event.kind);
+        if (!hasKind) return;
+        if (!this.isAuthorizedForEvent(entry.ws, event)) return;
+      }
 
       if (!matchFilter(clampUntil(entry.filter, TIME_FUZZ), event)) return;
 
@@ -493,6 +506,144 @@ export class Relay {
   }
 
   /**
+   * Check whether filters involving auth-protected kinds are allowed on this connection.
+   *
+   * Rules:
+   * 1. If a filter's `kinds` includes any auth kind, the filter MUST also have
+   *    `authors` or `#p` where ALL entries are authenticated pubkeys.
+   *    - If `authors`/`#p` are both absent and client is unauthenticated →
+   *      CLOSED with "auth-required" and send the AUTH challenge.
+   *    - If `authors`/`#p` are both absent and client is authenticated →
+   *      CLOSED with "restricted".
+   *    - If present but contain unauthenticated pubkeys → CLOSED with
+   *      "auth-required" and send the AUTH challenge.
+   * 2. Filters without explicit `kinds` (catch-all) pass through; the storage
+   *    backend is responsible for excluding auth-protected kinds.
+   * 3. Filters with explicit `kinds` that don't include any auth kind pass through.
+   *
+   * Returns the validated filters on success, or an error object.
+   */
+  private checkAuthKinds(
+    ws: ServerWebSocket<WebSocketData>,
+    subscriptionId: string,
+    filters: Filter[],
+  ):
+    | { ok: true; filters: Filter[] }
+    | { ok: false; error: { subscriptionId: string; message: string } } {
+    if (this.authKinds.size === 0) {
+      return { ok: true, filters };
+    }
+
+    const result: Filter[] = [];
+
+    for (const filter of filters) {
+      const hasExplicitKinds =
+        Array.isArray(filter.kinds) && filter.kinds.length > 0;
+
+      if (!hasExplicitKinds) {
+        // Catch-all or no kinds specified: exclude auth kinds silently.
+        result.push(filter);
+        continue;
+      }
+
+      // Check if any requested kind is an auth kind.
+      const hasAuthKind = filter.kinds!.some((k) => this.authKinds.has(k));
+
+      if (!hasAuthKind) {
+        // No auth kinds in this filter — pass through.
+        result.push(filter);
+        continue;
+      }
+
+      // Filter contains auth kind(s). Check authors / #p.
+      const authors: string[] | undefined = filter.authors;
+      const pTags: string[] | undefined = filter["#p"];
+
+      if (
+        (!authors || authors.length === 0) &&
+        (!pTags || pTags.length === 0)
+      ) {
+        // No authors and no #p. If the client hasn't authenticated at all,
+        // send a challenge and use auth-required. If they have, use restricted.
+        const authed = ws.data.authedPubkeys;
+        if (authed.size === 0) {
+          this.ensureChallengeSent(ws);
+          return {
+            ok: false,
+            error: {
+              subscriptionId,
+              message:
+                "auth-required: auth-protected kinds require an authors or #p filter",
+            },
+          };
+        }
+        return {
+          ok: false,
+          error: {
+            subscriptionId,
+            message:
+              "restricted: auth-protected kinds require an authors or #p filter",
+          },
+        };
+      }
+
+      // At least one of authors / #p is present.
+      // ALL entries in whichever is provided must be auth'd pubkeys.
+      const authed = ws.data.authedPubkeys;
+
+      if (authors && authors.length > 0) {
+        const allAuthed = authors.every((pk) => authed.has(pk));
+        if (!allAuthed) {
+          this.ensureChallengeSent(ws);
+          return {
+            ok: false,
+            error: {
+              subscriptionId,
+              message: "auth-required: all authors must be authenticated",
+            },
+          };
+        }
+      }
+
+      if (pTags && pTags.length > 0) {
+        const allAuthed = pTags.every((pk) => authed.has(pk));
+        if (!allAuthed) {
+          this.ensureChallengeSent(ws);
+          return {
+            ok: false,
+            error: {
+              subscriptionId,
+              message: "auth-required: all #p tags must be authenticated",
+            },
+          };
+        }
+      }
+
+      // Passed auth checks — include filter.
+      result.push(filter);
+    }
+
+    return { ok: true, filters: result };
+  }
+
+  /**
+   * Check whether the connection is authorized to see the given auth-kind event.
+   * Returns true if the connection has an authenticated pubkey that is either
+   * the event's author or listed in a `p` tag.
+   */
+  private isAuthorizedForEvent(
+    ws: ServerWebSocket<WebSocketData>,
+    event: NostrEvent,
+  ): boolean {
+    const authed = ws.data.authedPubkeys;
+    if (authed.has(event.pubkey)) return true;
+    for (const tag of event.tags) {
+      if (tag[0] === "p" && tag[1] && authed.has(tag[1])) return true;
+    }
+    return false;
+  }
+
+  /**
    * Handle a COUNT message according to NIP-45
    */
   private async handleCountMessage(
@@ -686,6 +837,18 @@ export class Relay {
         return;
       }
 
+      // Guard auth-protected kinds
+      const authCheck = this.checkAuthKinds(ws, subscriptionId, filters);
+      if (!authCheck.ok) {
+        this.sendMessage(ws, [
+          "CLOSED",
+          authCheck.error.subscriptionId,
+          authCheck.error.message,
+        ]);
+        return;
+      }
+      filters = authCheck.filters;
+
       // Process the REQ message
       const result = await this.handleReqMessage(subscriptionId, filters);
 
@@ -694,6 +857,23 @@ export class Relay {
           "CLOSED",
           result.error.subscriptionId,
           result.error.message,
+        ]);
+        return;
+      }
+
+      // Check if any returned events are auth-kind events the client can't see.
+      // If so, reject the entire request — don't send partial results.
+      if (
+        result.events.some(
+          (e) =>
+            this.authKinds.has(e.kind) && !this.isAuthorizedForEvent(ws, e),
+        )
+      ) {
+        this.ensureChallengeSent(ws);
+        this.sendMessage(ws, [
+          "CLOSED",
+          subscriptionId,
+          "auth-required: some results require authentication",
         ]);
         return;
       }
@@ -724,6 +904,18 @@ export class Relay {
     filters: Filter[],
   ) {
     try {
+      // Guard auth-protected kinds
+      const authCheck = this.checkAuthKinds(ws, subscriptionId, filters);
+      if (!authCheck.ok) {
+        this.sendMessage(ws, [
+          "CLOSED",
+          authCheck.error.subscriptionId,
+          authCheck.error.message,
+        ]);
+        return;
+      }
+      filters = authCheck.filters;
+
       // Process the COUNT message
       const result = await this.handleCountMessage(subscriptionId, filters);
 
