@@ -50,6 +50,7 @@ interface MockDocument {
   tags: string[][];
   tags_map: Record<string, string[]>;
   deleted: boolean;
+  replaced: boolean;
   amount_msats?: number;
 }
 
@@ -279,6 +280,7 @@ function makeDoc(
     tags: overrides.tags,
     tags_map: buildTagsMap(overrides.tags),
     deleted: overrides.deleted ?? false,
+    replaced: overrides.replaced ?? false,
     ...(overrides.amount_msats !== undefined && {
       amount_msats: overrides.amount_msats,
     }),

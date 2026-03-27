@@ -128,7 +128,11 @@ async function main() {
           body: {
             query: {
               bool: {
-                must: [{ term: { deleted: false } }, { term: { kind: 3 } }],
+                must: [
+                  { term: { deleted: false } },
+                  { term: { replaced: false } },
+                  { term: { kind: 3 } },
+                ],
               },
             },
             size: 0,

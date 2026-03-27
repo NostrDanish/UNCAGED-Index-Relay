@@ -2260,6 +2260,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
             bool: {
               must: [
                 { term: { deleted: false } },
+                { term: { replaced: false } },
                 { term: { kind: 3 } },
                 { terms: { "tags_map.p": kind0Pubkeys } },
               ],
@@ -2310,6 +2311,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
             bool: {
               must: [
                 { term: { deleted: false } },
+                { term: { replaced: false } },
                 { terms: { kind: [1, 6, 7, 16, 1111] } },
                 { terms: { "tags_map.e": dirtyNonKind0Ids } },
               ],
@@ -2381,6 +2383,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
             bool: {
               must: [
                 { term: { deleted: false } },
+                { term: { replaced: false } },
                 { term: { kind: 9735 } },
                 { terms: { "tags_map.e": dirtyNonKind0Ids } },
               ],
@@ -2431,6 +2434,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
             bool: {
               must: [
                 { term: { deleted: false } },
+                { term: { replaced: false } },
                 { term: { kind: 1 } },
                 { terms: { "tags_map.q": dirtyNonKind0Ids } },
               ],

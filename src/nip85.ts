@@ -273,6 +273,7 @@ export class Nip85 {
           bool: {
             must: [
               { term: { deleted: false } },
+              { term: { replaced: false } },
               { term: { kind: 1 } },
               { terms: { pubkey: pubkeys } },
             ],
@@ -340,6 +341,7 @@ export class Nip85 {
           bool: {
             must: [
               { term: { deleted: false } },
+              { term: { replaced: false } },
               { terms: { kind: [1, 6, 7, 16, 1111] } },
               { terms: { "tags_map.a": addrs } },
             ],
@@ -405,6 +407,7 @@ export class Nip85 {
           bool: {
             must: [
               { term: { deleted: false } },
+              { term: { replaced: false } },
               { term: { kind: 9735 } },
               { terms: { "tags_map.a": addrs } },
             ],
@@ -488,6 +491,7 @@ export class Nip85 {
           bool: {
             must: [
               { term: { deleted: false } },
+              { term: { replaced: false } },
               { terms: { kind: [1, 7, 16, 17, 1111] } },
             ],
             should: [

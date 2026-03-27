@@ -155,6 +155,7 @@ async function computeEventScores(
             bool: {
               must: [
                 { term: { deleted: false } },
+                { term: { replaced: false } },
                 { terms: { kind: [1, 6, 7, 16, 1111] } },
                 { terms: { "tags_map.e": eventIds } },
               ],
@@ -228,6 +229,7 @@ async function computeEventScores(
             bool: {
               must: [
                 { term: { deleted: false } },
+                { term: { replaced: false } },
                 { term: { kind: 9735 } },
                 { terms: { "tags_map.e": eventIds } },
               ],
@@ -280,6 +282,7 @@ async function computeEventScores(
             bool: {
               must: [
                 { term: { deleted: false } },
+                { term: { replaced: false } },
                 { term: { kind: 1 } },
                 { terms: { "tags_map.q": eventIds } },
               ],
@@ -336,6 +339,7 @@ async function computeFollowerCounts(
             bool: {
               must: [
                 { term: { deleted: false } },
+                { term: { replaced: false } },
                 { term: { kind: 3 } },
                 { terms: { "tags_map.p": pubkeys } },
               ],
