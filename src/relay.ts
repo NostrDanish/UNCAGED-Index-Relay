@@ -237,6 +237,12 @@ export class Relay {
     // Collect candidate indexed filters: kind-specific + catchAll
     const kindSet = this.kindIndex.get(event.kind);
 
+    // Pre-serialize the event once.  The per-subscriber message is
+    // `["EVENT","<subId>",<event>]` — we build it via string concatenation
+    // so the expensive JSON.stringify of the event body happens only once
+    // instead of once per matching subscription.
+    const eventJson = JSON.stringify(event);
+
     // Track which (ws, subscriptionId) pairs have already been sent to.
     // Outer map uses ws reference identity, inner set is subscriptionId strings.
     const sent = new Map<ServerWebSocket<WebSocketData>, Set<string>>();
@@ -264,7 +270,9 @@ export class Relay {
         sent.set(entry.ws, new Set([entry.subscriptionId]));
       }
 
-      this.sendMessage(entry.ws, ["EVENT", entry.subscriptionId, event]);
+      // Build the EVENT message via concatenation using the pre-serialized
+      // event JSON, avoiding a full JSON.stringify per subscriber.
+      entry.ws.send(`["EVENT",${JSON.stringify(entry.subscriptionId)},${eventJson}]`);
     };
 
     if (kindSet) {
