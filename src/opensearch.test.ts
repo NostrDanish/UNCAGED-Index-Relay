@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { describe, it } from "node:test";
-import type { Client } from "@opensearch-project/opensearch";
+import type { Client } from "./opensearch-client.ts";
 import type { NostrEvent } from "nostr-tools";
 import { finalizeEvent, generateSecretKey, getPublicKey } from "nostr-tools";
 import { Config } from "./config.ts";

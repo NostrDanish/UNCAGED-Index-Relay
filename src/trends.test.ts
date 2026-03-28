@@ -1,7 +1,7 @@
 import { strict as assert } from "node:assert";
 import { describe, it } from "node:test";
 import type { NostrEvent, NostrSigner, NRelay } from "@nostrify/nostrify";
-import type { Client } from "@opensearch-project/opensearch";
+import type { Client } from "./opensearch-client.ts";
 
 import { Trends } from "./trends.ts";
 

@@ -1,8 +1,8 @@
 import { readFile } from "node:fs/promises";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
-import type { ClientOptions } from "@opensearch-project/opensearch";
-import { Client as OpenSearchClient } from "@opensearch-project/opensearch";
+import type { ClientOptions } from "./opensearch-client.ts";
+import { Client as OpenSearchClient } from "./opensearch-client.ts";
 import { serve } from "bun";
 
 import { AnalyzePool } from "./analyze-pool.ts";

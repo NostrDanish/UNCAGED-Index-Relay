@@ -4,7 +4,7 @@ import type {
   NostrSigner,
   NRelay,
 } from "@nostrify/nostrify";
-import type { Client } from "@opensearch-project/opensearch";
+import type { Client } from "./opensearch-client.ts";
 
 /** A single trending tag value with engagement metrics. */
 export interface TrendingTagValue {

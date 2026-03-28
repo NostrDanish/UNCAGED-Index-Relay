@@ -7,8 +7,8 @@ import type {
   NRelay,
 } from "@nostrify/nostrify";
 import { NIP50, NKinds, NSchema as n } from "@nostrify/nostrify";
-import type { Client, ClientOptions } from "@opensearch-project/opensearch";
-import { Client as OpenSearchClient } from "@opensearch-project/opensearch";
+import type { ClientOptions } from "./opensearch-client.ts";
+import { Client, Client as OpenSearchClient } from "./opensearch-client.ts";
 
 import type { Config } from "./config.ts";
 import { detectMedia } from "./media.ts";
