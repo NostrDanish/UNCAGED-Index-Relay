@@ -104,6 +104,11 @@ export class Relay {
     Set<IndexedFilter>
   >();
 
+  /** Queue of events pending broadcast, drained asynchronously with yields. */
+  private broadcastQueue: NostrEvent[] = [];
+  /** Whether the async drain loop is currently running. */
+  private drainingBroadcasts = false;
+
   constructor(
     storage: AnalyzableRelay,
     opts: {
@@ -226,11 +231,54 @@ export class Relay {
   }
 
   /**
-   * Broadcast an event to all subscriptions whose filters match.
+   * Queue an event for broadcast to matching subscriptions.
+   * The actual broadcast work is drained asynchronously — one event at a time
+   * with `setTimeout(0)` yields between each — so pending REQ handlers can
+   * interleave and avoid p95 latency spikes caused by back-to-back broadcasts.
+   */
+  broadcast(event: NostrEvent): void {
+    this.broadcastQueue.push(event);
+    if (!this.drainingBroadcasts) {
+      this.drainingBroadcasts = true;
+      this.drainBroadcasts();
+    }
+  }
+
+  /**
+   * Synchronously drain all pending broadcasts. Used in tests to verify
+   * broadcast delivery without waiting for async drain.
+   */
+  flushBroadcasts(): void {
+    while (this.broadcastQueue.length > 0) {
+      const event = this.broadcastQueue.shift()!;
+      this.broadcastOne(event);
+    }
+    this.drainingBroadcasts = false;
+  }
+
+  /**
+   * Async drain loop: processes one broadcast per event-loop tick.
+   * Between each broadcast, a `setTimeout(0)` yield allows pending REQs
+   * and other I/O callbacks to execute, eliminating the stall where
+   * ~100 broadcasts would block the event loop in a tight loop.
+   */
+  private drainBroadcasts(): void {
+    const event = this.broadcastQueue.shift();
+    if (!event) {
+      this.drainingBroadcasts = false;
+      return;
+    }
+    this.broadcastOne(event);
+    // Yield before processing the next broadcast
+    setTimeout(() => this.drainBroadcasts(), 0);
+  }
+
+  /**
+   * Broadcast a single event to all subscriptions whose filters match.
    * Deduplicates so each (connection, subscriptionId) pair receives the event at most once,
    * even if multiple filters within the subscription match.
    */
-  broadcast(event: NostrEvent): void {
+  private broadcastOne(event: NostrEvent): void {
     // NIP-40: Don't broadcast expired events
     if (this.isExpired(event)) return;
 

@@ -98,6 +98,7 @@ describe("Relay", () => {
       );
 
       await relay.handleEvent(mockWs, event);
+      relay.flushBroadcasts();
 
       assert.equal(sentMessages.length, 1);
       assert.deepEqual(sentMessages[0], ["OK", event.id, true, ""]);
@@ -116,6 +117,7 @@ describe("Relay", () => {
       );
 
       await relay.handleEvent(mockWs, event);
+      relay.flushBroadcasts();
 
       assert.equal(sentMessages.length, 1);
       assert.deepEqual(sentMessages[0], ["OK", event.id, true, ""]);
@@ -134,6 +136,7 @@ describe("Relay", () => {
       );
 
       await relay.handleEvent(mockWs, deletionEvent);
+      relay.flushBroadcasts();
 
       assert.equal(sentMessages.length, 1);
       assert.deepEqual(sentMessages[0], ["OK", deletionEvent.id, true, ""]);
@@ -167,6 +170,7 @@ describe("Relay", () => {
       );
 
       await relay.handleEvent(mockWs, deletionEvent);
+      relay.flushBroadcasts();
 
       // Event should be accepted (deletion events are always stored)
       assert.equal(sentMessages.length, 1);
@@ -207,6 +211,7 @@ describe("Relay", () => {
       );
 
       await relay.handleEvent(mockWs, deletionEvent);
+      relay.flushBroadcasts();
 
       // Event should be accepted
       assert.equal(sentMessages.length, 1);
@@ -243,6 +248,7 @@ describe("Relay", () => {
       );
 
       await relay.handleEvent(mockWs, vanishEvent);
+      relay.flushBroadcasts();
 
       // Event should be accepted and stored for bookkeeping
       assert.equal(sentMessages.length, 1);
@@ -285,6 +291,7 @@ describe("Relay", () => {
       );
 
       await relay.handleEvent(mockWs, vanishEvent);
+      relay.flushBroadcasts();
 
       assert.equal(sentMessages.length, 1);
       assert.deepEqual(sentMessages[0], ["OK", vanishEvent.id, true, ""]);
@@ -318,6 +325,7 @@ describe("Relay", () => {
       );
 
       await relay.handleEvent(mockWs, vanishEvent);
+      relay.flushBroadcasts();
 
       // Event should be accepted (stored for bookkeeping)
       assert.equal(sentMessages.length, 1);
@@ -341,6 +349,7 @@ describe("Relay", () => {
       );
 
       await relay.handleEvent(mockWs, vanishEvent);
+      relay.flushBroadcasts();
 
       // Event should be rejected
       assert.equal(sentMessages.length, 1);
@@ -375,6 +384,7 @@ describe("Relay", () => {
       );
 
       await relay.handleEvent(mockWs, vanishEvent);
+      relay.flushBroadcasts();
 
       assert.equal(sentMessages.length, 1);
       assert.deepEqual(sentMessages[0], ["OK", vanishEvent.id, true, ""]);
@@ -403,6 +413,7 @@ describe("Relay", () => {
       );
 
       await relay.handleEvent(mockWs, event);
+      relay.flushBroadcasts();
 
       assert.equal(sentMessages.length, 1);
       assert.deepEqual(sentMessages[0], [
@@ -431,6 +442,7 @@ describe("Relay", () => {
       );
 
       await relay.handleEvent(mockWs, ephemeralEvent);
+      relay.flushBroadcasts();
 
       // Should accept the event
       assert.equal(sentMessages.length, 1);
@@ -477,6 +489,7 @@ describe("Relay", () => {
       );
 
       await relay.handleEvent(mockWs, ephemeralEvent);
+      relay.flushBroadcasts();
 
       // Should be accepted and broadcast
       const okMsg = sentMessages.find((m) => m[0] === "OK");
@@ -929,6 +942,7 @@ describe("Relay", () => {
         sk,
       );
       await relay.handleEvent(mockWs, event);
+      relay.flushBroadcasts();
 
       // Subscriber should have received the event
       assert.equal(sub.messages.length, 1);
@@ -956,6 +970,7 @@ describe("Relay", () => {
         sk,
       );
       await relay.handleEvent(mockWs, event);
+      relay.flushBroadcasts();
 
       // Subscriber should NOT receive the event
       assert.equal(sub.messages.length, 0);
@@ -990,6 +1005,7 @@ describe("Relay", () => {
         authorSk,
       );
       await relay.handleEvent(mockWs, event);
+      relay.flushBroadcasts();
       assert.equal(sub.messages.length, 1);
       assert.equal((sub.messages[0][2] as NostrEvent).id, event.id);
 
@@ -1006,6 +1022,7 @@ describe("Relay", () => {
         otherSk,
       );
       await relay.handleEvent(mockWs, otherEvent);
+      relay.flushBroadcasts();
       assert.equal(sub.messages.length, 0);
     });
 
@@ -1031,6 +1048,7 @@ describe("Relay", () => {
         sk,
       );
       await relay.handleEvent(mockWs, event);
+      relay.flushBroadcasts();
 
       assert.equal(sub.messages.length, 0);
     });
@@ -1057,6 +1075,7 @@ describe("Relay", () => {
         sk,
       );
       await relay.handleEvent(mockWs, event);
+      relay.flushBroadcasts();
 
       assert.equal(sub.messages.length, 0);
     });
@@ -1081,6 +1100,7 @@ describe("Relay", () => {
         sk,
       );
       await relay.handleEvent(mockWs, event);
+      relay.flushBroadcasts();
 
       // Both subscriptions should receive the event
       const eventMessages = sub.messages.filter((m) => m[0] === "EVENT");
@@ -1112,6 +1132,7 @@ describe("Relay", () => {
         sk,
       );
       await relay.handleEvent(mockWs, event);
+      relay.flushBroadcasts();
 
       // Should only receive the event ONCE
       const eventMessages = sub.messages.filter((m) => m[0] === "EVENT");
@@ -1137,6 +1158,7 @@ describe("Relay", () => {
         sk,
       );
       await relay.handleEvent(mockWs, event);
+      relay.flushBroadcasts();
 
       assert.equal(sub.messages.length, 1);
       assert.equal(sub.messages[0][0], "EVENT");
@@ -1168,6 +1190,7 @@ describe("Relay", () => {
         sk,
       );
       await relay.handleEvent(mockWs, event1);
+      relay.flushBroadcasts();
       assert.equal(sub.messages.length, 0);
 
       // Kind 7 should match now
@@ -1181,6 +1204,7 @@ describe("Relay", () => {
         sk,
       );
       await relay.handleEvent(mockWs, event7);
+      relay.flushBroadcasts();
       assert.equal(sub.messages.length, 1);
       assert.equal((sub.messages[0][2] as NostrEvent).id, event7.id);
     });
@@ -1202,6 +1226,7 @@ describe("Relay", () => {
         sk,
       );
       await relay.handleEvent(mockWs, event);
+      relay.flushBroadcasts();
 
       // Should have OK + EVENT (broadcast to own subscription)
       const okMsg = sentMessages.find((m) => m[0] === "OK");
@@ -1232,6 +1257,7 @@ describe("Relay", () => {
         sig: "c".repeat(128),
       } as NostrEvent;
       await relay.handleEvent(mockWs, event);
+      relay.flushBroadcasts();
 
       // Subscriber should NOT receive a rejected event
       assert.equal(sub.messages.length, 0);
@@ -1612,6 +1638,7 @@ describe("Relay", () => {
       );
 
       await relay.handleEvent(mockWs, protectedEvent);
+      relay.flushBroadcasts();
 
       // AUTH challenge should be sent before the OK rejection
       assert.equal(sentMessages.length, 2);
@@ -1658,6 +1685,7 @@ describe("Relay", () => {
       );
 
       await relay.handleEvent(mockWs, protectedEvent);
+      relay.flushBroadcasts();
 
       assert.equal(sentMessages.length, 1);
       assert.equal(sentMessages[0][0], "OK");
@@ -1701,6 +1729,7 @@ describe("Relay", () => {
       );
 
       await relay.handleEvent(mockWs, protectedEvent);
+      relay.flushBroadcasts();
 
       // AUTH challenge is sent lazily before the rejection
       assert.equal(sentMessages.length, 2);
@@ -1725,6 +1754,7 @@ describe("Relay", () => {
       );
 
       await relay.handleEvent(mockWs, normalEvent);
+      relay.flushBroadcasts();
 
       assert.equal(sentMessages.length, 1);
       assert.equal(sentMessages[0][2], true);
@@ -1747,6 +1777,7 @@ describe("Relay", () => {
       );
 
       await relay.handleEvent(mockWs, event);
+      relay.flushBroadcasts();
 
       assert.equal(sentMessages.length, 1);
       assert.equal(sentMessages[0][2], true);
@@ -1799,6 +1830,7 @@ describe("Relay", () => {
       );
 
       await relay.handleEvent(mockWs, expiredEvent);
+      relay.flushBroadcasts();
 
       assert.equal(sentMessages.length, 1);
       assert.equal(sentMessages[0][0], "OK");
@@ -1821,6 +1853,7 @@ describe("Relay", () => {
       );
 
       await relay.handleEvent(mockWs, event);
+      relay.flushBroadcasts();
 
       assert.equal(sentMessages.length, 1);
       assert.deepEqual(sentMessages[0], ["OK", event.id, true, ""]);
@@ -1839,6 +1872,7 @@ describe("Relay", () => {
       );
 
       await relay.handleEvent(mockWs, event);
+      relay.flushBroadcasts();
 
       assert.equal(sentMessages.length, 1);
       assert.deepEqual(sentMessages[0], ["OK", event.id, true, ""]);
@@ -1876,6 +1910,7 @@ describe("Relay", () => {
       );
 
       await relay.handleEvent(mockWs, expiredEvent);
+      relay.flushBroadcasts();
 
       // The event should be rejected, so no EVENT message to subscriber
       const eventMessages = sentMessages.filter((m) => m[0] === "EVENT");
@@ -2031,6 +2066,7 @@ describe("Relay", () => {
         sk,
       );
       await relay.handleEvent(mockWs, futureEvent);
+      relay.flushBroadcasts();
 
       // Subscriber should NOT receive the future event
       const eventMessages = sub.messages.filter((m) => m[0] === "EVENT");
@@ -2050,6 +2086,7 @@ describe("Relay", () => {
         sk,
       );
       await relay.handleEvent(mockWs, futureEphemeral);
+      relay.flushBroadcasts();
 
       const okMsg = sentMessages.find((m) => m[0] === "OK");
       assert.ok(okMsg);
@@ -2381,6 +2418,7 @@ describe("Relay with authKinds", () => {
         sk,
       );
       await relay.handleEvent(mockWs, dmEvent);
+      relay.flushBroadcasts();
 
       // Subscriber with catch-all should NOT receive kind 4
       const eventMsgs = sub.messages.filter((m) => m[0] === "EVENT");
@@ -2406,6 +2444,7 @@ describe("Relay with authKinds", () => {
         sk,
       );
       await relay.handleEvent(mockWs, giftWrap);
+      relay.flushBroadcasts();
 
       const eventMsgs = sub.messages.filter((m) => m[0] === "EVENT");
       assert.equal(eventMsgs.length, 0);
@@ -2438,6 +2477,7 @@ describe("Relay with authKinds", () => {
         sk,
       );
       await relay.handleEvent(mockWs, dmEvent);
+      relay.flushBroadcasts();
 
       const eventMsgs = sub.messages.filter((m) => m[0] === "EVENT");
       assert.equal(eventMsgs.length, 1);
@@ -2463,6 +2503,7 @@ describe("Relay with authKinds", () => {
         sk,
       );
       await relay.handleEvent(mockWs, event);
+      relay.flushBroadcasts();
 
       const eventMsgs = sub.messages.filter((m) => m[0] === "EVENT");
       assert.equal(eventMsgs.length, 1);
@@ -2694,6 +2735,7 @@ describe("Relay with authKinds", () => {
         authorSk,
       );
       await relay.handleEvent(mockWs, dmEvent);
+      relay.flushBroadcasts();
 
       const eventMsgs = sub.messages.filter((m) => m[0] === "EVENT");
       assert.equal(eventMsgs.length, 0);

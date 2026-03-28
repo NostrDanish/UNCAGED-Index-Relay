@@ -1447,14 +1447,10 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
       const response = await this.writeClient.bulk({ body });
       flushEnd();
 
-      // Resolve/reject entries in chunks, yielding the event loop between
-      // chunks.  Each resolve() triggers the awaiting handleEvent() which
-      // calls broadcast() synchronously.  Without yields, resolving ~100
-      // entries in a tight loop means ~100 broadcast() calls (each iterating
-      // hundreds of subscribers) execute before any pending REQ can process,
-      // causing 200-500ms p95 spikes.
-      const FLUSH_CHUNK = 10;
-
+      // Resolve/reject entries.  Each resolve() resumes handleEvent() which
+      // calls broadcast() — but broadcast() now just queues the event and the
+      // actual fan-out is drained asynchronously with yields in the Relay, so
+      // resolving all entries here is cheap and doesn't block the event loop.
       if (response.body.errors) {
         const items: Array<Record<string, { error?: unknown }>> =
           response.body.items;
@@ -1469,17 +1465,11 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
             opensearchEventsCounter.inc({ kind: entries[i].event.kind });
             entries[i].resolve();
           }
-          if ((i + 1) % FLUSH_CHUNK === 0 && i + 1 < items.length) {
-            await new Promise<void>((r) => setTimeout(r, 0));
-          }
         }
       } else {
         for (let i = 0; i < entries.length; i++) {
           opensearchEventsCounter.inc({ kind: entries[i].event.kind });
           entries[i].resolve();
-          if ((i + 1) % FLUSH_CHUNK === 0 && i + 1 < entries.length) {
-            await new Promise<void>((r) => setTimeout(r, 0));
-          }
         }
       }
 
