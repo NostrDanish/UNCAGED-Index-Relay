@@ -226,6 +226,7 @@ describe("OpenSearchRelay", () => {
       const relay = new OpenSearchRelay(client as unknown as Client, {
         indexName: "test-index",
         bulkMaxSize: 1,
+        refreshDelayMs: 0,
       });
 
       const sk = generateSecretKey();
@@ -260,6 +261,7 @@ describe("OpenSearchRelay", () => {
       const relay = new OpenSearchRelay(client as unknown as Client, {
         indexName: "test-index",
         bulkMaxSize: 1,
+        refreshDelayMs: 0,
       });
 
       const sk = generateSecretKey();
@@ -301,6 +303,7 @@ describe("OpenSearchRelay", () => {
       const relay = new OpenSearchRelay(client as unknown as Client, {
         indexName: "test-index",
         bulkMaxSize: 1,
+        refreshDelayMs: 0,
       });
 
       const sk = generateSecretKey();
@@ -340,6 +343,7 @@ describe("OpenSearchRelay", () => {
       const relay = new OpenSearchRelay(client as unknown as Client, {
         indexName: "test-index",
         bulkMaxSize: 1,
+        refreshDelayMs: 0,
       });
 
       const sk1 = generateSecretKey();
@@ -383,6 +387,7 @@ describe("OpenSearchRelay", () => {
       const relay = new OpenSearchRelay(client as unknown as Client, {
         indexName: "test-index",
         bulkMaxSize: 1,
+        refreshDelayMs: 0,
       });
 
       const sk = generateSecretKey();
@@ -422,6 +427,7 @@ describe("OpenSearchRelay", () => {
       const relay = new OpenSearchRelay(client as unknown as Client, {
         indexName: "test-index",
         bulkMaxSize: 1,
+        refreshDelayMs: 0,
       });
 
       const sk = generateSecretKey();
@@ -750,6 +756,7 @@ describe("OpenSearchRelay", () => {
       const relay = new OpenSearchRelay(client as unknown as Client, {
         indexName: "test-index",
         bulkMaxSize: 1,
+        refreshDelayMs: 0,
       });
 
       const sk = generateSecretKey();
@@ -808,6 +815,7 @@ describe("OpenSearchRelay", () => {
       const relay = new OpenSearchRelay(client as unknown as Client, {
         indexName: "test-index",
         bulkMaxSize: 1,
+        refreshDelayMs: 0,
       });
 
       const sk = generateSecretKey();
@@ -853,6 +861,7 @@ describe("OpenSearchRelay", () => {
       const relay = new OpenSearchRelay(client as unknown as Client, {
         indexName: "test-index",
         bulkMaxSize: 1,
+        refreshDelayMs: 0,
       });
 
       const sk = generateSecretKey();
@@ -902,6 +911,7 @@ describe("OpenSearchRelay", () => {
       const relay = new OpenSearchRelay(client as unknown as Client, {
         indexName: "test-index",
         bulkMaxSize: 1,
+        refreshDelayMs: 0,
       });
 
       const sk = generateSecretKey();
@@ -931,6 +941,7 @@ describe("OpenSearchRelay", () => {
       const relay = new OpenSearchRelay(client as unknown as Client, {
         indexName: "test-index",
         bulkMaxSize: 1,
+        refreshDelayMs: 0,
       });
 
       const sk = generateSecretKey();
@@ -987,6 +998,7 @@ describe("OpenSearchRelay", () => {
       const relay = new OpenSearchRelay(client as unknown as Client, {
         indexName: "test-index",
         bulkMaxSize: 1,
+        refreshDelayMs: 0,
       });
 
       const sk = generateSecretKey();
@@ -1039,6 +1051,7 @@ describe("OpenSearchRelay", () => {
       const relay = new OpenSearchRelay(client as unknown as Client, {
         indexName: "test-index",
         bulkMaxSize: 1,
+        refreshDelayMs: 0,
       });
 
       const sk = generateSecretKey();
@@ -1103,6 +1116,7 @@ describe("OpenSearchRelay", () => {
       const relay = new OpenSearchRelay(client as unknown as Client, {
         indexName: "test-index",
         bulkMaxSize: 1,
+        refreshDelayMs: 0,
       });
 
       const sk = generateSecretKey();
@@ -1143,6 +1157,7 @@ describe("OpenSearchRelay", () => {
       const relay = new OpenSearchRelay(client as unknown as Client, {
         indexName: "test-index",
         bulkMaxSize: 1,
+        refreshDelayMs: 0,
       });
 
       const sk = generateSecretKey();
@@ -1183,6 +1198,7 @@ describe("OpenSearchRelay", () => {
       const relay = new OpenSearchRelay(client as unknown as Client, {
         indexName: "test-index",
         bulkMaxSize: 1,
+        refreshDelayMs: 0,
       });
 
       const sk1 = generateSecretKey();
@@ -1227,6 +1243,7 @@ describe("OpenSearchRelay", () => {
       const relay = new OpenSearchRelay(client as unknown as Client, {
         indexName: "test-index",
         bulkMaxSize: 1,
+        refreshDelayMs: 0,
       });
 
       const sk = generateSecretKey();
@@ -1255,6 +1272,7 @@ describe("OpenSearchRelay", () => {
       const relay = new OpenSearchRelay(client as unknown as Client, {
         indexName: "test-index",
         bulkMaxSize: 1,
+        refreshDelayMs: 0,
       });
 
       const sk = generateSecretKey();
@@ -1295,6 +1313,7 @@ describe("OpenSearchRelay", () => {
       const relay = new OpenSearchRelay(client as unknown as Client, {
         indexName: "test-index",
         bulkMaxSize: 1,
+        refreshDelayMs: 0,
       });
 
       const sk = generateSecretKey();
@@ -1340,6 +1359,7 @@ describe("OpenSearchRelay", () => {
       const relay = new OpenSearchRelay(client as unknown as Client, {
         indexName: "test-index",
         bulkMaxSize: 1,
+        refreshDelayMs: 0,
       });
 
       const sk = generateSecretKey();
@@ -1386,6 +1406,7 @@ describe("OpenSearchRelay", () => {
       const relay = new OpenSearchRelay(client as unknown as Client, {
         indexName: "test-index",
         bulkMaxSize: 1,
+        refreshDelayMs: 0,
       });
 
       const sk = generateSecretKey();
@@ -1436,6 +1457,7 @@ describe("OpenSearchRelay", () => {
       const relay = new OpenSearchRelay(client as unknown as Client, {
         indexName: "test-index",
         bulkMaxSize: 1,
+        refreshDelayMs: 0,
       });
 
       const sk = generateSecretKey();
@@ -1480,6 +1502,7 @@ describe("OpenSearchRelay", () => {
       const relay = new OpenSearchRelay(client as unknown as Client, {
         indexName: "test-index",
         bulkMaxSize: 1,
+        refreshDelayMs: 0,
       });
 
       const sk = generateSecretKey();
@@ -1543,6 +1566,7 @@ describe("OpenSearchRelay", () => {
       const relay = new OpenSearchRelay(client as unknown as Client, {
         indexName: "test-index",
         bulkMaxSize: 1,
+        refreshDelayMs: 0,
       });
 
       const sk = generateSecretKey();
@@ -1597,6 +1621,7 @@ describe("OpenSearchRelay", () => {
       const relay = new OpenSearchRelay(client as unknown as Client, {
         indexName: "test-index",
         bulkMaxSize: 1,
+        refreshDelayMs: 0,
       });
 
       const sk = generateSecretKey();
@@ -1647,6 +1672,7 @@ describe("OpenSearchRelay", () => {
       const relay = new OpenSearchRelay(client as unknown as Client, {
         indexName: "test-index",
         bulkMaxSize: 1,
+        refreshDelayMs: 0,
         historyEnabled: false,
       });
 
@@ -1688,6 +1714,7 @@ describe("OpenSearchRelay", () => {
       const relay = new OpenSearchRelay(client as unknown as Client, {
         indexName: "test-index",
         bulkMaxSize: 1,
+        refreshDelayMs: 0,
         historyKindsWhitelist: new Set([30023]),
       });
 
@@ -1756,6 +1783,7 @@ describe("OpenSearchRelay", () => {
       const relay = new OpenSearchRelay(client as unknown as Client, {
         indexName: "test-index",
         bulkMaxSize: 1,
+        refreshDelayMs: 0,
         historyKindsExcluded: new Set([30023]),
       });
 
@@ -1825,6 +1853,7 @@ describe("OpenSearchRelay", () => {
       const relay = new OpenSearchRelay(client as unknown as Client, {
         indexName: "test-index",
         bulkMaxSize: 1,
+        refreshDelayMs: 0,
       });
 
       const sk = generateSecretKey();
@@ -2191,6 +2220,7 @@ describe("OpenSearchRelay", () => {
       const relay = new OpenSearchRelay(client as unknown as Client, {
         indexName: "test-index",
         bulkMaxSize: 1,
+        refreshDelayMs: 0,
       });
 
       const sk = generateSecretKey();
@@ -2238,6 +2268,7 @@ describe("OpenSearchRelay", () => {
       const relay = new OpenSearchRelay(client as unknown as Client, {
         indexName: "test-index",
         bulkMaxSize: 1,
+        refreshDelayMs: 0,
       });
 
       const sk = generateSecretKey();
@@ -2266,6 +2297,7 @@ describe("OpenSearchRelay", () => {
       const relay = new OpenSearchRelay(client as unknown as Client, {
         indexName: "test-index",
         bulkMaxSize: 1,
+        refreshDelayMs: 0,
       });
 
       const sk = generateSecretKey();
@@ -2313,6 +2345,7 @@ describe("OpenSearchRelay", () => {
       const relay = new OpenSearchRelay(client as unknown as Client, {
         indexName: "test-index",
         bulkMaxSize: 1,
+        refreshDelayMs: 0,
       });
 
       const sk = generateSecretKey();
@@ -2345,6 +2378,7 @@ describe("OpenSearchRelay", () => {
       const relay = new OpenSearchRelay(client as unknown as Client, {
         indexName: "test-index",
         bulkMaxSize: 1,
+        refreshDelayMs: 0,
       });
 
       const sk1 = generateSecretKey();
@@ -2405,6 +2439,7 @@ describe("OpenSearchRelay", () => {
       const relay = new OpenSearchRelay(client as unknown as Client, {
         indexName: "test-index",
         bulkMaxSize: 1,
+        refreshDelayMs: 0,
       });
 
       const sk1 = generateSecretKey();
@@ -2461,6 +2496,7 @@ describe("OpenSearchRelay", () => {
       const relay = new OpenSearchRelay(client as unknown as Client, {
         indexName: "test-index",
         bulkMaxSize: 1,
+        refreshDelayMs: 0,
       });
 
       const sk1 = generateSecretKey();
@@ -2528,6 +2564,7 @@ describe("OpenSearchRelay", () => {
       const relay = new OpenSearchRelay(client as unknown as Client, {
         indexName: "test-index",
         bulkMaxSize: 1,
+        refreshDelayMs: 0,
       });
 
       const sk = generateSecretKey();
@@ -2575,6 +2612,7 @@ describe("OpenSearchRelay", () => {
       const relay = new OpenSearchRelay(client as unknown as Client, {
         indexName: "test-index",
         bulkMaxSize: 1,
+        refreshDelayMs: 0,
       });
 
       const sk = generateSecretKey();
@@ -2618,6 +2656,7 @@ describe("OpenSearchRelay", () => {
       const relay = new OpenSearchRelay(client as unknown as Client, {
         indexName: "test-index",
         bulkMaxSize: 1,
+        refreshDelayMs: 0,
       });
 
       const sk = generateSecretKey();
@@ -2640,6 +2679,7 @@ describe("OpenSearchRelay", () => {
       const relay = new OpenSearchRelay(client as unknown as Client, {
         indexName: "test-index",
         bulkMaxSize: 1,
+        refreshDelayMs: 0,
       });
 
       const sk1 = generateSecretKey();
@@ -2706,6 +2746,7 @@ describe("OpenSearchRelay", () => {
       const relay = new OpenSearchRelay(client as unknown as Client, {
         indexName: "test-index",
         bulkMaxSize: 1,
+        refreshDelayMs: 0,
       });
 
       const sk = generateSecretKey();
@@ -2746,6 +2787,7 @@ describe("OpenSearchRelay", () => {
       const relay = new OpenSearchRelay(client as unknown as Client, {
         indexName: "test-index",
         bulkMaxSize: 1,
+        refreshDelayMs: 0,
       });
 
       const sk1 = generateSecretKey();
@@ -2790,6 +2832,7 @@ describe("OpenSearchRelay", () => {
       const relay = new OpenSearchRelay(client as unknown as Client, {
         indexName: "test-index",
         bulkMaxSize: 1,
+        refreshDelayMs: 0,
       });
 
       const sk1 = generateSecretKey();
@@ -2825,6 +2868,7 @@ describe("OpenSearchRelay", () => {
       const relay = new OpenSearchRelay(client as unknown as Client, {
         indexName: "test-index",
         bulkMaxSize: 1,
+        refreshDelayMs: 0,
       });
 
       const sk = generateSecretKey();
@@ -2871,6 +2915,7 @@ describe("OpenSearchRelay", () => {
       const relay = new OpenSearchRelay(client as unknown as Client, {
         indexName: "test-index",
         bulkMaxSize: 1,
+        refreshDelayMs: 0,
       });
 
       const sk = generateSecretKey();
@@ -2919,6 +2964,7 @@ describe("OpenSearchRelay", () => {
       const relay = new OpenSearchRelay(client as unknown as Client, {
         indexName: "test-index",
         bulkMaxSize: 1,
+        refreshDelayMs: 0,
       });
 
       const sk = generateSecretKey();
@@ -2964,6 +3010,7 @@ describe("OpenSearchRelay", () => {
       const relay = new OpenSearchRelay(client as unknown as Client, {
         indexName: "test-index",
         bulkMaxSize: 1,
+        refreshDelayMs: 0,
       });
 
       const sk = generateSecretKey();
@@ -3024,6 +3071,7 @@ describe("OpenSearchRelay", () => {
       const relay = new OpenSearchRelay(client as unknown as Client, {
         indexName: "test-index",
         bulkMaxSize: 1,
+        refreshDelayMs: 0,
       });
 
       const sk = generateSecretKey();
@@ -3069,6 +3117,7 @@ describe("OpenSearchRelay", () => {
       const relay = new OpenSearchRelay(client as unknown as Client, {
         indexName: "test-index",
         bulkMaxSize: 1,
+        refreshDelayMs: 0,
       });
 
       const sk = generateSecretKey();
@@ -3488,6 +3537,7 @@ describe("OpenSearchRelay", () => {
       const relay = new OpenSearchRelay(client as unknown as Client, {
         indexName: "test-index",
         bulkMaxSize: 1,
+        refreshDelayMs: 0,
       });
 
       const sk1 = generateSecretKey();
@@ -3549,6 +3599,7 @@ describe("OpenSearchRelay", () => {
       const relay = new OpenSearchRelay(client as unknown as Client, {
         indexName: "test-index",
         bulkMaxSize: 1,
+        refreshDelayMs: 0,
       });
 
       const sk1 = generateSecretKey();
@@ -3609,6 +3660,7 @@ describe("OpenSearchRelay", () => {
       const relay = new OpenSearchRelay(client as unknown as Client, {
         indexName: "test-index",
         bulkMaxSize: 1,
+        refreshDelayMs: 0,
       });
 
       const sk1 = generateSecretKey();
@@ -3685,6 +3737,7 @@ describe("OpenSearchRelay", () => {
       const relay = new OpenSearchRelay(client as unknown as Client, {
         indexName: "test-index",
         bulkMaxSize: 1,
+        refreshDelayMs: 0,
       });
 
       const sk1 = generateSecretKey();
@@ -3768,6 +3821,7 @@ describe("OpenSearchRelay", () => {
       const relay = new OpenSearchRelay(client as unknown as Client, {
         indexName: "test-index",
         bulkMaxSize: 1,
+        refreshDelayMs: 0,
       });
 
       const sk1 = generateSecretKey();
@@ -3851,6 +3905,7 @@ describe("OpenSearchRelay", () => {
       const relay = new OpenSearchRelay(client as unknown as Client, {
         indexName: "test-index",
         bulkMaxSize: 1,
+        refreshDelayMs: 0,
       });
 
       const sk = generateSecretKey();
@@ -3878,6 +3933,7 @@ describe("OpenSearchRelay", () => {
       const relay = new OpenSearchRelay(client as unknown as Client, {
         indexName: "test-index",
         bulkMaxSize: 1,
+        refreshDelayMs: 0,
       });
 
       const sk = generateSecretKey();
@@ -3923,6 +3979,7 @@ describe("OpenSearchRelay", () => {
       const relay = new OpenSearchRelay(client as unknown as Client, {
         indexName: "test-index",
         bulkMaxSize: 1,
+        refreshDelayMs: 0,
       });
 
       const sk1 = generateSecretKey();
@@ -3981,6 +4038,7 @@ describe("OpenSearchRelay", () => {
       const relay = new OpenSearchRelay(client as unknown as Client, {
         indexName: "test-index",
         bulkMaxSize: 1,
+        refreshDelayMs: 0,
       });
 
       const sk1 = generateSecretKey();
@@ -4031,6 +4089,7 @@ describe("OpenSearchRelay", () => {
       const relay = new OpenSearchRelay(client as unknown as Client, {
         indexName: "test-index",
         bulkMaxSize: 1,
+        refreshDelayMs: 0,
       });
 
       const sk = generateSecretKey();
@@ -4102,6 +4161,7 @@ describe("OpenSearchRelay", () => {
       const relay = new OpenSearchRelay(client as unknown as Client, {
         indexName: "test-index",
         bulkMaxSize: 1,
+        refreshDelayMs: 0,
       });
 
       const sk = generateSecretKey();
@@ -4378,6 +4438,7 @@ describe("OpenSearchRelay", () => {
       const relay = new OpenSearchRelay(client as unknown as Client, {
         indexName: "test-index",
         bulkMaxSize: 1,
+        refreshDelayMs: 0,
       });
 
       const sk = generateSecretKey();
@@ -4411,6 +4472,7 @@ describe("OpenSearchRelay", () => {
       const relay = new OpenSearchRelay(client as unknown as Client, {
         indexName: "test-index",
         bulkMaxSize: 1,
+        refreshDelayMs: 0,
       });
 
       const sk = generateSecretKey();
@@ -4489,6 +4551,7 @@ describe("OpenSearchRelay", () => {
       const relay = new OpenSearchRelay(client as unknown as Client, {
         indexName: "test-index",
         bulkMaxSize: 1,
+        refreshDelayMs: 0,
       });
 
       const sk = generateSecretKey();
@@ -4556,6 +4619,7 @@ describe("OpenSearchRelay", () => {
       const relay = new OpenSearchRelay(client as unknown as Client, {
         indexName: "test-index",
         bulkMaxSize: 1,
+        refreshDelayMs: 0,
       });
 
       const sk = generateSecretKey();
@@ -4692,6 +4756,7 @@ describe("OpenSearchRelay", () => {
       const relay = new OpenSearchRelay(client as unknown as Client, {
         indexName: "test-index",
         bulkMaxSize: 1,
+        refreshDelayMs: 0,
       });
 
       const sk = generateSecretKey();
@@ -4721,6 +4786,7 @@ describe("OpenSearchRelay", () => {
       const relay = new OpenSearchRelay(client as unknown as Client, {
         indexName: "test-index",
         bulkMaxSize: 1,
+        refreshDelayMs: 0,
       });
 
       const sk = generateSecretKey();
@@ -4772,6 +4838,7 @@ describe("OpenSearchRelay", () => {
       const relay = new OpenSearchRelay(client as unknown as Client, {
         indexName: "test-index",
         bulkMaxSize: 1,
+        refreshDelayMs: 0,
       });
 
       const sk = generateSecretKey();
@@ -4908,6 +4975,7 @@ describe("OpenSearchRelay", () => {
       const relay = new OpenSearchRelay(client as unknown as Client, {
         indexName: "test-index",
         bulkMaxSize: 1,
+        refreshDelayMs: 0,
       });
 
       const sk = generateSecretKey();
@@ -4937,6 +5005,7 @@ describe("OpenSearchRelay", () => {
       const relay = new OpenSearchRelay(client as unknown as Client, {
         indexName: "test-index",
         bulkMaxSize: 1,
+        refreshDelayMs: 0,
       });
 
       const sk = generateSecretKey();
@@ -4989,6 +5058,7 @@ describe("OpenSearchRelay", () => {
       const relay = new OpenSearchRelay(client as unknown as Client, {
         indexName: "test-index",
         bulkMaxSize: 1,
+        refreshDelayMs: 0,
       });
 
       const sk = generateSecretKey();
@@ -5141,6 +5211,7 @@ describe("OpenSearchRelay", () => {
       const relay = new OpenSearchRelay(client as unknown as Client, {
         indexName: "test-index",
         bulkMaxSize: 1,
+        refreshDelayMs: 0,
       });
 
       const sk = generateSecretKey();
@@ -5178,6 +5249,7 @@ describe("OpenSearchRelay", () => {
       const relay = new OpenSearchRelay(client as unknown as Client, {
         indexName: "test-index",
         bulkMaxSize: 1,
+        refreshDelayMs: 0,
       });
 
       const sk = generateSecretKey();
@@ -5208,6 +5280,7 @@ describe("OpenSearchRelay", () => {
       const relay = new OpenSearchRelay(client as unknown as Client, {
         indexName: "test-index",
         bulkMaxSize: 1,
+        refreshDelayMs: 0,
       });
 
       const sk = generateSecretKey();
@@ -5241,6 +5314,7 @@ describe("OpenSearchRelay", () => {
       const relay = new OpenSearchRelay(client as unknown as Client, {
         indexName: "test-index",
         bulkMaxSize: 1,
+        refreshDelayMs: 0,
       });
 
       const sk = generateSecretKey();
@@ -5271,6 +5345,7 @@ describe("OpenSearchRelay", () => {
       const relay = new OpenSearchRelay(client as unknown as Client, {
         indexName: "test-index",
         bulkMaxSize: 1,
+        refreshDelayMs: 0,
       });
 
       const sk = generateSecretKey();
@@ -5300,6 +5375,7 @@ describe("OpenSearchRelay", () => {
       const relay = new OpenSearchRelay(client as unknown as Client, {
         indexName: "test-index",
         bulkMaxSize: 1,
+        refreshDelayMs: 0,
       });
 
       const sk = generateSecretKey();
@@ -5330,6 +5406,7 @@ describe("OpenSearchRelay", () => {
       const relay = new OpenSearchRelay(client as unknown as Client, {
         indexName: "test-index",
         bulkMaxSize: 1,
+        refreshDelayMs: 0,
       });
 
       const sk = generateSecretKey();
@@ -5375,6 +5452,7 @@ describe("OpenSearchRelay", () => {
       const relay = new OpenSearchRelay(client as unknown as Client, {
         indexName: "test-index",
         bulkMaxSize: 1,
+        refreshDelayMs: 0,
       });
 
       const sk = generateSecretKey();
@@ -5420,6 +5498,7 @@ describe("OpenSearchRelay", () => {
       const relay = new OpenSearchRelay(client as unknown as Client, {
         indexName: "test-index",
         bulkMaxSize: 1,
+        refreshDelayMs: 0,
       });
 
       const sk = generateSecretKey();
@@ -5477,6 +5556,7 @@ describe("OpenSearchRelay", () => {
       const relay = new OpenSearchRelay(client as unknown as Client, {
         indexName: "test-index",
         bulkMaxSize: 1,
+        refreshDelayMs: 0,
       });
 
       const sk = generateSecretKey();
@@ -5522,6 +5602,7 @@ describe("OpenSearchRelay", () => {
       const relay = new OpenSearchRelay(client as unknown as Client, {
         indexName: "test-index",
         bulkMaxSize: 1,
+        refreshDelayMs: 0,
       });
 
       const sk = generateSecretKey();
@@ -5777,6 +5858,7 @@ describe("OpenSearchRelay", () => {
       const relay = new OpenSearchRelay(mockClient as unknown as Client, {
         indexName: "test-index",
         bulkMaxSize: 1,
+        refreshDelayMs: 0,
       });
 
       const sk = generateSecretKey();

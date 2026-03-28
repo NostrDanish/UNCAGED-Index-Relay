@@ -179,6 +179,11 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
   /** Kinds excluded from queries that don't explicitly request them (e.g. DMs, gift wraps). */
   private authKinds: Set<number>;
 
+  /** Delay in ms before Phase 2 (replaceable slot resolution) runs, giving
+   *  the natural refresh_interval time to make just-indexed docs visible.
+   *  Set to 0 in tests where the mock client resolves synchronously. */
+  private refreshDelayMs: number;
+
   constructor(
     client: Client,
     opts?: {
@@ -193,6 +198,9 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
        *  operations (bulk indexing, updateByQuery, deleteByQuery) use this
        *  client so their connection pool cannot starve read queries. */
       writeClient?: Client;
+      /** Delay in ms before Phase 2 replaceable slot resolution. Defaults to
+       *  1000 (one refresh_interval cycle). Set to 0 in tests. */
+      refreshDelayMs?: number;
     },
   ) {
     this.client = client;
@@ -205,6 +213,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     this.historyKindsExcluded =
       opts?.historyKindsExcluded ?? new Set([30382, 30383, 30384, 30385]);
     this.authKinds = opts?.authKinds ?? new Set();
+    this.refreshDelayMs = opts?.refreshDelayMs ?? 1_000;
   }
 
   /**
@@ -1428,21 +1437,9 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
       body.push(entry.doc as unknown as Record<string, unknown>);
     }
 
-    // If the batch contains replaceable/addressable events, Phase 2 needs
-    // to search the index to find the slot winner. Force an immediate
-    // refresh so the just-indexed documents are visible to the search.
-    // Using `refresh: true` (immediate) instead of `"wait_for"` avoids
-    // blocking up to `refresh_interval` (5s) for the next scheduled
-    // refresh — the dominant source of event-loop stalls.
-    const hasReplaceable = entries.some(
-      (e) =>
-        NKinds.replaceable(e.event.kind) || NKinds.addressable(e.event.kind),
-    );
-    const refreshPolicy = hasReplaceable ? true : false;
-
     const flushEnd = opensearchFlushDurationHistogram.startTimer();
     try {
-      const response = await this.writeClient.bulk({ body, refresh: refreshPolicy });
+      const response = await this.writeClient.bulk({ body });
       flushEnd();
 
       if (response.body.errors) {
@@ -1485,9 +1482,29 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     // Fire-and-forget so it doesn't block the event loop for incoming REQs.
     // Between Phase 1 and Phase 2 completion, queries may briefly return
     // both old and new versions — Nostr clients handle duplicate events.
-    this.resolveReplaceableSlots(entries).catch((err) =>
-      console.warn("Phase 2 replaceable slot resolution failed:", err),
+    //
+    // Phase 2 needs to search for the just-indexed documents. Rather than
+    // forcing an expensive `refresh: true` on the bulk request (which holds
+    // an HTTP connection for 1-2s and causes head-of-line blocking for read
+    // queries), we wait for the next natural refresh cycle (refresh_interval
+    // defaults to 1s) before running the slot resolution search.
+    const hasReplaceable = entries.some(
+      (e) =>
+        NKinds.replaceable(e.event.kind) || NKinds.addressable(e.event.kind),
     );
+    if (hasReplaceable) {
+      if (this.refreshDelayMs > 0) {
+        setTimeout(() => {
+          this.resolveReplaceableSlots(entries).catch((err) =>
+            console.warn("Phase 2 replaceable slot resolution failed:", err),
+          );
+        }, this.refreshDelayMs);
+      } else {
+        this.resolveReplaceableSlots(entries).catch((err) =>
+          console.warn("Phase 2 replaceable slot resolution failed:", err),
+        );
+      }
+    }
   }
 
   /**
