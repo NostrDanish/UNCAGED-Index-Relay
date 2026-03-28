@@ -23,7 +23,9 @@ const config = new Config({
 // Initialize analysis worker pool (signature verification, language & sentiment detection)
 const analyzePool = new AnalyzePool();
 
-// Construct OpenSearch client (shared between relay, NIP-85, and trends).
+// Construct OpenSearch clients. Read and write operations use separate clients
+// so that long-running write operations (e.g. bulk flushes with
+// `refresh: "wait_for"`) cannot starve the connection pool used by queries.
 const opensearchClientOptions: ClientOptions = {
   node: config.opensearchNode,
 };
@@ -33,15 +35,17 @@ if (config.opensearchUsername && config.opensearchPassword) {
     password: config.opensearchPassword,
   };
 }
-const opensearchClient = new OpenSearchClient(opensearchClientOptions);
+const opensearchReadClient = new OpenSearchClient(opensearchClientOptions);
+const opensearchWriteClient = new OpenSearchClient(opensearchClientOptions);
 
 // Initialize OpenSearch relay
-const opensearchRelay = new OpenSearchRelay(opensearchClient, {
+const opensearchRelay = new OpenSearchRelay(opensearchReadClient, {
   indexName: config.opensearchIndex,
   historyEnabled: config.historyEnabled,
   historyKindsWhitelist: config.historyKindsWhitelist,
   historyKindsExcluded: config.historyKindsExcluded,
   authKinds: config.authKinds,
+  writeClient: opensearchWriteClient,
 });
 
 const relay = new Relay(opensearchRelay, {
@@ -60,7 +64,7 @@ const relay = new Relay(opensearchRelay, {
 // Initialize NIP-85 publisher.
 const signer = config.nostrSigner;
 const nip85 = new Nip85({
-  client: opensearchClient,
+  client: opensearchReadClient,
   indexName: config.opensearchIndex,
   relay: opensearchRelay,
   signer,
@@ -217,7 +221,7 @@ setInterval(async () => {
 const trendsIntervalMs = config.trendsIntervalMs;
 if (trendsIntervalMs > 0) {
   const trends = new Trends({
-    client: opensearchClient,
+    client: opensearchReadClient,
     indexName: config.opensearchIndex,
     relay: opensearchRelay,
     broadcast: (event) => relay.broadcast(event),

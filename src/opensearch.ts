@@ -96,7 +96,10 @@ interface BulkEntry {
  * Handles event storage and querying with full-text search support (NIP-50)
  */
 export class OpenSearchRelay implements NRelay, AsyncDisposable {
+  /** Client used for read operations (search, count). */
   private client: Client;
+  /** Client used for write operations (bulk, updateByQuery, deleteByQuery). Defaults to `client`. */
+  private writeClient: Client;
   private indexName: string;
 
   /** Whether to preserve historical versions of replaceable/addressable events. */
@@ -155,9 +158,14 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
       historyKindsWhitelist?: Set<number>;
       historyKindsExcluded?: Set<number>;
       authKinds?: Set<number>;
+      /** Separate client for write operations. When provided, write-heavy
+       *  operations (bulk indexing, updateByQuery, deleteByQuery) use this
+       *  client so their connection pool cannot starve read queries. */
+      writeClient?: Client;
     },
   ) {
     this.client = client;
+    this.writeClient = opts?.writeClient ?? client;
     this.indexName = opts?.indexName || "nostr-events";
     this.bulkMaxSize = opts?.bulkMaxSize ?? 100;
     this.bulkFlushMs = opts?.bulkFlushMs ?? 200;
@@ -1402,7 +1410,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
 
     const flushEnd = opensearchFlushDurationHistogram.startTimer();
     try {
-      const response = await this.client.bulk({ body, refresh: refreshPolicy });
+      const response = await this.writeClient.bulk({ body, refresh: refreshPolicy });
       flushEnd();
 
       if (response.body.errors) {
@@ -1544,14 +1552,14 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
         };
 
         if (!this.shouldPreserveHistory(slot.kind)) {
-          await this.client.deleteByQuery({
+          await this.writeClient.deleteByQuery({
             index: this.indexName,
             body: { query: loserQuery },
             refresh: false,
             conflicts: "proceed",
           });
         } else {
-          await this.client.updateByQuery({
+          await this.writeClient.updateByQuery({
             index: this.indexName,
             body: {
               query: loserQuery,
@@ -1874,7 +1882,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
       }
 
       try {
-        const response = await this.client.bulk({
+        const response = await this.writeClient.bulk({
           body,
           refresh: true, // Refresh to make deletions visible immediately
           // @ts-expect-error: signal not in types but supported by underlying HTTP client
@@ -1909,13 +1917,13 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
             must: [historyQuery, { term: { replaced: true } }],
           },
         };
-        await this.client.updateByQuery({
-          index: this.indexName,
-          body: {
-            query: wrappedQuery,
-            script: {
-              source: "ctx._source.deleted = true",
-              lang: "painless",
+        await this.writeClient.updateByQuery({
+           index: this.indexName,
+           body: {
+             query: wrappedQuery,
+             script: {
+               source: "ctx._source.deleted = true",
+               lang: "painless",
             },
           },
           refresh: true,
@@ -2032,25 +2040,25 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     try {
       // Check if index or alias already exists
       const exists =
-        (await this.client.indices.exists({ index: this.indexName })).body ||
-        (await this.client.indices.existsAlias({ name: this.indexName })).body;
+        (await this.writeClient.indices.exists({ index: this.indexName })).body ||
+        (await this.writeClient.indices.existsAlias({ name: this.indexName })).body;
 
       if (exists) {
         // Add custom analyzer settings (requires close/open).
         // This is idempotent — if the analyzer already exists, the close/open
         // is a harmless no-op that briefly pauses writes.
         try {
-          await this.client.indices.close({ index: this.indexName });
-          await this.client.indices.putSettings({
+          await this.writeClient.indices.close({ index: this.indexName });
+          await this.writeClient.indices.putSettings({
             index: this.indexName,
             body: { settings: OpenSearchRelay.ANALYZER_SETTINGS },
           });
-          await this.client.indices.open({ index: this.indexName });
+          await this.writeClient.indices.open({ index: this.indexName });
           console.log(`Updated analyzer settings for index ${this.indexName}`);
         } catch (e) {
           // Ensure the index is reopened even if putSettings fails.
           try {
-            await this.client.indices.open({ index: this.indexName });
+            await this.writeClient.indices.open({ index: this.indexName });
           } catch {
             // Already open or unrecoverable — ignore.
           }
@@ -2065,7 +2073,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
         // which requires a full reindex to resolve. Non-fatal — the relay can
         // still operate on the existing mapping.
         try {
-          await this.client.indices.putMapping({
+          await this.writeClient.indices.putMapping({
             index: this.indexName,
             body: {
               properties: OpenSearchRelay.MAPPING_PROPERTIES,
@@ -2082,7 +2090,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
       }
 
       // Create index with full settings and mappings.
-      await this.client.indices.create({
+      await this.writeClient.indices.create({
         index: this.indexName,
         body: {
           settings: {
@@ -2497,7 +2505,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     }
 
     if (body.length > 0) {
-      const updateResponse = await this.client.bulk({
+      const updateResponse = await this.writeClient.bulk({
         body,
         refresh: false,
       });
@@ -2554,11 +2562,14 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
   }
 
   /**
-   * Flush remaining events and close the OpenSearch connection.
+   * Flush remaining events and close the OpenSearch connection(s).
    */
   async close(): Promise<void> {
     await this.flush();
     await this.client.close();
+    if (this.writeClient !== this.client) {
+      await this.writeClient.close();
+    }
   }
 
   /**
