@@ -238,3 +238,14 @@ const server = serve<WebSocketData>({
 });
 
 console.log(`Nostr relay listening on ws://localhost:${server.port}`);
+
+// Graceful shutdown on SIGINT/SIGTERM — also ensures CPU profiles are written.
+function shutdown() {
+  console.log("Shutting down...");
+  server.stop();
+  bgWorker.terminate();
+  process.exit(0);
+}
+
+process.on("SIGINT", shutdown);
+process.on("SIGTERM", shutdown);
