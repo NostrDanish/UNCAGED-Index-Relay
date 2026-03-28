@@ -2257,6 +2257,8 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     }
 
     // Phase 2a: Compute follower counts for dirty kind 0 events.
+    // Yield between phases so queued REQ messages can be processed.
+    await new Promise<void>((r) => setTimeout(r, 0));
     if (dirtyKind0.length > 0) {
       const kind0Pubkeys = dirtyKind0.map((d) => d.pubkey);
 
@@ -2311,6 +2313,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
 
     // Phase 2b: Aggregate engagement referencing events (kinds 1/6/7/16/1111)
     // scoped to just the non-kind-0 dirty event IDs.
+    await new Promise<void>((r) => setTimeout(r, 0));
     if (dirtyNonKind0Ids.length > 0) {
       const engagementResponse = await this.client.search({
         index: this.indexName,
@@ -2384,6 +2387,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
       }
 
       // Phase 3: Aggregate zap amounts (kind 9735) separately.
+      await new Promise<void>((r) => setTimeout(r, 0));
       const zapResponse = await this.client.search({
         index: this.indexName,
         body: {
@@ -2435,6 +2439,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
       }
 
       // Phase 3b: Aggregate quote reposts (kind 1 events referencing via `q` tag).
+      await new Promise<void>((r) => setTimeout(r, 0));
       const quoteResponse = await this.client.search({
         index: this.indexName,
         body: {
@@ -2481,6 +2486,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
 
     // Phase 4: Bulk update the dirty events with computed scores.
     // Phase 4: Bulk update the dirty events with computed scores.
+    await new Promise<void>((r) => setTimeout(r, 0));
     const body: Array<Record<string, unknown>> = [];
 
     for (const [id, s] of scores) {
