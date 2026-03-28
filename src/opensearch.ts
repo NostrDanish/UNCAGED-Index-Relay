@@ -991,6 +991,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
           },
         },
       },
+      lane: "internal",
     });
     aggEnd();
 
@@ -1595,6 +1596,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
             size: 1,
             _source: ["id"],
           },
+          lane: "internal",
         });
         slotEnd();
 
@@ -1870,6 +1872,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
                 },
               },
             },
+            lane: "internal",
           });
           countEnd();
 

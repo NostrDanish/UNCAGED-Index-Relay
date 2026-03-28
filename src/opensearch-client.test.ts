@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { describe, it, mock } from "node:test";
-import { Client, SearchBatcher } from "./opensearch-client.ts";
+import { Client, SearchBatcher, type SearchLane } from "./opensearch-client.ts";
 
 describe("Client", () => {
   describe("msearch", () => {
@@ -405,6 +405,131 @@ describe("Client", () => {
 
         // Each sequential search is solo → uses searchDirect fast path (0 msearch).
         assert.equal(msearchCallCount, 0, "Sequential solo searches should use searchDirect");
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    });
+
+    it("should separate user and internal lanes", async () => {
+      const msearchBodies: string[] = [];
+
+      const originalFetch = globalThis.fetch;
+      globalThis.fetch = async (input: string | URL | Request, init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes("/_msearch")) {
+          msearchBodies.push(init?.body as string);
+          const bodyStr = init?.body as string;
+          const lines = bodyStr.trim().split("\n");
+          const count = lines.length / 2;
+          return new Response(
+            JSON.stringify({
+              responses: Array.from({ length: count }, () => ({
+                status: 200,
+                hits: { total: { value: 0 }, hits: [] },
+              })),
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          );
+        }
+        if (url.includes("/_search")) {
+          return new Response(
+            JSON.stringify({ hits: { total: { value: 0 }, hits: [] } }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          );
+        }
+        return new Response("Not Found", { status: 404 });
+      };
+
+      try {
+        const client = new Client({
+          node: "http://localhost:9200",
+          batchSearchMs: 0,
+        });
+
+        // Fire user and internal queries concurrently — they should go to different lanes.
+        const [r1, r2, r3, r4] = await Promise.all([
+          client.search({ index: "test", body: { query: { match_all: {} }, size: 10 } }),
+          client.search({ index: "test", body: { query: { match_all: {} }, size: 20 }, lane: "user" }),
+          client.search({ index: "test", body: { query: { match_all: {} }, size: 1 }, lane: "internal" }),
+          client.search({ index: "test", body: { query: { match_all: {} }, size: 0 }, lane: "internal" }),
+        ]);
+
+        // Should have 2 msearch calls (one per lane).
+        assert.equal(msearchBodies.length, 2, "Expected 2 msearch calls (one per lane)");
+
+        // One batch should have 2 queries (user lane), other should have 2 (internal lane).
+        const batchSizes = msearchBodies.map((b) => b.trim().split("\n").length / 2).sort();
+        assert.deepEqual(batchSizes, [2, 2], "Expected two batches of 2 queries each");
+
+        // All results should be valid.
+        assert.ok(r1.body);
+        assert.ok(r2.body);
+        assert.ok(r3.body);
+        assert.ok(r4.body);
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    });
+
+    it("should flush immediately when batch size cap is reached", async () => {
+      const msearchTimings: number[] = [];
+      let callCount = 0;
+
+      const originalFetch = globalThis.fetch;
+      globalThis.fetch = async (input: string | URL | Request, init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes("/_msearch")) {
+          callCount++;
+          msearchTimings.push(Date.now());
+          const bodyStr = init?.body as string;
+          const lines = bodyStr.trim().split("\n");
+          const count = lines.length / 2;
+          return new Response(
+            JSON.stringify({
+              responses: Array.from({ length: count }, () => ({
+                status: 200,
+                hits: { total: { value: 0 }, hits: [] },
+              })),
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          );
+        }
+        if (url.includes("/_search")) {
+          return new Response(
+            JSON.stringify({ hits: { total: { value: 0 }, hits: [] } }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          );
+        }
+        return new Response("Not Found", { status: 404 });
+      };
+
+      try {
+        // maxBatchSize of 3 — batches should flush at 3 queries.
+        const client = new Client({
+          node: "http://localhost:9200",
+          batchSearchMs: 5000, // Long delay to prove cap triggers first.
+          maxBatchSize: 3,
+        });
+
+        // Fire 5 queries concurrently — should split into batches of 3 + 2.
+        const results = await Promise.all(
+          Array.from({ length: 5 }, (_, i) =>
+            client.search({
+              index: "test",
+              body: { query: { term: { kind: i } } },
+            }),
+          ),
+        );
+
+        // All results should be valid.
+        for (const r of results) {
+          assert.ok(r.body);
+        }
+
+        // Should have 2 msearch calls (batch of 3 + batch of 2),
+        // or 1 msearch + 1 searchDirect if the second batch is size 1.
+        // With 5 queries: first 3 trigger immediate flush, remaining 2 flush on timer or cap.
+        assert.ok(callCount >= 2, `Expected at least 2 calls, got ${callCount}`);
       } finally {
         globalThis.fetch = originalFetch;
       }

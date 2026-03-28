@@ -30,6 +30,13 @@ export interface ClientOptions {
    * negative values disable batching.
    */
   batchSearchMs?: number;
+  /**
+   * Maximum number of queries in a single msearch batch.  When the queue
+   * reaches this size, the batch is flushed immediately without waiting for
+   * the timer.  This prevents "monster batches" (55+ queries) that cause
+   * p95 latency spikes.  Defaults to 20.
+   */
+  maxBatchSize?: number;
 }
 
 /** Thin wrapper so callers can access `response.body` like opensearch-js. */
@@ -98,23 +105,17 @@ interface PendingSearch {
 }
 
 /**
- * Queries requesting up to this many results are considered "light" and are
- * batched separately from heavier queries.  This prevents a small `limit:1`
- * REQ from being held up by a `limit:5000` score-recomputation search that
- * shares the same `_msearch` round-trip.
+ * Lane hint passed to `search()` to separate user-facing queries from
+ * internal infrastructure queries (slot resolution, aggregations, etc.).
+ * Queries in different lanes are batched independently so slow internal
+ * work never blocks user-facing REQs.
  */
-const LIGHT_SIZE_THRESHOLD = 50;
+export type SearchLane = "user" | "internal";
 
-/** Extract the `size` field from a search body, defaulting to 10 (OpenSearch default). */
-function getBodySize(body: unknown): number {
-  if (body !== null && typeof body === "object" && "size" in body) {
-    const s = (body as Record<string, unknown>).size;
-    if (typeof s === "number") return s;
-  }
-  return 10; // OpenSearch default
-}
+/** Default maximum batch size — caps how many queries go into a single msearch. */
+const DEFAULT_MAX_BATCH_SIZE = 20;
 
-/** A single flush lane (light or heavy). */
+/** A single flush lane with a maximum batch size cap. */
 class BatchLane {
   queue: PendingSearch[] = [];
   timer: ReturnType<typeof setTimeout> | null = null;
@@ -123,10 +124,22 @@ class BatchLane {
     readonly name: string,
     private flushFn: (batch: PendingSearch[], lane: string) => Promise<void>,
     private delayMs: number,
+    private maxBatchSize: number,
   ) {}
 
   push(item: PendingSearch): void {
     this.queue.push(item);
+
+    // Flush immediately when we hit the batch size cap.
+    if (this.queue.length >= this.maxBatchSize) {
+      if (this.timer) {
+        clearTimeout(this.timer);
+        this.timer = null;
+      }
+      this.flush();
+      return;
+    }
+
     if (!this.timer) {
       this.timer = setTimeout(() => this.flush(), this.delayMs);
     }
@@ -150,34 +163,41 @@ class BatchLane {
  * By combining N concurrent searches into one HTTP round-trip we reduce
  * connection pressure by ~N×.
  *
- * Queries are split into two lanes — light (size ≤ 50) and heavy (size > 50)
- * — so that small user-facing REQs are never blocked by large background
- * queries sharing the same `_msearch` response.
+ * Queries are split into two lanes — **user** (default) and **internal** —
+ * so that user-facing REQs are never blocked by slow internal queries
+ * (slot resolution, aggregations) sharing the same `_msearch` response.
+ *
+ * Each lane has a maximum batch size cap (default 20) to prevent "monster
+ * batches" (55+ queries) that cause p95 latency spikes.  When the cap is
+ * reached the batch flushes immediately without waiting for the timer.
  */
 export class SearchBatcher {
-  private lightLane: BatchLane;
-  private heavyLane: BatchLane;
+  private userLane: BatchLane;
+  private internalLane: BatchLane;
 
   constructor(
     private client: Client,
     /** Max ms to wait before flushing. 0 = next microtask. */
     delayMs: number = 0,
+    /** Max queries per msearch batch. Defaults to 20. */
+    maxBatchSize: number = DEFAULT_MAX_BATCH_SIZE,
   ) {
     const flush = (batch: PendingSearch[], lane: string) => this.flushBatch(batch, lane);
-    this.lightLane = new BatchLane("light", flush, delayMs);
-    this.heavyLane = new BatchLane("heavy", flush, delayMs);
+    this.userLane = new BatchLane("user", flush, delayMs, maxBatchSize);
+    this.internalLane = new BatchLane("internal", flush, delayMs, maxBatchSize);
   }
 
   /** Enqueue a search and return a Promise for its result. */
   search(params: {
     index: string;
     body: unknown;
+    lane?: SearchLane;
   }): Promise<ApiResponse<Record<string, unknown>>> {
     return new Promise<ApiResponse<Record<string, unknown>>>((resolve, reject) => {
       const item: PendingSearch = { index: params.index, body: params.body, resolve, reject };
-      const lane = getBodySize(params.body) <= LIGHT_SIZE_THRESHOLD
-        ? this.lightLane
-        : this.heavyLane;
+      const lane = params.lane === "internal"
+        ? this.internalLane
+        : this.userLane;
       lane.push(item);
     });
   }
@@ -258,7 +278,11 @@ export class Client {
 
     // Enable search batching when configured.
     if (opts?.batchSearchMs !== undefined && opts.batchSearchMs >= 0) {
-      this.batcher = new SearchBatcher(this, opts.batchSearchMs);
+      this.batcher = new SearchBatcher(
+        this,
+        opts.batchSearchMs,
+        opts?.maxBatchSize ?? DEFAULT_MAX_BATCH_SIZE,
+      );
     }
   }
 
@@ -309,11 +333,14 @@ export class Client {
    * POST /{index}/_search
    *
    * When batching is enabled, concurrent calls are transparently combined
-   * into a single `_msearch` request.
+   * into a single `_msearch` request.  Pass `lane: "internal"` for
+   * infrastructure queries (slot resolution, aggregations) so they don't
+   * block user-facing REQs.
    */
   async search(params: {
     index: string;
     body: unknown;
+    lane?: SearchLane;
   }): Promise<ApiResponse<Record<string, unknown>>> {
     if (this.batcher) {
       return this.batcher.search(params);

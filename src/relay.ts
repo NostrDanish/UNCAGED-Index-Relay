@@ -258,21 +258,38 @@ export class Relay {
   }
 
   /**
-   * Async drain loop: processes one broadcast per event-loop tick.
-   * Between each broadcast, a `setTimeout(0)` yield allows pending REQs
-   * and other I/O callbacks to execute, eliminating the stall where
-   * ~100 broadcasts would block the event loop in a tight loop.
+   * Async drain loop: processes up to a budget of broadcasts per event-loop
+   * tick, then yields with `setTimeout(0)` so pending REQs and other I/O
+   * callbacks can execute.
+   *
+   * The budget is time-based: drain events until 5ms have elapsed in this
+   * tick, then yield.  This balances throughput (draining many events when
+   * they're cheap) against responsiveness (yielding before REQs starve).
    */
   private drainBroadcasts(): void {
-    const event = this.broadcastQueue.shift();
-    if (!event) {
+    const BUDGET_MS = 5;
+    const start = performance.now();
+    let count = 0;
+
+    while (this.broadcastQueue.length > 0) {
+      const event = this.broadcastQueue.shift()!;
+      this.broadcastOne(event);
+      count++;
+
+      // Check budget every 8 events to avoid calling performance.now() too often.
+      if (count % 8 === 0 && performance.now() - start >= BUDGET_MS) {
+        break;
+      }
+    }
+
+    if (this.broadcastQueue.length === 0) {
       this.drainingBroadcasts = false;
       relayBroadcastQueueGauge.set(0);
       return;
     }
+
     relayBroadcastQueueGauge.set(this.broadcastQueue.length);
-    this.broadcastOne(event);
-    // Yield before processing the next broadcast
+    // Yield before processing the next batch
     setTimeout(() => this.drainBroadcasts(), 0);
   }
 
