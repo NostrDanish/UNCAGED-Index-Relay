@@ -92,6 +92,57 @@ Always use Node.js builtin modules for better portability and compatibility:
 This approach ensures most code remains portable while taking advantage of Bun's
 excellent WebSocket performance.
 
+## CPU Profiling
+
+Bun supports built-in CPU profiling with markdown output (ideal for LLM analysis).
+
+### Local profiling
+
+```bash
+bun --cpu-prof --cpu-prof-md --cpu-prof-dir=/tmp/bun-profiles --cpu-prof-interval=1000 src/server.ts
+# Generate load, then stop with Ctrl+C (SIGINT)
+# Profile is written to /tmp/bun-profiles/*.md on clean exit
+```
+
+The `--cpu-prof-interval` flag sets the sampling interval in microseconds (default 1000 = 1ms).
+Use `100` for higher resolution local profiles.
+
+### Production profiling
+
+Create a systemd override to add profiling flags:
+
+```bash
+# On the server:
+sudo mkdir -p /etc/systemd/system/ditto-relay.service.d
+sudo tee /etc/systemd/system/ditto-relay.service.d/cpu-profile.conf << 'EOF'
+[Service]
+ExecStart=
+ExecStart=/home/ditto-relay/.bun/bin/bun --cpu-prof --cpu-prof-md --cpu-prof-dir=/opt/ditto-relay --cpu-prof-interval=1000 src/server.ts
+EOF
+sudo systemctl daemon-reload
+sudo systemctl restart ditto-relay
+```
+
+Let the relay run under real traffic for 30-60 seconds, then stop it:
+
+```bash
+sudo systemctl stop ditto-relay
+# Profile written to /opt/ditto-relay/CPU.*.md
+```
+
+Clean up when done:
+
+```bash
+sudo rm /etc/systemd/system/ditto-relay.service.d/cpu-profile.conf
+sudo systemctl daemon-reload
+sudo systemctl start ditto-relay
+```
+
+**Important:** The profile is only written when `process.exit()` is called. The
+server handles SIGINT/SIGTERM in `src/server.ts` to ensure a clean shutdown.
+The `--cpu-prof-dir` must be writable by the service user (`ReadWritePaths` in
+the systemd unit restricts this to `/opt/ditto-relay`).
+
 ## Verifying Your Changes
 
 After you have made changes, test your code with Bun:
