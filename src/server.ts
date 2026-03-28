@@ -9,10 +9,8 @@ import { AnalyzePool } from "./analyze-pool.ts";
 import { Config } from "./config.ts";
 import { renderLandingPage } from "./landing-page.ts";
 import { register } from "./metrics.ts";
-import { Nip85 } from "./nip85.ts";
 import { OpenSearchRelay } from "./opensearch.ts";
 import { Relay, type WebSocketData } from "./relay.ts";
-import { Trends } from "./trends.ts";
 
 const config = new Config({
   get(key) {
@@ -61,19 +59,63 @@ const relay = new Relay(opensearchRelay, {
   },
 });
 
-// Initialize NIP-85 publisher.
-const signer = config.nostrSigner;
-const nip85 = new Nip85({
-  client: opensearchReadClient,
-  indexName: config.opensearchIndex,
-  relay: opensearchRelay,
-  signer,
-  broadcast: (event) => relay.broadcast(event),
-});
+// ---------------------------------------------------------------------------
+// Background worker — score recomputation, NIP-85, and trends run off-thread
+// so they don't block the WebSocket event loop.
+// ---------------------------------------------------------------------------
+const bgWorker = new Worker(
+  new URL("background-worker.ts", import.meta.url).href,
+  { smol: true },
+);
 
-// Wire up dirty tracking callbacks for NIP-85 kinds 30384 and 30385.
-opensearchRelay.onDirtyAddrs = (addrs) => nip85.addDirtyAddrs(addrs);
-opensearchRelay.onDirtyIdentifiers = (ids) => nip85.addDirtyIdentifiers(ids);
+bgWorker.onmessage = (event: MessageEvent) => {
+  const msg = event.data;
+  if (msg.type === "broadcast") {
+    relay.broadcast(msg.event);
+  }
+};
+
+bgWorker.onerror = (error) => {
+  console.error("Background worker error:", error);
+};
+
+// Accumulate dirty addrs/identifiers from flush callbacks. These are drained
+// and forwarded to the worker alongside the dirty IDs/pubkeys.
+const pendingDirtyAddrs = new Set<string>();
+const pendingDirtyIdentifiers = new Set<string>();
+opensearchRelay.onDirtyAddrs = (addrs) => {
+  for (const addr of addrs) pendingDirtyAddrs.add(addr);
+};
+opensearchRelay.onDirtyIdentifiers = (ids) => {
+  for (const id of ids) pendingDirtyIdentifiers.add(id);
+};
+
+// Forward dirty state from the main thread to the background worker every 2s.
+// This is lightweight — just draining Sets and posting arrays via postMessage.
+setInterval(() => {
+  const dirty = opensearchRelay.drainDirty();
+  const addrs = [...pendingDirtyAddrs];
+  pendingDirtyAddrs.clear();
+  const identifiers = [...pendingDirtyIdentifiers];
+  pendingDirtyIdentifiers.clear();
+
+  if (
+    dirty.ids.length === 0 &&
+    dirty.pubkeys.length === 0 &&
+    addrs.length === 0 &&
+    identifiers.length === 0
+  ) {
+    return;
+  }
+
+  bgWorker.postMessage({
+    type: "dirty",
+    ids: dirty.ids,
+    pubkeys: dirty.pubkeys,
+    addrs,
+    identifiers,
+  });
+}, 2_000);
 
 // Initialize index on startup
 try {
@@ -193,70 +235,3 @@ const server = serve<WebSocketData>({
 });
 
 console.log(`Nostr relay listening on ws://localhost:${server.port}`);
-
-// ---------------------------------------------------------------------------
-// Background jobs
-// ---------------------------------------------------------------------------
-
-// Recompute engagement scores for dirty events and publish NIP-85 assertions.
-// Runs every 5s; effectively no-ops when no dirty events remain.
-const SCORE_RECOMPUTE_INTERVAL_MS = 5_000;
-setInterval(async () => {
-  try {
-    const result = await opensearchRelay.recomputeScores();
-    if (result.count > 0) {
-      await Promise.all([
-        nip85.publishUserStats(result.userScores),
-        nip85.publishEventStats(result.eventScores),
-      ]);
-    }
-    await nip85.flushAddrStats();
-    await nip85.flushIdentifierStats();
-  } catch (err) {
-    console.error("Score recomputation / NIP-85 failed:", err);
-  }
-}, SCORE_RECOMPUTE_INTERVAL_MS);
-
-// Periodically compute and publish trending events (kind 1985).
-const trendsIntervalMs = config.trendsIntervalMs;
-if (trendsIntervalMs > 0) {
-  const trends = new Trends({
-    client: opensearchReadClient,
-    indexName: config.opensearchIndex,
-    relay: opensearchRelay,
-    broadcast: (event) => relay.broadcast(event),
-  });
-  const relayUrl = config.relayUrl;
-  const preferredLanguages = config.preferredLanguages;
-
-  const updateAllTrends = async () => {
-    console.log("Updating trends...");
-    await trends.updateTrendingHashtags(signer);
-    await trends.updateTrendingLinks(signer);
-    await trends.updateTrendingPubkeys(signer, relayUrl);
-    await trends.updateTrendingEvents(signer, relayUrl);
-    await trends.updateTrendingZappedEvents(signer, relayUrl);
-    if (preferredLanguages.length > 0) {
-      await trends.updateTrendingEventsByLanguage(
-        signer,
-        relayUrl,
-        preferredLanguages,
-      );
-    }
-    console.log("Trends updated.");
-  };
-
-  setInterval(() => {
-    updateAllTrends().catch((err) =>
-      console.error("Trends update failed:", err),
-    );
-  }, trendsIntervalMs);
-
-  const langInfo =
-    preferredLanguages.length > 0
-      ? ` + languages: ${preferredLanguages.join(", ")}`
-      : "";
-  console.log(
-    `Trends scheduling enabled (every ${(trendsIntervalMs / 60_000).toFixed(0)} min${langInfo})`,
-  );
-}

@@ -140,6 +140,19 @@ export class Nip85 {
   }
 
   /**
+   * Drain the dirty addr and identifier sets and return their contents.
+   * Used by the main thread to collect dirty state after flush and forward
+   * it to the background worker.
+   */
+  drainDirty(): { addrs: string[]; identifiers: string[] } {
+    const addrs = [...this.dirtyAddrs];
+    this.dirtyAddrs.clear();
+    const identifiers = [...this.dirtyIdentifiers];
+    this.dirtyIdentifiers.clear();
+    return { addrs, identifiers };
+  }
+
+  /**
    * Accept dirty addressable event addresses for later stats computation.
    * Called by the {@link OpenSearchRelay.onDirtyAddrs} callback.
    */
