@@ -2,6 +2,9 @@
 /// Handles signature verification (via nostr-wasm), search text extraction,
 /// language detection (tinyld), sentiment analysis, and media detection.
 /// Short-circuits if verification fails.
+///
+/// Receives batches of events (NostrEvent[]) and responds with batches of
+/// results to amortize postMessage structured-clone overhead.
 
 declare var self: Worker;
 
@@ -83,8 +86,10 @@ function detectEventSentiment(
   return "neutral";
 }
 
-self.onmessage = (event: MessageEvent<NostrEvent>) => {
-  const nostrEvent = event.data;
+/** Analyze a single event and return the result with its correlation id. */
+function analyzeOne(
+  nostrEvent: NostrEvent,
+): { id: string } & AnalyzeResult {
   const id = `${nostrEvent.id}:${nostrEvent.sig}`;
 
   // Step 1: Verify signature
@@ -98,8 +103,7 @@ self.onmessage = (event: MessageEvent<NostrEvent>) => {
 
   // Short-circuit if verification failed — don't waste time on analysis
   if (!verified) {
-    postMessage({ id, verified } satisfies { id: string } & AnalyzeResult);
-    return;
+    return { id, verified };
   }
 
   // Step 2: Build search text (used by language/sentiment detection below)
@@ -110,7 +114,7 @@ self.onmessage = (event: MessageEvent<NostrEvent>) => {
   const sentiment = detectEventSentiment(nostrEvent, searchText);
   const { media, video } = detectMedia(nostrEvent);
 
-  postMessage({
+  return {
     id,
     verified,
     ...(searchText && { search_text: searchText }),
@@ -118,5 +122,11 @@ self.onmessage = (event: MessageEvent<NostrEvent>) => {
     ...(sentiment && { sentiment }),
     ...(media !== undefined && { media }),
     ...(video !== undefined && { video }),
-  } satisfies { id: string } & AnalyzeResult);
+  };
+}
+
+self.onmessage = (event: MessageEvent<NostrEvent[]>) => {
+  const batch = event.data;
+  const results = batch.map(analyzeOne);
+  postMessage(results);
 };
