@@ -1481,20 +1481,22 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
       }
     }
 
-    // --- Phase 2: For replaceable/addressable events, mark older versions
-    // of the same slot as `replaced: true` via updateByQuery.
-    //
-    // Each unique slot requires 1 search + 1 updateByQuery round-trip.
-    // For normal operation this is fine, but bulk imports touching many
-    // replaceable slots (e.g. a kind 3 contact-list storm) may benefit
-    // from batching via msearch in the future.
-    //
-    // Between Phase 1 and Phase 2 completion, queries for a replaceable
-    // slot may briefly return both old and new versions with
-    // `replaced: false`. This window is short and Nostr clients are
-    // expected to handle duplicate events.
-    //
-    // Collect unique slots from the batch.
+    // --- Phase 2: Mark older replaceable/addressable versions as replaced.
+    // Fire-and-forget so it doesn't block the event loop for incoming REQs.
+    // Between Phase 1 and Phase 2 completion, queries may briefly return
+    // both old and new versions — Nostr clients handle duplicate events.
+    this.resolveReplaceableSlots(entries).catch((err) =>
+      console.warn("Phase 2 replaceable slot resolution failed:", err),
+    );
+  }
+
+  /**
+   * Phase 2 of flush: for replaceable/addressable events, find the slot
+   * winner and mark all losers as `replaced: true` (or delete them for
+   * excluded kinds).  Runs asynchronously so it doesn't block the main
+   * event loop.
+   */
+  private async resolveReplaceableSlots(entries: BulkEntry[]): Promise<void> {
     const slots = new Map<
       string,
       {
