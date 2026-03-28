@@ -11,6 +11,11 @@
  * call sites require zero changes.
  */
 
+import {
+  opensearchMsearchBatchSizeHistogram,
+  opensearchMsearchDurationHistogram,
+} from "./metrics.ts";
+
 /** Options accepted by the client constructor. */
 export interface ClientOptions {
   /** Base URL of the OpenSearch node, e.g. `http://localhost:9200`. */
@@ -115,7 +120,8 @@ class BatchLane {
   timer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(
-    private flushFn: (batch: PendingSearch[]) => Promise<void>,
+    readonly name: string,
+    private flushFn: (batch: PendingSearch[], lane: string) => Promise<void>,
     private delayMs: number,
   ) {}
 
@@ -131,7 +137,7 @@ class BatchLane {
     const batch = this.queue;
     this.queue = [];
     if (batch.length > 0) {
-      this.flushFn(batch);
+      this.flushFn(batch, this.name);
     }
   }
 }
@@ -157,9 +163,9 @@ export class SearchBatcher {
     /** Max ms to wait before flushing. 0 = next microtask. */
     delayMs: number = 0,
   ) {
-    const flush = (batch: PendingSearch[]) => this.flushBatch(batch);
-    this.lightLane = new BatchLane(flush, delayMs);
-    this.heavyLane = new BatchLane(flush, delayMs);
+    const flush = (batch: PendingSearch[], lane: string) => this.flushBatch(batch, lane);
+    this.lightLane = new BatchLane("light", flush, delayMs);
+    this.heavyLane = new BatchLane("heavy", flush, delayMs);
   }
 
   /** Enqueue a search and return a Promise for its result. */
@@ -177,26 +183,33 @@ export class SearchBatcher {
   }
 
   /** Flush a batch of searches as a single _msearch call. */
-  private async flushBatch(batch: PendingSearch[]): Promise<void> {
+  private async flushBatch(batch: PendingSearch[], lane: string): Promise<void> {
+    opensearchMsearchBatchSizeHistogram.observe({ lane }, batch.length);
+
     // Single-query fast path: skip msearch overhead.
     if (batch.length === 1) {
       const item = batch[0];
+      const end = opensearchMsearchDurationHistogram.startTimer({ lane });
       try {
         const result = await this.client.searchDirect({
           index: item.index,
           body: item.body,
         });
+        end();
         item.resolve(result);
       } catch (err) {
+        end();
         item.reject(err);
       }
       return;
     }
 
+    const end = opensearchMsearchDurationHistogram.startTimer({ lane });
     try {
       const result = await this.client.msearch(
         batch.map((item) => ({ index: item.index, body: item.body })),
       );
+      end();
       const responses = result.body.responses;
 
       for (let i = 0; i < batch.length; i++) {
@@ -214,6 +227,7 @@ export class SearchBatcher {
         item.resolve({ body: resp as Record<string, unknown> });
       }
     } catch (err) {
+      end();
       // Whole msearch failed — reject all pending.
       for (const item of batch) {
         item.reject(err);

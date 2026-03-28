@@ -8,6 +8,7 @@ import { matchFilter, verifyEvent } from "nostr-tools";
 
 import type { AnalyzeResult } from "./analyze-pool.ts";
 import {
+  relayBroadcastQueueGauge,
   relayConnectionsGauge,
   relayEventsCounter,
   relayMessagesCounter,
@@ -266,8 +267,10 @@ export class Relay {
     const event = this.broadcastQueue.shift();
     if (!event) {
       this.drainingBroadcasts = false;
+      relayBroadcastQueueGauge.set(0);
       return;
     }
+    relayBroadcastQueueGauge.set(this.broadcastQueue.length);
     this.broadcastOne(event);
     // Yield before processing the next broadcast
     setTimeout(() => this.drainBroadcasts(), 0);

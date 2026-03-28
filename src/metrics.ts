@@ -274,16 +274,18 @@ export const opensearchEventsCounter = new Counter({
   labelNames: ["kind"] as const,
 });
 
-/** Total OpenSearch queries executed. */
+/** Total OpenSearch queries executed, labeled by type (req, sort, count, slot_resolution, aggregation). */
 export const opensearchQueriesCounter = new Counter({
   name: "ditto_opensearch_queries_total",
   help: "Total OpenSearch queries executed",
+  labelNames: ["type"] as const,
 });
 
-/** Duration of OpenSearch queries in seconds. */
+/** Duration of OpenSearch queries in seconds, labeled by type. */
 export const opensearchQueryDurationHistogram = new Histogram({
   name: "ditto_opensearch_query_duration_seconds",
   help: "Duration of OpenSearch queries in seconds",
+  labelNames: ["type"] as const,
   buckets: [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5],
 });
 
@@ -298,6 +300,32 @@ export const opensearchFlushDurationHistogram = new Histogram({
   name: "ditto_opensearch_flush_duration_seconds",
   help: "Duration of OpenSearch bulk flush operations in seconds",
   buckets: [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5],
+});
+
+/** Number of queries per _msearch batch, labeled by lane (light, heavy). */
+export const opensearchMsearchBatchSizeHistogram = new Histogram({
+  name: "ditto_opensearch_msearch_batch_size",
+  help: "Number of queries per msearch batch",
+  labelNames: ["lane"] as const,
+  buckets: [1, 2, 3, 5, 8, 13, 21, 34, 55],
+});
+
+/** Duration of _msearch HTTP calls in seconds, labeled by lane (light, heavy). */
+export const opensearchMsearchDurationHistogram = new Histogram({
+  name: "ditto_opensearch_msearch_duration_seconds",
+  help: "Duration of msearch HTTP calls in seconds",
+  labelNames: ["lane"] as const,
+  buckets: [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5],
+});
+
+// ---------------------------------------------------------------------------
+// Relay broadcast metrics
+// ---------------------------------------------------------------------------
+
+/** Current size of the broadcast queue. */
+export const relayBroadcastQueueGauge = new Gauge({
+  name: "ditto_relay_broadcast_queue_size",
+  help: "Current size of the relay broadcast queue",
 });
 
 // ---------------------------------------------------------------------------
