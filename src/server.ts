@@ -33,7 +33,10 @@ if (config.opensearchUsername && config.opensearchPassword) {
     password: config.opensearchPassword,
   };
 }
-const opensearchReadClient = new OpenSearchClient(opensearchClientOptions);
+const opensearchReadClient = new OpenSearchClient({
+  ...opensearchClientOptions,
+  batchSearchMs: 0, // Batch concurrent search() calls into _msearch on next microtask.
+});
 const opensearchWriteClient = new OpenSearchClient(opensearchClientOptions);
 
 // Initialize OpenSearch relay
