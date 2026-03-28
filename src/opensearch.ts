@@ -2128,6 +2128,8 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
         index: this.indexName,
         body: {
           settings: {
+            "sort.field": "created_at",
+            "sort.order": "desc",
             number_of_shards: 3,
             number_of_replicas: 1,
             "index.max_result_window": 100000,

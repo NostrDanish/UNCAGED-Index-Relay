@@ -109,6 +109,8 @@ async function main() {
         index: newIndex,
         body: {
           settings: {
+            "sort.field": "created_at",
+            "sort.order": "desc",
             number_of_shards: 3,
             number_of_replicas: 0, // No replicas during reindex for speed
             "index.max_result_window": 100000,
