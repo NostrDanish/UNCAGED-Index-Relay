@@ -1398,15 +1398,16 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     }
 
     // If the batch contains replaceable/addressable events, Phase 2 needs
-    // to search the index to find the slot winner. Use `refresh: "wait_for"`
-    // so the just-indexed documents are visible to the search. Without this,
-    // the default ~1s refresh interval can cause Phase 2 to miss the new
-    // events, leaving stale duplicates with `replaced: false`.
+    // to search the index to find the slot winner. Force an immediate
+    // refresh so the just-indexed documents are visible to the search.
+    // Using `refresh: true` (immediate) instead of `"wait_for"` avoids
+    // blocking up to `refresh_interval` (5s) for the next scheduled
+    // refresh — the dominant source of event-loop stalls.
     const hasReplaceable = entries.some(
       (e) =>
         NKinds.replaceable(e.event.kind) || NKinds.addressable(e.event.kind),
     );
-    const refreshPolicy = hasReplaceable ? ("wait_for" as const) : false;
+    const refreshPolicy = hasReplaceable ? true : false;
 
     const flushEnd = opensearchFlushDurationHistogram.startTimer();
     try {
