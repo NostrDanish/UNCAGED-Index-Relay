@@ -315,11 +315,6 @@ export class Relay {
     // Outer map uses ws reference identity, inner set is subscriptionId strings.
     const sent = new Map<ServerWebSocket<WebSocketData>, Set<string>>();
 
-    // Pre-compute the clamped `until` once per broadcast instead of once per
-    // subscriber.  clampUntil() was creating a new spread object for every
-    // check, which generates heavy GC pressure with hundreds of subscribers.
-    const broadcastUntil = Math.floor(Date.now() / 1000) + TIME_FUZZ;
-
     const check = (entry: IndexedFilter) => {
       // Skip if already sent to this (ws, subId)
       const wsSent = sent.get(entry.ws);
@@ -334,18 +329,7 @@ export class Relay {
         if (!this.isAuthorizedForEvent(entry.ws, event)) return;
       }
 
-      // Inline the `until` clamp: if the filter has no explicit `until` and
-      // `since` is not in the future, enforce that the event is not future-dated
-      // beyond the fuzz window.  This avoids the per-subscriber object spread
-      // that clampUntil() would create.
-      const f = entry.filter;
-      if (typeof f.until !== "number") {
-        if (typeof f.since !== "number" || f.since <= broadcastUntil) {
-          if (event.created_at > broadcastUntil) return;
-        }
-      }
-
-      if (!matchFilter(f, event)) return;
+      if (!matchFilter(clampUntil(entry.filter, TIME_FUZZ), event)) return;
 
       // Mark as sent
       if (wsSent) {

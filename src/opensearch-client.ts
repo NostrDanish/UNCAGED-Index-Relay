@@ -30,13 +30,6 @@ export interface ClientOptions {
    * negative values disable batching.
    */
   batchSearchMs?: number;
-  /**
-   * Maximum number of queries in a single msearch batch.  When the queue
-   * reaches this size, the batch is flushed immediately without waiting for
-   * the timer.  This prevents "monster batches" (55+ queries) that cause
-   * p95 latency spikes.  Defaults to 20.
-   */
-  maxBatchSize?: number;
 }
 
 /** Thin wrapper so callers can access `response.body` like opensearch-js. */
@@ -112,10 +105,7 @@ interface PendingSearch {
  */
 export type SearchLane = "user" | "internal";
 
-/** Default maximum batch size — caps how many queries go into a single msearch. */
-const DEFAULT_MAX_BATCH_SIZE = 20;
-
-/** A single flush lane with a maximum batch size cap. */
+/** A single flush lane. */
 class BatchLane {
   queue: PendingSearch[] = [];
   timer: ReturnType<typeof setTimeout> | null = null;
@@ -124,21 +114,10 @@ class BatchLane {
     readonly name: string,
     private flushFn: (batch: PendingSearch[], lane: string) => Promise<void>,
     private delayMs: number,
-    private maxBatchSize: number,
   ) {}
 
   push(item: PendingSearch): void {
     this.queue.push(item);
-
-    // Flush immediately when we hit the batch size cap.
-    if (this.queue.length >= this.maxBatchSize) {
-      if (this.timer) {
-        clearTimeout(this.timer);
-        this.timer = null;
-      }
-      this.flush();
-      return;
-    }
 
     if (!this.timer) {
       this.timer = setTimeout(() => this.flush(), this.delayMs);
@@ -166,10 +145,6 @@ class BatchLane {
  * Queries are split into two lanes — **user** (default) and **internal** —
  * so that user-facing REQs are never blocked by slow internal queries
  * (slot resolution, aggregations) sharing the same `_msearch` response.
- *
- * Each lane has a maximum batch size cap (default 20) to prevent "monster
- * batches" (55+ queries) that cause p95 latency spikes.  When the cap is
- * reached the batch flushes immediately without waiting for the timer.
  */
 export class SearchBatcher {
   private userLane: BatchLane;
@@ -179,12 +154,10 @@ export class SearchBatcher {
     private client: Client,
     /** Max ms to wait before flushing. 0 = next microtask. */
     delayMs: number = 0,
-    /** Max queries per msearch batch. Defaults to 20. */
-    maxBatchSize: number = DEFAULT_MAX_BATCH_SIZE,
   ) {
     const flush = (batch: PendingSearch[], lane: string) => this.flushBatch(batch, lane);
-    this.userLane = new BatchLane("user", flush, delayMs, maxBatchSize);
-    this.internalLane = new BatchLane("internal", flush, delayMs, maxBatchSize);
+    this.userLane = new BatchLane("user", flush, delayMs);
+    this.internalLane = new BatchLane("internal", flush, delayMs);
   }
 
   /** Enqueue a search and return a Promise for its result. */
@@ -278,11 +251,7 @@ export class Client {
 
     // Enable search batching when configured.
     if (opts?.batchSearchMs !== undefined && opts.batchSearchMs >= 0) {
-      this.batcher = new SearchBatcher(
-        this,
-        opts.batchSearchMs,
-        opts?.maxBatchSize ?? DEFAULT_MAX_BATCH_SIZE,
-      );
+      this.batcher = new SearchBatcher(this, opts.batchSearchMs);
     }
   }
 
