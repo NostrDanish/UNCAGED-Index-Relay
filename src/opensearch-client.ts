@@ -93,22 +93,74 @@ interface PendingSearch {
 }
 
 /**
+ * Queries requesting up to this many results are considered "light" and are
+ * batched separately from heavier queries.  This prevents a small `limit:1`
+ * REQ from being held up by a `limit:5000` score-recomputation search that
+ * shares the same `_msearch` round-trip.
+ */
+const LIGHT_SIZE_THRESHOLD = 50;
+
+/** Extract the `size` field from a search body, defaulting to 10 (OpenSearch default). */
+function getBodySize(body: unknown): number {
+  if (body !== null && typeof body === "object" && "size" in body) {
+    const s = (body as Record<string, unknown>).size;
+    if (typeof s === "number") return s;
+  }
+  return 10; // OpenSearch default
+}
+
+/** A single flush lane (light or heavy). */
+class BatchLane {
+  queue: PendingSearch[] = [];
+  timer: ReturnType<typeof setTimeout> | null = null;
+
+  constructor(
+    private flushFn: (batch: PendingSearch[]) => Promise<void>,
+    private delayMs: number,
+  ) {}
+
+  push(item: PendingSearch): void {
+    this.queue.push(item);
+    if (!this.timer) {
+      this.timer = setTimeout(() => this.flush(), this.delayMs);
+    }
+  }
+
+  private flush(): void {
+    this.timer = null;
+    const batch = this.queue;
+    this.queue = [];
+    if (batch.length > 0) {
+      this.flushFn(batch);
+    }
+  }
+}
+
+/**
  * Micro-batches `search()` calls into `_msearch` requests.
  *
  * When the relay has hundreds of concurrent WebSocket clients, each generating
  * a `search()` call, the runtime's HTTP connection pool becomes the bottleneck.
  * By combining N concurrent searches into one HTTP round-trip we reduce
  * connection pressure by ~N×.
+ *
+ * Queries are split into two lanes — light (size ≤ 50) and heavy (size > 50)
+ * — so that small user-facing REQs are never blocked by large background
+ * queries sharing the same `_msearch` response.
  */
 export class SearchBatcher {
-  private queue: PendingSearch[] = [];
-  private timer: ReturnType<typeof setTimeout> | null = null;
+  private lightLane: BatchLane;
+  private heavyLane: BatchLane;
 
   constructor(
     private client: Client,
     /** Max ms to wait before flushing. 0 = next microtask. */
-    private delayMs: number = 0,
-  ) {}
+    delayMs: number = 0,
+  ) {
+    const flush = (batch: PendingSearch[]) => this.flushBatch(batch);
+    this.lightLane = new BatchLane(flush, delayMs);
+    this.heavyLane = new BatchLane(flush, delayMs);
+  }
 
   /** Enqueue a search and return a Promise for its result. */
   search(params: {
@@ -116,21 +168,16 @@ export class SearchBatcher {
     body: unknown;
   }): Promise<ApiResponse<Record<string, unknown>>> {
     return new Promise<ApiResponse<Record<string, unknown>>>((resolve, reject) => {
-      this.queue.push({ index: params.index, body: params.body, resolve, reject });
-      if (!this.timer) {
-        this.timer = setTimeout(() => this.flush(), this.delayMs);
-      }
+      const item: PendingSearch = { index: params.index, body: params.body, resolve, reject };
+      const lane = getBodySize(params.body) <= LIGHT_SIZE_THRESHOLD
+        ? this.lightLane
+        : this.heavyLane;
+      lane.push(item);
     });
   }
 
-  /** Flush all queued searches as a single _msearch call. */
-  private async flush(): Promise<void> {
-    this.timer = null;
-    const batch = this.queue;
-    this.queue = [];
-
-    if (batch.length === 0) return;
-
+  /** Flush a batch of searches as a single _msearch call. */
+  private async flushBatch(batch: PendingSearch[]): Promise<void> {
     // Single-query fast path: skip msearch overhead.
     if (batch.length === 1) {
       const item = batch[0];
