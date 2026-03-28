@@ -21,6 +21,19 @@ import {
 } from "./metrics.ts";
 import { buildSearchText } from "./search-text.ts";
 
+/** The 7 core Nostr event fields — used as `_source` filter so OpenSearch
+ *  only returns these fields in read queries, reducing JSON response size
+ *  and parse overhead. */
+const NOSTR_EVENT_FIELDS = [
+  "id",
+  "pubkey",
+  "created_at",
+  "kind",
+  "tags",
+  "content",
+  "sig",
+] as const;
+
 /**
  * OpenSearch document structure for Nostr events
  */
@@ -469,21 +482,6 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
   }
 
   /**
-   * Convert OpenSearch document back to NostrEvent.
-   */
-  private documentToEvent(doc: NostrEventDocument): NostrEvent {
-    return {
-      id: doc.id,
-      pubkey: doc.pubkey,
-      created_at: doc.created_at,
-      kind: doc.kind,
-      tags: doc.tags,
-      content: doc.content,
-      sig: doc.sig,
-    };
-  }
-
-  /**
    * Check if the NIP-50 search string contains a distinct:author extension token.
    */
   private hasDistinctAuthor(filter: NostrFilter): boolean {
@@ -677,11 +675,9 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     const hits = response.body.hits.hits;
     return hits
       .filter(
-        (hit: { _source?: NostrEventDocument }) => hit._source !== undefined,
+        (hit: { _source?: NostrEvent }) => hit._source !== undefined,
       )
-      .map((hit: { _source: NostrEventDocument }) =>
-        this.documentToEvent(hit._source),
-      );
+      .map((hit: { _source: NostrEvent }) => hit._source);
   }
 
   /**
@@ -701,6 +697,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     const response = await this.client.search({
       index: this.indexName,
       body: {
+        _source: NOSTR_EVENT_FIELDS,
         query,
         sort: [{ engagers: { order: "desc" as const } }],
         size: limit,
@@ -728,6 +725,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     const response = await this.client.search({
       index: this.indexName,
       body: {
+        _source: NOSTR_EVENT_FIELDS,
         query: {
           script_score: {
             query,
@@ -766,6 +764,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     const response = await this.client.search({
       index: this.indexName,
       body: {
+        _source: NOSTR_EVENT_FIELDS,
         query: {
           script_score: {
             query,
@@ -804,6 +803,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     const response = await this.client.search({
       index: this.indexName,
       body: {
+        _source: NOSTR_EVENT_FIELDS,
         query: {
           script_score: {
             query,
@@ -839,6 +839,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     const response = await this.client.search({
       index: this.indexName,
       body: {
+        _source: NOSTR_EVENT_FIELDS,
         query,
         sort: [{ zap_amount_msats: { order: "desc" as const } }],
         size: limit,
@@ -873,6 +874,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     const response = await this.client.search({
       index: this.indexName,
       body: {
+        _source: NOSTR_EVENT_FIELDS,
         query,
         sort: [{ followers: { order: "desc" as const } }],
         size: limit,
@@ -899,6 +901,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     const response = await this.client.search({
       index: this.indexName,
       body: {
+        _source: NOSTR_EVENT_FIELDS,
         query: {
           script_score: {
             query,
@@ -1068,6 +1071,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     const response = await this.client.search({
       index: this.indexName,
       body: {
+        _source: NOSTR_EVENT_FIELDS,
         query,
         size: orderedPubkeys.length, // one kind 0 per pubkey at most
       },
@@ -1336,6 +1340,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     const queryEnd = opensearchQueryDurationHistogram.startTimer();
     try {
       const searchBody: Record<string, unknown> = {
+        _source: NOSTR_EVENT_FIELDS,
         query,
         sort,
         size: limit,
@@ -1357,8 +1362,8 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
 
       const hits = response.body.hits.hits;
       return hits
-        .filter((hit) => hit._source !== undefined)
-        .map((hit) => this.documentToEvent(hit._source as NostrEventDocument));
+        .filter((hit: { _source?: NostrEvent }) => hit._source !== undefined)
+        .map((hit: { _source: NostrEvent }) => hit._source);
     } catch (error) {
       queryEnd();
       console.error("OpenSearch query failed:", error);
