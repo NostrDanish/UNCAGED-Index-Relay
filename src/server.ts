@@ -65,60 +65,67 @@ const relay = new Relay(opensearchRelay, {
 // ---------------------------------------------------------------------------
 // Background worker — score recomputation, NIP-85, and trends run off-thread
 // so they don't block the WebSocket event loop.
+// Disabled when STATS_ENABLED=false to isolate stats overhead for benchmarking.
 // ---------------------------------------------------------------------------
-const bgWorker = new Worker(
-  new URL("background-worker.ts", import.meta.url).href,
-  { smol: true },
-);
+let bgWorker: Worker | undefined;
 
-bgWorker.onmessage = (event: MessageEvent) => {
-  const msg = event.data;
-  if (msg.type === "broadcast") {
-    relay.broadcast(msg.event);
-  }
-};
+if (config.statsEnabled) {
+  bgWorker = new Worker(
+    new URL("background-worker.ts", import.meta.url).href,
+    { smol: true },
+  );
 
-bgWorker.onerror = (error) => {
-  console.error("Background worker error:", error);
-};
+  bgWorker.onmessage = (event: MessageEvent) => {
+    const msg = event.data;
+    if (msg.type === "broadcast") {
+      relay.broadcast(msg.event);
+    }
+  };
 
-// Accumulate dirty addrs/identifiers from flush callbacks. These are drained
-// and forwarded to the worker alongside the dirty IDs/pubkeys.
-const pendingDirtyAddrs = new Set<string>();
-const pendingDirtyIdentifiers = new Set<string>();
-opensearchRelay.onDirtyAddrs = (addrs) => {
-  for (const addr of addrs) pendingDirtyAddrs.add(addr);
-};
-opensearchRelay.onDirtyIdentifiers = (ids) => {
-  for (const id of ids) pendingDirtyIdentifiers.add(id);
-};
+  bgWorker.onerror = (error) => {
+    console.error("Background worker error:", error);
+  };
 
-// Forward dirty state from the main thread to the background worker every 2s.
-// This is lightweight — just draining Sets and posting arrays via postMessage.
-setInterval(() => {
-  const dirty = opensearchRelay.drainDirty();
-  const addrs = [...pendingDirtyAddrs];
-  pendingDirtyAddrs.clear();
-  const identifiers = [...pendingDirtyIdentifiers];
-  pendingDirtyIdentifiers.clear();
+  // Accumulate dirty addrs/identifiers from flush callbacks. These are drained
+  // and forwarded to the worker alongside the dirty IDs/pubkeys.
+  const pendingDirtyAddrs = new Set<string>();
+  const pendingDirtyIdentifiers = new Set<string>();
+  opensearchRelay.onDirtyAddrs = (addrs) => {
+    for (const addr of addrs) pendingDirtyAddrs.add(addr);
+  };
+  opensearchRelay.onDirtyIdentifiers = (ids) => {
+    for (const id of ids) pendingDirtyIdentifiers.add(id);
+  };
 
-  if (
-    dirty.ids.length === 0 &&
-    dirty.pubkeys.length === 0 &&
-    addrs.length === 0 &&
-    identifiers.length === 0
-  ) {
-    return;
-  }
+  // Forward dirty state from the main thread to the background worker every 2s.
+  // This is lightweight — just draining Sets and posting arrays via postMessage.
+  setInterval(() => {
+    const dirty = opensearchRelay.drainDirty();
+    const addrs = [...pendingDirtyAddrs];
+    pendingDirtyAddrs.clear();
+    const identifiers = [...pendingDirtyIdentifiers];
+    pendingDirtyIdentifiers.clear();
 
-  bgWorker.postMessage({
-    type: "dirty",
-    ids: dirty.ids,
-    pubkeys: dirty.pubkeys,
-    addrs,
-    identifiers,
-  });
-}, 2_000);
+    if (
+      dirty.ids.length === 0 &&
+      dirty.pubkeys.length === 0 &&
+      addrs.length === 0 &&
+      identifiers.length === 0
+    ) {
+      return;
+    }
+
+    bgWorker!.postMessage({
+      type: "dirty",
+      ids: dirty.ids,
+      pubkeys: dirty.pubkeys,
+      addrs,
+      identifiers,
+    });
+  }, 2_000);
+} else {
+  console.log("Stats disabled (STATS_ENABLED=false) — background worker not started.");
+}
 
 // Initialize index on startup
 try {
@@ -243,7 +250,7 @@ console.log(`Nostr relay listening on ws://localhost:${server.port}`);
 function shutdown() {
   console.log("Shutting down...");
   server.stop();
-  bgWorker.terminate();
+  bgWorker?.terminate();
   process.exit(0);
 }
 

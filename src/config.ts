@@ -38,6 +38,8 @@ export class Config {
    * Default: 4,1059 (NIP-04 DMs and NIP-59 Gift Wraps).
    */
   readonly authKinds: Set<number>;
+  /** Whether to enable background stats recomputation and NIP-85 publishing. Default: true. */
+  readonly statsEnabled: boolean;
   readonly nostrSigner: NostrSigner;
 
   constructor(env: { get(key: string): string | undefined }) {
@@ -143,6 +145,15 @@ export class Config {
         .map((s) => parseInt(s.trim(), 10))
         .filter((n) => !Number.isNaN(n));
       this.authKinds = new Set(kinds);
+    }
+
+    // statsEnabled
+    const statsValue = env.get("STATS_ENABLED");
+    if (!statsValue) {
+      this.statsEnabled = true;
+    } else {
+      this.statsEnabled =
+        statsValue.toLowerCase() === "true" || statsValue === "1";
     }
 
     // nostrSigner
