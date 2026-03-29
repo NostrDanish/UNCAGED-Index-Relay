@@ -1353,6 +1353,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
         query,
         sort,
         size: limit,
+        track_total_hits: false,
       };
 
       // Use OpenSearch field collapsing to return only 1 event per pubkey
