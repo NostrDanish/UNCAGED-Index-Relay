@@ -11,10 +11,7 @@
  * call sites require zero changes.
  */
 
-import {
-  opensearchMsearchBatchSizeHistogram,
-  opensearchMsearchDurationHistogram,
-} from "./metrics.ts";
+import { opensearchSearchDurationHistogram } from "./metrics.ts";
 
 /** Options accepted by the client constructor. */
 export interface ClientOptions {
@@ -22,14 +19,6 @@ export interface ClientOptions {
   node?: string;
   /** Optional basic-auth credentials. */
   auth?: { username: string; password: string };
-  /**
-   * When set to a non-negative number, `search()` calls are micro-batched
-   * into `_msearch` requests.  The value is the maximum time in ms to wait
-   * before flushing the batch.  Use `0` to flush on the next microtask
-   * (batches everything in the current event-loop tick).  `undefined` or
-   * negative values disable batching.
-   */
-  batchSearchMs?: number;
 }
 
 /** Thin wrapper so callers can access `response.body` like opensearch-js. */
@@ -43,189 +32,77 @@ class IndicesApi {
 
   /** HEAD /{index} — returns `{ body: boolean }`. */
   async exists(params: { index: string }): Promise<ApiResponse<boolean>> {
-    const res = await this._request("HEAD", `/${encodeURIComponent(params.index)}`);
+    const res = await this._request(
+      "HEAD",
+      `/${encodeURIComponent(params.index)}`,
+    );
     return { body: res.status === 200 };
   }
 
   /** HEAD /_alias/{name} — returns `{ body: boolean }`. */
   async existsAlias(params: { name: string }): Promise<ApiResponse<boolean>> {
-    const res = await this._request("HEAD", `/_alias/${encodeURIComponent(params.name)}`);
+    const res = await this._request(
+      "HEAD",
+      `/_alias/${encodeURIComponent(params.name)}`,
+    );
     return { body: res.status === 200 };
   }
 
   /** PUT /{index} */
-  async create(params: { index: string; body?: unknown }): Promise<ApiResponse<unknown>> {
-    const res = await this._request("PUT", `/${encodeURIComponent(params.index)}`, params.body);
+  async create(params: {
+    index: string;
+    body?: unknown;
+  }): Promise<ApiResponse<unknown>> {
+    const res = await this._request(
+      "PUT",
+      `/${encodeURIComponent(params.index)}`,
+      params.body,
+    );
     return { body: await res.json() };
   }
 
   /** POST /{index}/_close */
   async close(params: { index: string }): Promise<ApiResponse<unknown>> {
-    const res = await this._request("POST", `/${encodeURIComponent(params.index)}/_close`);
+    const res = await this._request(
+      "POST",
+      `/${encodeURIComponent(params.index)}/_close`,
+    );
     return { body: await res.json() };
   }
 
   /** POST /{index}/_open */
   async open(params: { index: string }): Promise<ApiResponse<unknown>> {
-    const res = await this._request("POST", `/${encodeURIComponent(params.index)}/_open`);
+    const res = await this._request(
+      "POST",
+      `/${encodeURIComponent(params.index)}/_open`,
+    );
     return { body: await res.json() };
   }
 
   /** PUT /{index}/_settings */
-  async putSettings(params: { index: string; body?: unknown }): Promise<ApiResponse<unknown>> {
-    const res = await this._request("PUT", `/${encodeURIComponent(params.index)}/_settings`, params.body);
+  async putSettings(params: {
+    index: string;
+    body?: unknown;
+  }): Promise<ApiResponse<unknown>> {
+    const res = await this._request(
+      "PUT",
+      `/${encodeURIComponent(params.index)}/_settings`,
+      params.body,
+    );
     return { body: await res.json() };
   }
 
   /** PUT /{index}/_mapping */
-  async putMapping(params: { index: string; body?: unknown }): Promise<ApiResponse<unknown>> {
-    const res = await this._request("PUT", `/${encodeURIComponent(params.index)}/_mapping`, params.body);
-    return { body: await res.json() };
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Search batcher — collects concurrent search() calls and flushes them as a
-// single _msearch request to reduce HTTP connection pressure.
-// ---------------------------------------------------------------------------
-
-/** A pending search waiting to be batched. */
-interface PendingSearch {
-  index: string;
-  body: unknown;
-  resolve: (value: ApiResponse<Record<string, unknown>>) => void;
-  reject: (reason: unknown) => void;
-}
-
-/**
- * Lane hint passed to `search()` to separate user-facing queries from
- * internal infrastructure queries (slot resolution, aggregations, etc.).
- * Queries in different lanes are batched independently so slow internal
- * work never blocks user-facing REQs.
- */
-export type SearchLane = "user" | "internal";
-
-/** A single flush lane. */
-class BatchLane {
-  queue: PendingSearch[] = [];
-  timer: ReturnType<typeof setTimeout> | null = null;
-
-  constructor(
-    readonly name: string,
-    private flushFn: (batch: PendingSearch[], lane: string) => Promise<void>,
-    private delayMs: number,
-  ) {}
-
-  push(item: PendingSearch): void {
-    this.queue.push(item);
-
-    if (!this.timer) {
-      this.timer = setTimeout(() => this.flush(), this.delayMs);
-    }
-  }
-
-  private flush(): void {
-    this.timer = null;
-    const batch = this.queue;
-    this.queue = [];
-    if (batch.length > 0) {
-      this.flushFn(batch, this.name);
-    }
-  }
-}
-
-/**
- * Micro-batches `search()` calls into `_msearch` requests.
- *
- * When the relay has hundreds of concurrent WebSocket clients, each generating
- * a `search()` call, the runtime's HTTP connection pool becomes the bottleneck.
- * By combining N concurrent searches into one HTTP round-trip we reduce
- * connection pressure by ~N×.
- *
- * Queries are split into two lanes — **user** (default) and **internal** —
- * so that user-facing REQs are never blocked by slow internal queries
- * (slot resolution, aggregations) sharing the same `_msearch` response.
- */
-export class SearchBatcher {
-  private userLane: BatchLane;
-  private internalLane: BatchLane;
-
-  constructor(
-    private client: Client,
-    /** Max ms to wait before flushing. 0 = next microtask. */
-    delayMs: number = 0,
-  ) {
-    const flush = (batch: PendingSearch[], lane: string) => this.flushBatch(batch, lane);
-    this.userLane = new BatchLane("user", flush, delayMs);
-    this.internalLane = new BatchLane("internal", flush, delayMs);
-  }
-
-  /** Enqueue a search and return a Promise for its result. */
-  search(params: {
+  async putMapping(params: {
     index: string;
-    body: unknown;
-    lane?: SearchLane;
-  }): Promise<ApiResponse<Record<string, unknown>>> {
-    return new Promise<ApiResponse<Record<string, unknown>>>((resolve, reject) => {
-      const item: PendingSearch = { index: params.index, body: params.body, resolve, reject };
-      const lane = params.lane === "internal"
-        ? this.internalLane
-        : this.userLane;
-      lane.push(item);
-    });
-  }
-
-  /** Flush a batch of searches as a single _msearch call. */
-  private async flushBatch(batch: PendingSearch[], lane: string): Promise<void> {
-    opensearchMsearchBatchSizeHistogram.observe({ lane }, batch.length);
-
-    // Single-query fast path: skip msearch overhead.
-    if (batch.length === 1) {
-      const item = batch[0];
-      const end = opensearchMsearchDurationHistogram.startTimer({ lane });
-      try {
-        const result = await this.client.searchDirect({
-          index: item.index,
-          body: item.body,
-        });
-        end();
-        item.resolve(result);
-      } catch (err) {
-        end();
-        item.reject(err);
-      }
-      return;
-    }
-
-    const end = opensearchMsearchDurationHistogram.startTimer({ lane });
-    try {
-      const result = await this.client.msearch(
-        batch.map((item) => ({ index: item.index, body: item.body })),
-      );
-      end();
-      const responses = result.body.responses;
-
-      for (let i = 0; i < batch.length; i++) {
-        const item = batch[i];
-        const resp = responses[i];
-        if (resp && (resp as Record<string, unknown>).status !== undefined) {
-          const status = (resp as Record<string, unknown>).status as number;
-          if (status >= 500) {
-            item.reject(
-              new Error(`OpenSearch msearch sub-query ${i} responded ${status}: ${JSON.stringify(resp)}`),
-            );
-            continue;
-          }
-        }
-        item.resolve({ body: resp as Record<string, unknown> });
-      }
-    } catch (err) {
-      end();
-      // Whole msearch failed — reject all pending.
-      for (const item of batch) {
-        item.reject(err);
-      }
-    }
+    body?: unknown;
+  }): Promise<ApiResponse<unknown>> {
+    const res = await this._request(
+      "PUT",
+      `/${encodeURIComponent(params.index)}/_mapping`,
+      params.body,
+    );
+    return { body: await res.json() };
   }
 }
 
@@ -233,7 +110,6 @@ export class SearchBatcher {
 export class Client {
   private baseUrl: string;
   private authHeader: string | undefined;
-  private batcher: SearchBatcher | null = null;
   readonly indices: IndicesApi;
 
   constructor(opts?: ClientOptions) {
@@ -248,11 +124,6 @@ export class Client {
     // Bind `_request` so IndicesApi can call it without losing `this`.
     this._request = this._request.bind(this);
     this.indices = new IndicesApi(this._request);
-
-    // Enable search batching when configured.
-    if (opts?.batchSearchMs !== undefined && opts.batchSearchMs >= 0) {
-      this.batcher = new SearchBatcher(this, opts.batchSearchMs);
-    }
   }
 
   // ---------------------------------------------------------------------------
@@ -288,7 +159,9 @@ export class Client {
     // 4xx codes (404, 409, etc.) are often expected and handled by callers.
     if (res.status >= 500) {
       const text = await res.text();
-      throw new Error(`OpenSearch ${method} ${path} responded ${res.status}: ${text}`);
+      throw new Error(
+        `OpenSearch ${method} ${path} responded ${res.status}: ${text}`,
+      );
     }
 
     return res;
@@ -298,36 +171,20 @@ export class Client {
   // Document APIs
   // ---------------------------------------------------------------------------
 
-  /**
-   * POST /{index}/_search
-   *
-   * When batching is enabled, concurrent calls are transparently combined
-   * into a single `_msearch` request.  Pass `lane: "internal"` for
-   * infrastructure queries (slot resolution, aggregations) so they don't
-   * block user-facing REQs.
-   */
+  /** POST /{index}/_search */
   async search(params: {
     index: string;
     body: unknown;
-    lane?: SearchLane;
   }): Promise<ApiResponse<Record<string, unknown>>> {
-    if (this.batcher) {
-      return this.batcher.search(params);
-    }
-    return this.searchDirect(params);
-  }
-
-  /** Direct (non-batched) POST /{index}/_search. */
-  async searchDirect(params: {
-    index: string;
-    body: unknown;
-  }): Promise<ApiResponse<Record<string, unknown>>> {
+    const end = opensearchSearchDurationHistogram.startTimer();
     const res = await this._request(
       "POST",
       `/${encodeURIComponent(params.index)}/_search`,
       params.body,
     );
-    return { body: (await res.json()) as Record<string, unknown> };
+    const body = (await res.json()) as Record<string, unknown>;
+    end();
+    return { body };
   }
 
   /**
@@ -348,7 +205,7 @@ export class Client {
     }
     const ndjson = lines.join("\n") + "\n";
 
-    let url = `${this.baseUrl}/_msearch`;
+    const url = `${this.baseUrl}/_msearch`;
 
     const headers: Record<string, string> = {
       "Content-Type": "application/x-ndjson",
@@ -363,7 +220,9 @@ export class Client {
 
     if (res.status >= 500) {
       const text = await res.text();
-      throw new Error(`OpenSearch POST /_msearch responded ${res.status}: ${text}`);
+      throw new Error(
+        `OpenSearch POST /_msearch responded ${res.status}: ${text}`,
+      );
     }
 
     return {
@@ -397,7 +256,8 @@ export class Client {
     signal?: AbortSignal;
   }): Promise<ApiResponse<{ errors: boolean; items: unknown[] }>> {
     // Build NDJSON payload.
-    const ndjson = params.body.map((obj) => JSON.stringify(obj)).join("\n") + "\n";
+    const ndjson =
+      params.body.map((obj) => JSON.stringify(obj)).join("\n") + "\n";
 
     const query: Record<string, string> = {};
     if (params.refresh !== undefined) {
@@ -425,10 +285,14 @@ export class Client {
     const res = await fetch(url, init);
     if (res.status >= 500) {
       const text = await res.text();
-      throw new Error(`OpenSearch POST /_bulk responded ${res.status}: ${text}`);
+      throw new Error(
+        `OpenSearch POST /_bulk responded ${res.status}: ${text}`,
+      );
     }
 
-    return { body: (await res.json()) as { errors: boolean; items: unknown[] } };
+    return {
+      body: (await res.json()) as { errors: boolean; items: unknown[] },
+    };
   }
 
   /** POST /{index}/_delete_by_query */

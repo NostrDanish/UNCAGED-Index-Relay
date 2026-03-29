@@ -12,6 +12,7 @@ import {
   relayConnectionsGauge,
   relayEventsCounter,
   relayMessagesCounter,
+  relayReqDurationHistogram,
 } from "./metrics.ts";
 
 /** Pre-computed analysis data that can be passed alongside an event to avoid redundant work. */
@@ -340,7 +341,9 @@ export class Relay {
 
       // Build the EVENT message via concatenation using the pre-serialized
       // event JSON, avoiding a full JSON.stringify per subscriber.
-      entry.ws.send(`["EVENT",${JSON.stringify(entry.subscriptionId)},${eventJson}]`);
+      entry.ws.send(
+        `["EVENT",${JSON.stringify(entry.subscriptionId)},${eventJson}]`,
+      );
     };
 
     if (kindSet) {
@@ -901,6 +904,7 @@ export class Relay {
     subscriptionId: string,
     filters: Filter[],
   ) {
+    const endReqTimer = relayReqDurationHistogram.startTimer();
     try {
       const data = ws.data;
 
@@ -970,6 +974,8 @@ export class Relay {
       console.error("Error handling REQ:", error);
       const message = error instanceof Error ? error.message : String(error);
       this.sendMessage(ws, ["CLOSED", subscriptionId, `error: ${message}`]);
+    } finally {
+      endReqTimer();
     }
   }
 

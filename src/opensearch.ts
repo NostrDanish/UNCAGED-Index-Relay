@@ -7,9 +7,6 @@ import type {
   NRelay,
 } from "@nostrify/nostrify";
 import { NIP50, NKinds, NSchema as n } from "@nostrify/nostrify";
-import type { ClientOptions } from "./opensearch-client.ts";
-import { Client, Client as OpenSearchClient } from "./opensearch-client.ts";
-
 import type { Config } from "./config.ts";
 import { detectMedia } from "./media.ts";
 import {
@@ -19,6 +16,11 @@ import {
   opensearchQueriesCounter,
   opensearchQueryDurationHistogram,
 } from "./metrics.ts";
+import type { ClientOptions } from "./opensearch-client.ts";
+import {
+  type Client,
+  Client as OpenSearchClient,
+} from "./opensearch-client.ts";
 import { buildSearchText } from "./search-text.ts";
 
 /** The 7 core Nostr event fields — used as `_source` filter so OpenSearch
@@ -674,9 +676,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
   ): NostrEvent[] {
     const hits = response.body.hits.hits;
     return hits
-      .filter(
-        (hit: { _source?: NostrEvent }) => hit._source !== undefined,
-      )
+      .filter((hit: { _source?: NostrEvent }) => hit._source !== undefined)
       .map((hit: { _source: NostrEvent }) => hit._source);
   }
 
@@ -963,7 +963,9 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
   ): Promise<NostrEvent[]> {
     // Phase 1: Aggregate total zap_amount_msats per author across all events.
     opensearchQueriesCounter.inc({ type: "aggregation" });
-    const aggEnd = opensearchQueryDurationHistogram.startTimer({ type: "aggregation" });
+    const aggEnd = opensearchQueryDurationHistogram.startTimer({
+      type: "aggregation",
+    });
     const aggResponse = await this.client.search({
       index: this.indexName,
       body: {
@@ -991,7 +993,6 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
           },
         },
       },
-      lane: "internal",
     });
     aggEnd();
 
@@ -1321,7 +1322,9 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
 
     if (sortMode) {
       opensearchQueriesCounter.inc({ type: "sort" });
-      const sortEnd = opensearchQueryDurationHistogram.startTimer({ type: "sort" });
+      const sortEnd = opensearchQueryDurationHistogram.startTimer({
+        type: "sort",
+      });
       try {
         const result = await this.querySortedEvents(filter, sortMode, limit);
         sortEnd();
@@ -1341,7 +1344,9 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     const sort = [{ created_at: { order: "desc" as const } }];
 
     opensearchQueriesCounter.inc({ type: "req" });
-    const queryEnd = opensearchQueryDurationHistogram.startTimer({ type: "req" });
+    const queryEnd = opensearchQueryDurationHistogram.startTimer({
+      type: "req",
+    });
     try {
       const searchBody: Record<string, unknown> = {
         _source: NOSTR_EVENT_FIELDS,
@@ -1587,7 +1592,9 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
       try {
         // Find the newest event in the slot to determine the true winner.
         opensearchQueriesCounter.inc({ type: "slot_resolution" });
-        const slotEnd = opensearchQueryDurationHistogram.startTimer({ type: "slot_resolution" });
+        const slotEnd = opensearchQueryDurationHistogram.startTimer({
+          type: "slot_resolution",
+        });
         const searchResponse = await this.client.search({
           index: this.indexName,
           body: {
@@ -1596,7 +1603,6 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
             size: 1,
             _source: ["id"],
           },
-          lane: "internal",
         });
         slotEnd();
 
@@ -1845,7 +1851,9 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
         const query = this.buildQuery(filter);
 
         opensearchQueriesCounter.inc({ type: "count" });
-        const countEnd = opensearchQueryDurationHistogram.startTimer({ type: "count" });
+        const countEnd = opensearchQueryDurationHistogram.startTimer({
+          type: "count",
+        });
 
         if (
           this.hasDistinctAuthor(filter) &&
@@ -1872,7 +1880,6 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
                 },
               },
             },
-            lane: "internal",
           });
           countEnd();
 
@@ -1991,12 +1998,12 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
           },
         };
         await this.writeClient.updateByQuery({
-           index: this.indexName,
-           body: {
-             query: wrappedQuery,
-             script: {
-               source: "ctx._source.deleted = true",
-               lang: "painless",
+          index: this.indexName,
+          body: {
+            query: wrappedQuery,
+            script: {
+              source: "ctx._source.deleted = true",
+              lang: "painless",
             },
           },
           refresh: true,
@@ -2113,8 +2120,10 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     try {
       // Check if index or alias already exists
       const exists =
-        (await this.writeClient.indices.exists({ index: this.indexName })).body ||
-        (await this.writeClient.indices.existsAlias({ name: this.indexName })).body;
+        (await this.writeClient.indices.exists({ index: this.indexName }))
+          .body ||
+        (await this.writeClient.indices.existsAlias({ name: this.indexName }))
+          .body;
 
       if (exists) {
         // Add custom analyzer settings (requires close/open).

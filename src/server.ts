@@ -1,15 +1,14 @@
 import { readFile } from "node:fs/promises";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
-import type { ClientOptions } from "./opensearch-client.ts";
-import { Client as OpenSearchClient } from "./opensearch-client.ts";
 import { serve } from "bun";
-
 import { AnalyzePool } from "./analyze-pool.ts";
 import { Config } from "./config.ts";
 import { renderLandingPage } from "./landing-page.ts";
 import { register } from "./metrics.ts";
 import { OpenSearchRelay } from "./opensearch.ts";
+import type { ClientOptions } from "./opensearch-client.ts";
+import { Client as OpenSearchClient } from "./opensearch-client.ts";
 import { Relay, type WebSocketData } from "./relay.ts";
 
 const config = new Config({
@@ -33,10 +32,7 @@ if (config.opensearchUsername && config.opensearchPassword) {
     password: config.opensearchPassword,
   };
 }
-const opensearchReadClient = new OpenSearchClient({
-  ...opensearchClientOptions,
-  batchSearchMs: 0, // Batch concurrent search() calls into _msearch on next microtask.
-});
+const opensearchReadClient = new OpenSearchClient(opensearchClientOptions);
 const opensearchWriteClient = new OpenSearchClient(opensearchClientOptions);
 
 // Initialize OpenSearch relay
@@ -70,10 +66,9 @@ const relay = new Relay(opensearchRelay, {
 let bgWorker: Worker | undefined;
 
 if (config.statsEnabled) {
-  bgWorker = new Worker(
-    new URL("background-worker.ts", import.meta.url).href,
-    { smol: true },
-  );
+  bgWorker = new Worker(new URL("background-worker.ts", import.meta.url).href, {
+    smol: true,
+  });
 
   bgWorker.onmessage = (event: MessageEvent) => {
     const msg = event.data;
@@ -124,7 +119,9 @@ if (config.statsEnabled) {
     });
   }, 2_000);
 } else {
-  console.log("Stats disabled (STATS_ENABLED=false) — background worker not started.");
+  console.log(
+    "Stats disabled (STATS_ENABLED=false) — background worker not started.",
+  );
 }
 
 // Initialize index on startup

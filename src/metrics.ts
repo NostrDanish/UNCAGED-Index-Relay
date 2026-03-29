@@ -49,7 +49,10 @@ export class Counter {
     register._register(this);
   }
 
-  inc(labelsOrValue?: Record<string, string | number> | number, value?: number): void {
+  inc(
+    labelsOrValue?: Record<string, string | number> | number,
+    value?: number,
+  ): void {
     if (typeof labelsOrValue === "number" || labelsOrValue === undefined) {
       const key = "";
       this.values.set(key, (this.values.get(key) ?? 0) + (labelsOrValue ?? 1));
@@ -92,16 +95,25 @@ export class Gauge {
     register._register(this);
   }
 
-  set(labelsOrValue?: Record<string, string | number> | number, value?: number): void {
+  set(
+    labelsOrValue?: Record<string, string | number> | number,
+    value?: number,
+  ): void {
     if (typeof labelsOrValue === "number") {
       this.values.set("", labelsOrValue);
-    } else if (labelsOrValue !== undefined && typeof labelsOrValue === "object") {
+    } else if (
+      labelsOrValue !== undefined &&
+      typeof labelsOrValue === "object"
+    ) {
       const key = labelKey(labelsOrValue);
       this.values.set(key, value ?? 0);
     }
   }
 
-  inc(labelsOrValue?: Record<string, string | number> | number, value?: number): void {
+  inc(
+    labelsOrValue?: Record<string, string | number> | number,
+    value?: number,
+  ): void {
     if (typeof labelsOrValue === "number" || labelsOrValue === undefined) {
       const key = "";
       this.values.set(key, (this.values.get(key) ?? 0) + (labelsOrValue ?? 1));
@@ -133,10 +145,12 @@ interface HistogramOpts {
   buckets?: number[];
 }
 
-const DEFAULT_BUCKETS = [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10];
+const DEFAULT_BUCKETS = [
+  0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10,
+];
 
 interface HistogramData {
-  buckets: number[];  // counts per bucket boundary
+  buckets: number[]; // counts per bucket boundary
   sum: number;
   count: number;
 }
@@ -157,13 +171,20 @@ export class Histogram {
   private getOrCreate(key: string): HistogramData {
     let d = this.data.get(key);
     if (!d) {
-      d = { buckets: new Array(this.boundaries.length).fill(0), sum: 0, count: 0 };
+      d = {
+        buckets: new Array(this.boundaries.length).fill(0),
+        sum: 0,
+        count: 0,
+      };
       this.data.set(key, d);
     }
     return d;
   }
 
-  observe(labelsOrValue: Record<string, string | number> | number, value?: number): void {
+  observe(
+    labelsOrValue: Record<string, string | number> | number,
+    value?: number,
+  ): void {
     let key: string;
     let v: number;
     if (typeof labelsOrValue === "number") {
@@ -209,9 +230,13 @@ export class Histogram {
       let cumulative = 0;
       for (let i = 0; i < this.boundaries.length; i++) {
         cumulative += d.buckets[i];
-        lines.push(`${this.name}_bucket${lblPrefix}le="${this.boundaries[i]}"${lblSuffix} ${cumulative}`);
+        lines.push(
+          `${this.name}_bucket${lblPrefix}le="${this.boundaries[i]}"${lblSuffix} ${cumulative}`,
+        );
       }
-      lines.push(`${this.name}_bucket${lblPrefix}le="+Inf"${lblSuffix} ${d.count}`);
+      lines.push(
+        `${this.name}_bucket${lblPrefix}le="+Inf"${lblSuffix} ${d.count}`,
+      );
       lines.push(`${this.name}_sum${fmtLabels(key)} ${d.sum}`);
       lines.push(`${this.name}_count${fmtLabels(key)} ${d.count}`);
     }
@@ -302,19 +327,17 @@ export const opensearchFlushDurationHistogram = new Histogram({
   buckets: [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5],
 });
 
-/** Number of queries per _msearch batch, labeled by lane (light, heavy). */
-export const opensearchMsearchBatchSizeHistogram = new Histogram({
-  name: "ditto_opensearch_msearch_batch_size",
-  help: "Number of queries per msearch batch",
-  labelNames: ["lane"] as const,
-  buckets: [1, 2, 3, 5, 8, 13, 21, 34, 55],
+/** Duration of individual OpenSearch search HTTP calls in seconds. */
+export const opensearchSearchDurationHistogram = new Histogram({
+  name: "ditto_opensearch_search_duration_seconds",
+  help: "Duration of OpenSearch search HTTP calls in seconds",
+  buckets: [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5],
 });
 
-/** Duration of _msearch HTTP calls in seconds, labeled by lane (light, heavy). */
-export const opensearchMsearchDurationHistogram = new Histogram({
-  name: "ditto_opensearch_msearch_duration_seconds",
-  help: "Duration of msearch HTTP calls in seconds",
-  labelNames: ["lane"] as const,
+/** Duration of REQ handling in seconds (from message parse to EOSE sent). */
+export const relayReqDurationHistogram = new Histogram({
+  name: "ditto_relay_req_duration_seconds",
+  help: "Duration of REQ handling from message parse to EOSE sent",
   buckets: [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5],
 });
 
