@@ -2342,11 +2342,10 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     }
 
     // Phase 2a: Compute follower counts for dirty kind 0 events.
+    // Uses per-pubkey count queries via msearch to avoid expensive global
+    // ordinal builds on the high-cardinality tags_map.p field.
     if (dirtyKind0.length > 0) {
-      const kind0Pubkeys = dirtyKind0.map((d) => d.pubkey);
-
-      // Count unique kind 3 events that p-tag each pubkey.
-      const followerResponse = await this.client.search({
+      const followerSearches = dirtyKind0.map(({ pubkey }) => ({
         index: this.indexName,
         body: {
           query: {
@@ -2355,212 +2354,203 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
                 { term: { deleted: false } },
                 { term: { replaced: false } },
                 { term: { kind: 3 } },
-                { terms: { "tags_map.p": kind0Pubkeys } },
+                { term: { "tags_map.p": pubkey } },
               ],
             },
           },
           size: 0,
-          aggs: {
-            by_pubkey: {
-              terms: {
-                field: "tags_map.p",
-                size: kind0Pubkeys.length,
-                include: kind0Pubkeys,
-              },
-            },
-          },
+          track_total_hits: true,
         },
-      });
+      }));
 
-      const followerBuckets =
-        (
-          followerResponse.body.aggregations?.by_pubkey as unknown as {
-            buckets?: Array<{ key: string; doc_count: number }>;
-          }
-        )?.buckets || [];
+      const followerResult = await this.client.msearch(followerSearches);
 
-      // Map pubkey → follower count.
-      const followerCounts = new Map<string, number>();
-      for (const bucket of followerBuckets) {
-        followerCounts.set(bucket.key, bucket.doc_count);
-      }
-
-      // Set followers count for each kind 0 event.
-      for (const { id, pubkey } of dirtyKind0) {
-        const s = scores.get(id);
-        if (s) {
-          s.followers = followerCounts.get(pubkey) ?? 0;
-        }
+      for (let i = 0; i < dirtyKind0.length; i++) {
+        const s = scores.get(dirtyKind0[i].id);
+        if (!s) continue;
+        const resp = followerResult.body.responses[i];
+        const total = (resp?.hits as { total?: { value?: number } })?.total
+          ?.value;
+        s.followers = total ?? 0;
       }
     }
 
-    // Phase 2b: Aggregate engagement referencing events (kinds 1/6/7/16/1111)
-    // scoped to just the non-kind-0 dirty event IDs.
+    // Phase 2b+3+3b: Compute engagement scores for dirty non-kind-0 events.
+    // Uses per-event-ID queries via msearch to avoid expensive global ordinal
+    // builds on the high-cardinality tags_map.e field. For each dirty event
+    // ID, we issue 6 small queries:
+    //   0: comment count (kinds 1, 1111 via tags_map.e)
+    //   1: reaction count (kind 7 via tags_map.e)
+    //   2: repost count (kinds 6, 16 via tags_map.e)
+    //   3: zap count + amount (kind 9735 via tags_map.e, with sum agg)
+    //   4: quote count (kind 1 via tags_map.q)
+    //   5: unique engagers (all engagement kinds via tags_map.e, cardinality agg)
     if (dirtyNonKind0Ids.length > 0) {
-      const engagementResponse = await this.client.search({
-        index: this.indexName,
-        body: {
-          query: {
-            bool: {
-              must: [
-                { term: { deleted: false } },
-                { term: { replaced: false } },
-                { terms: { kind: [1, 6, 7, 16, 1111] } },
-                { terms: { "tags_map.e": dirtyNonKind0Ids } },
-              ],
-            },
-          },
-          size: 0,
-          aggs: {
-            by_event: {
-              terms: {
-                field: "tags_map.e",
-                size: dirtyNonKind0Ids.length,
-                include: dirtyNonKind0Ids,
-              },
-              aggs: {
-                unique_authors: {
-                  cardinality: { field: "pubkey" },
-                },
-                by_kind: {
-                  terms: { field: "kind", size: 10 },
-                },
+      const QUERIES_PER_EVENT = 6;
+      const baseMust = [
+        { term: { deleted: false } },
+        { term: { replaced: false } },
+      ];
+
+      const engagementSearches: Array<{ index: string; body: unknown }> = [];
+
+      for (const eventId of dirtyNonKind0Ids) {
+        // 0: comments (kind 1, 1111)
+        engagementSearches.push({
+          index: this.indexName,
+          body: {
+            query: {
+              bool: {
+                must: [
+                  ...baseMust,
+                  { terms: { kind: [1, 1111] } },
+                  { term: { "tags_map.e": eventId } },
+                ],
               },
             },
+            size: 0,
+            track_total_hits: true,
           },
-        },
-      });
+        });
 
-      const engagementBuckets =
-        (
-          engagementResponse.body.aggregations?.by_event as unknown as {
-            buckets?: Array<{
-              key: string;
-              doc_count: number;
-              unique_authors?: { value: number };
-              by_kind?: {
-                buckets?: Array<{ key: number; doc_count: number }>;
-              };
-            }>;
-          }
-        )?.buckets || [];
+        // 1: reactions (kind 7)
+        engagementSearches.push({
+          index: this.indexName,
+          body: {
+            query: {
+              bool: {
+                must: [
+                  ...baseMust,
+                  { term: { kind: 7 } },
+                  { term: { "tags_map.e": eventId } },
+                ],
+              },
+            },
+            size: 0,
+            track_total_hits: true,
+          },
+        });
 
-      for (const bucket of engagementBuckets) {
-        const s = scores.get(bucket.key);
+        // 2: reposts (kind 6, 16)
+        engagementSearches.push({
+          index: this.indexName,
+          body: {
+            query: {
+              bool: {
+                must: [
+                  ...baseMust,
+                  { terms: { kind: [6, 16] } },
+                  { term: { "tags_map.e": eventId } },
+                ],
+              },
+            },
+            size: 0,
+            track_total_hits: true,
+          },
+        });
+
+        // 3: zaps (kind 9735) — need sum aggregation for amount_msats
+        engagementSearches.push({
+          index: this.indexName,
+          body: {
+            query: {
+              bool: {
+                must: [
+                  ...baseMust,
+                  { term: { kind: 9735 } },
+                  { term: { "tags_map.e": eventId } },
+                ],
+              },
+            },
+            size: 0,
+            track_total_hits: true,
+            aggs: {
+              total_msats: {
+                sum: { field: "amount_msats" },
+              },
+            },
+          },
+        });
+
+        // 4: quotes (kind 1 via tags_map.q)
+        engagementSearches.push({
+          index: this.indexName,
+          body: {
+            query: {
+              bool: {
+                must: [
+                  ...baseMust,
+                  { term: { kind: 1 } },
+                  { term: { "tags_map.q": eventId } },
+                ],
+              },
+            },
+            size: 0,
+            track_total_hits: true,
+          },
+        });
+
+        // 5: unique engagers (cardinality on pubkey)
+        engagementSearches.push({
+          index: this.indexName,
+          body: {
+            query: {
+              bool: {
+                must: [
+                  ...baseMust,
+                  { terms: { kind: [1, 6, 7, 16, 1111, 9735] } },
+                  { term: { "tags_map.e": eventId } },
+                ],
+              },
+            },
+            size: 0,
+            aggs: {
+              unique_authors: {
+                cardinality: { field: "pubkey" },
+              },
+            },
+          },
+        });
+      }
+
+      const engagementResult = await this.client.msearch(engagementSearches);
+      const responses = engagementResult.body.responses;
+
+      for (let i = 0; i < dirtyNonKind0Ids.length; i++) {
+        const s = scores.get(dirtyNonKind0Ids[i]);
         if (!s) continue;
 
-        s.engagers = bucket.unique_authors?.value ?? 0;
+        const base = i * QUERIES_PER_EVENT;
 
-        for (const kb of bucket.by_kind?.buckets || []) {
-          switch (kb.key) {
-            case 1:
-            case 1111:
-              s.comment_cnt += kb.doc_count;
-              break;
-            case 7:
-              s.reaction_cnt += kb.doc_count;
-              break;
-            case 6:
-            case 16:
-              s.repost_cnt += kb.doc_count;
-              break;
-          }
-        }
-      }
+        const getCount = (resp: Record<string, unknown>): number => {
+          const total = (resp?.hits as { total?: { value?: number } })?.total
+            ?.value;
+          return total ?? 0;
+        };
 
-      // Phase 3: Aggregate zap amounts (kind 9735) separately.
-      const zapResponse = await this.client.search({
-        index: this.indexName,
-        body: {
-          query: {
-            bool: {
-              must: [
-                { term: { deleted: false } },
-                { term: { replaced: false } },
-                { term: { kind: 9735 } },
-                { terms: { "tags_map.e": dirtyNonKind0Ids } },
-              ],
-            },
-          },
-          size: 0,
-          aggs: {
-            by_event: {
-              terms: {
-                field: "tags_map.e",
-                size: dirtyNonKind0Ids.length,
-                include: dirtyNonKind0Ids,
-              },
-              aggs: {
-                total_msats: {
-                  sum: { field: "amount_msats" },
-                },
-              },
-            },
-          },
-        },
-      });
-
-      const zapBuckets =
-        (
-          zapResponse.body.aggregations?.by_event as unknown as {
-            buckets?: Array<{
-              key: string;
-              doc_count: number;
-              total_msats?: { value: number };
-            }>;
-          }
-        )?.buckets || [];
-
-      for (const bucket of zapBuckets) {
-        const s = scores.get(bucket.key);
-        if (s) {
-          s.zap_amount_msats = bucket.total_msats?.value ?? 0;
-          s.zap_cnt = bucket.doc_count;
-        }
-      }
-
-      // Phase 3b: Aggregate quote reposts (kind 1 events referencing via `q` tag).
-      const quoteResponse = await this.client.search({
-        index: this.indexName,
-        body: {
-          query: {
-            bool: {
-              must: [
-                { term: { deleted: false } },
-                { term: { replaced: false } },
-                { term: { kind: 1 } },
-                { terms: { "tags_map.q": dirtyNonKind0Ids } },
-              ],
-            },
-          },
-          size: 0,
-          aggs: {
-            by_event: {
-              terms: {
-                field: "tags_map.q",
-                size: dirtyNonKind0Ids.length,
-                include: dirtyNonKind0Ids,
-              },
-            },
-          },
-        },
-      });
-
-      const quoteBuckets =
-        (
-          quoteResponse.body.aggregations?.by_event as unknown as {
-            buckets?: Array<{
-              key: string;
-              doc_count: number;
-            }>;
-          }
-        )?.buckets || [];
-
-      for (const bucket of quoteBuckets) {
-        const s = scores.get(bucket.key);
-        if (s) {
-          s.quote_cnt = bucket.doc_count;
-        }
+        // 0: comments
+        s.comment_cnt = getCount(responses[base]);
+        // 1: reactions
+        s.reaction_cnt = getCount(responses[base + 1]);
+        // 2: reposts
+        s.repost_cnt = getCount(responses[base + 2]);
+        // 3: zaps (count + sum)
+        s.zap_cnt = getCount(responses[base + 3]);
+        s.zap_amount_msats =
+          (
+            responses[base + 3]?.aggregations as {
+              total_msats?: { value?: number };
+            }
+          )?.total_msats?.value ?? 0;
+        // 4: quotes
+        s.quote_cnt = getCount(responses[base + 4]);
+        // 5: unique engagers
+        s.engagers =
+          (
+            responses[base + 5]?.aggregations as {
+              unique_authors?: { value?: number };
+            }
+          )?.unique_authors?.value ?? 0;
       }
     }
 
