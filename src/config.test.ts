@@ -261,6 +261,39 @@ describe("Config", () => {
     });
   });
 
+  describe("maxFilterValues", () => {
+    it("should default to 5000 when not set", () => {
+      const config = new Config(baseEnv());
+      assert.equal(config.maxFilterValues, 5000);
+    });
+
+    it("should parse from environment", () => {
+      const config = new Config(baseEnv([["RELAY_MAX_FILTER_VALUES", "2500"]]));
+      assert.equal(config.maxFilterValues, 2500);
+    });
+
+    it("should throw when not a number", () => {
+      assert.throws(
+        () => new Config(baseEnv([["RELAY_MAX_FILTER_VALUES", "nope"]])),
+        /RELAY_MAX_FILTER_VALUES/,
+      );
+    });
+
+    it("should throw when zero", () => {
+      assert.throws(
+        () => new Config(baseEnv([["RELAY_MAX_FILTER_VALUES", "0"]])),
+        /RELAY_MAX_FILTER_VALUES/,
+      );
+    });
+
+    it("should throw when negative", () => {
+      assert.throws(
+        () => new Config(baseEnv([["RELAY_MAX_FILTER_VALUES", "-1"]])),
+        /RELAY_MAX_FILTER_VALUES/,
+      );
+    });
+  });
+
   describe("historyKindsExcluded", () => {
     it("should default to NIP-85 kinds (30382-30385)", () => {
       const config = new Config(baseEnv());

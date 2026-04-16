@@ -92,6 +92,8 @@ export class Relay {
   private relayUrl: string;
   /** Kinds that require AUTH for REQ/COUNT queries and are excluded from unscoped queries. */
   private authKinds: Set<number>;
+  /** Maximum number of entries allowed in any single filter array field. */
+  private maxFilterValues: number;
 
   /** All open WebSocket connections. */
   private connections = new Set<ServerWebSocket<WebSocketData>>();
@@ -125,12 +127,20 @@ export class Relay {
        * actually enforced. Default: 4_000_000 (4 MB).
        */
       maxMessageLength?: number;
+      /**
+       * Maximum number of entries allowed in any single filter array field
+       * (`ids`, `authors`, `kinds`, or any `#<tag>`). Filters that exceed
+       * this cap are rejected. Advertised via NIP-11
+       * `limitation.max_filter_values`. Default: 5000.
+       */
+      maxFilterValues?: number;
     },
   ) {
     this.storage = storage;
     this.analyze = opts.analyze ?? defaultAnalyze;
     this.relayUrl = opts.relayUrl;
     this.authKinds = opts.authKinds ?? new Set();
+    this.maxFilterValues = opts.maxFilterValues ?? 5000;
     this.relayInfo = {
       name: "Ditto Relay",
       description: "A Nostr relay backed by OpenSearch",
@@ -148,9 +158,38 @@ export class Relay {
         min_pow_difficulty: 0,
         auth_required: false,
         payment_required: false,
-      },
+        // Non-standard: advertises per-field array cap so clients can
+        // split large `authors`/`ids`/#tag filters before sending.
+        max_filter_values: this.maxFilterValues,
+      } as NostrRelayInfo["limitation"] & { max_filter_values: number },
       ...opts?.relayInfo,
     };
+  }
+
+  /**
+   * Check if any array-valued filter field exceeds the configured cap.
+   * Returns the name of the offending field, or null if all are within limits.
+   */
+  private exceedsFilterValueCap(filter: Filter): string | null {
+    if (filter.ids && filter.ids.length > this.maxFilterValues) {
+      return "ids";
+    }
+    if (filter.authors && filter.authors.length > this.maxFilterValues) {
+      return "authors";
+    }
+    if (filter.kinds && filter.kinds.length > this.maxFilterValues) {
+      return "kinds";
+    }
+    for (const [key, values] of Object.entries(filter)) {
+      if (
+        key.startsWith("#") &&
+        Array.isArray(values) &&
+        values.length > this.maxFilterValues
+      ) {
+        return key;
+      }
+    }
+    return null;
   }
 
   getRelayInfo(): NostrRelayInfo {
@@ -1240,7 +1279,17 @@ export class Relay {
               ]);
               return;
             }
-            parsedFilters.push(parsed.data as Filter);
+            const filter = parsed.data as Filter;
+            const over = this.exceedsFilterValueCap(filter);
+            if (over !== null) {
+              this.sendMessage(ws, [
+                "CLOSED",
+                typeof subId === "string" ? subId : "",
+                `invalid: filter field "${over}" exceeds max_filter_values (${this.maxFilterValues})`,
+              ]);
+              return;
+            }
+            parsedFilters.push(filter);
           }
           await this.handleReq(ws, subId as string, parsedFilters);
           break;
@@ -1267,7 +1316,17 @@ export class Relay {
               ]);
               return;
             }
-            parsedCountFilters.push(parsed.data as Filter);
+            const filter = parsed.data as Filter;
+            const over = this.exceedsFilterValueCap(filter);
+            if (over !== null) {
+              this.sendMessage(ws, [
+                "CLOSED",
+                typeof countSubId === "string" ? countSubId : "",
+                `invalid: filter field "${over}" exceeds max_filter_values (${this.maxFilterValues})`,
+              ]);
+              return;
+            }
+            parsedCountFilters.push(filter);
           }
           await this.handleCount(ws, countSubId as string, parsedCountFilters);
           break;

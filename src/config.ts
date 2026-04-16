@@ -47,6 +47,12 @@ export class Config {
    * Default: 4_000_000 (4 MB).
    */
   readonly maxMessageLength: number;
+  /**
+   * Maximum number of entries in any single filter array (`ids`, `authors`,
+   * `kinds`, or any `#<tag>`). Caps the fan-out of per-filter OpenSearch
+   * `terms` clauses. Default: 5000.
+   */
+  readonly maxFilterValues: number;
   readonly nostrSigner: NostrSigner;
 
   constructor(env: { get(key: string): string | undefined }) {
@@ -175,6 +181,18 @@ export class Config {
         );
       }
       this.maxMessageLength = bytes;
+    }
+
+    // maxFilterValues
+    const maxFilterValuesValue = env.get("RELAY_MAX_FILTER_VALUES");
+    if (!maxFilterValuesValue) {
+      this.maxFilterValues = 5000;
+    } else {
+      const n = parseInt(maxFilterValuesValue, 10);
+      if (Number.isNaN(n) || n <= 0) {
+        throw new Error("RELAY_MAX_FILTER_VALUES must be a positive integer.");
+      }
+      this.maxFilterValues = n;
     }
 
     // nostrSigner

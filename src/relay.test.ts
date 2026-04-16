@@ -1085,6 +1085,98 @@ describe("Relay", () => {
       });
     });
 
+    describe("REQ/COUNT per-field max_filter_values cap", () => {
+      let smallRelay: Relay;
+      beforeEach(() => {
+        smallRelay = new Relay(mockStorage, {
+          relayUrl: "wss://relay.test/",
+          maxFilterValues: 3,
+        });
+      });
+
+      it("advertises max_filter_values in NIP-11 limitation", () => {
+        const info = smallRelay.getRelayInfo();
+        const lim = info.limitation as
+          | { max_filter_values?: number }
+          | undefined;
+        assert.equal(lim?.max_filter_values, 3);
+      });
+
+      it("rejects REQ with authors array over cap", async () => {
+        const authors = Array.from({ length: 4 }, (_, i) =>
+          `${i}`.padStart(64, "0"),
+        );
+        const message = JSON.stringify(["REQ", "sub1", { authors }]);
+        await smallRelay.handleMessage(mockWs, message);
+        assert.equal(sentMessages[0][0], "CLOSED");
+        assert.equal(sentMessages[0][1], "sub1");
+        assert.ok((sentMessages[0][2] as string).includes("max_filter_values"));
+        assert.ok((sentMessages[0][2] as string).includes("authors"));
+      });
+
+      it("rejects REQ with ids array over cap", async () => {
+        const ids = Array.from({ length: 4 }, (_, i) =>
+          `${i}`.padStart(64, "a"),
+        );
+        const message = JSON.stringify(["REQ", "sub1", { ids }]);
+        await smallRelay.handleMessage(mockWs, message);
+        assert.equal(sentMessages[0][0], "CLOSED");
+        assert.ok((sentMessages[0][2] as string).includes('"ids"'));
+      });
+
+      it("rejects REQ with kinds array over cap", async () => {
+        const kinds = [1, 2, 3, 4];
+        const message = JSON.stringify(["REQ", "sub1", { kinds }]);
+        await smallRelay.handleMessage(mockWs, message);
+        assert.equal(sentMessages[0][0], "CLOSED");
+        assert.ok((sentMessages[0][2] as string).includes('"kinds"'));
+      });
+
+      it("rejects REQ with #tag array over cap", async () => {
+        const message = JSON.stringify([
+          "REQ",
+          "sub1",
+          { "#e": ["a", "b", "c", "d"] },
+        ]);
+        await smallRelay.handleMessage(mockWs, message);
+        assert.equal(sentMessages[0][0], "CLOSED");
+        assert.ok((sentMessages[0][2] as string).includes('"#e"'));
+      });
+
+      it("accepts REQ with authors array exactly at cap", async () => {
+        mockStorage.query = async () => [];
+        const authors = Array.from({ length: 3 }, (_, i) =>
+          `${i}`.padStart(64, "0"),
+        );
+        const message = JSON.stringify(["REQ", "sub1", { authors }]);
+        await smallRelay.handleMessage(mockWs, message);
+        const last = sentMessages[sentMessages.length - 1];
+        assert.equal(last[0], "EOSE");
+      });
+
+      it("rejects COUNT when filter exceeds cap", async () => {
+        const authors = Array.from({ length: 4 }, (_, i) =>
+          `${i}`.padStart(64, "0"),
+        );
+        const message = JSON.stringify(["COUNT", "c1", { authors }]);
+        await smallRelay.handleMessage(mockWs, message);
+        assert.equal(sentMessages[0][0], "CLOSED");
+        assert.equal(sentMessages[0][1], "c1");
+        assert.ok((sentMessages[0][2] as string).includes("max_filter_values"));
+      });
+
+      it("default cap is 5000 when not configured", () => {
+        const defaultRelay = new Relay(mockStorage, {
+          relayUrl: "wss://relay.test/",
+        });
+        const info = defaultRelay.getRelayInfo();
+        const lim = info.limitation as
+          | { max_filter_values?: number }
+          | undefined;
+        assert.equal(lim?.max_filter_values, 5000);
+      });
+    });
+
     it("should reject REQ with missing parameters", async () => {
       const message = JSON.stringify(["REQ", "sub1"]);
       await relay.handleMessage(mockWs, message);
