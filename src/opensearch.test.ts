@@ -1880,6 +1880,86 @@ describe("OpenSearchRelay", () => {
     });
   });
 
+  describe("pendingDirty cap", () => {
+    it("MAX_PENDING_DIRTY constant is exposed and has a reasonable value", () => {
+      assert.equal(typeof OpenSearchRelay.MAX_PENDING_DIRTY, "number");
+      assert.ok(OpenSearchRelay.MAX_PENDING_DIRTY > 0);
+    });
+
+    it("addDirtyIds stops adding when the cap is reached", () => {
+      const relay = new OpenSearchRelay({} as unknown as Client, {
+        indexName: "test",
+      });
+      // biome-ignore lint/suspicious/noExplicitAny: access private field for testing
+      const state = relay as any;
+
+      // Pre-fill the set up to one less than the cap.
+      const cap = OpenSearchRelay.MAX_PENDING_DIRTY;
+      for (let i = 0; i < cap - 1; i++) {
+        state.pendingDirtyIds.add(`id-${i}`);
+      }
+
+      // Adding 100 more should only add 1 (filling the cap) and drop the
+      // remaining 99.
+      const origWarn = console.warn;
+      console.warn = () => {};
+      try {
+        relay.addDirtyIds(Array.from({ length: 100 }, (_, i) => `new-${i}`));
+      } finally {
+        console.warn = origWarn;
+      }
+
+      assert.equal(state.pendingDirtyIds.size, cap);
+      // The first of the 100 was added before the cap was hit.
+      assert.ok(state.pendingDirtyIds.has("new-0"));
+      // The last of the 100 was dropped.
+      assert.ok(!state.pendingDirtyIds.has("new-99"));
+    });
+
+    it("addDirtyPubkeys stops adding when the cap is reached", () => {
+      const relay = new OpenSearchRelay({} as unknown as Client, {
+        indexName: "test",
+      });
+      // biome-ignore lint/suspicious/noExplicitAny: access private field for testing
+      const state = relay as any;
+
+      const cap = OpenSearchRelay.MAX_PENDING_DIRTY;
+      for (let i = 0; i < cap; i++) {
+        state.pendingDirtyPubkeys.add(`pk-${i}`);
+      }
+
+      const origWarn = console.warn;
+      console.warn = () => {};
+      try {
+        relay.addDirtyPubkeys(["overflow-a", "overflow-b"]);
+      } finally {
+        console.warn = origWarn;
+      }
+
+      assert.equal(state.pendingDirtyPubkeys.size, cap);
+      assert.ok(!state.pendingDirtyPubkeys.has("overflow-a"));
+    });
+
+    it("drainDirty clears state and resets overflow warn flag", () => {
+      const relay = new OpenSearchRelay({} as unknown as Client, {
+        indexName: "test",
+      });
+      // biome-ignore lint/suspicious/noExplicitAny: access private field for testing
+      const state = relay as any;
+
+      state.pendingDirtyIds.add("one");
+      state.pendingDirtyPubkeys.add("two");
+      state.dirtyOverflowWarned = true;
+
+      const drained = relay.drainDirty();
+      assert.deepEqual(drained.ids, ["one"]);
+      assert.deepEqual(drained.pubkeys, ["two"]);
+      assert.equal(state.pendingDirtyIds.size, 0);
+      assert.equal(state.pendingDirtyPubkeys.size, 0);
+      assert.equal(state.dirtyOverflowWarned, false);
+    });
+  });
+
   describe("NIP-50 sort", () => {
     // Mock client with precomputed score support for sort tests.
     // Score fields are set directly on documents by tests; the mock client

@@ -87,10 +87,34 @@ if (trendsIntervalMs > 0) {
 
 // ---------------------------------------------------------------------------
 // Dirty set accumulation
+//
+// Cap each accumulator at MAX_DIRTY entries. Without this, a flood of
+// referencing events from the main thread can balloon these sets between
+// recompute ticks, driving `recomputeScores` to issue 6 msearches per dirty
+// id (and 1 per dirty pubkey). The cap on the main-thread relay sets
+// (OpenSearchRelay.MAX_PENDING_DIRTY) already limits what reaches us, but
+// this is a second belt-and-braces bound in case callers grow.
 // ---------------------------------------------------------------------------
 
+const MAX_DIRTY = 100_000;
 const dirtyIds = new Set<string>();
 const dirtyPubkeys = new Set<string>();
+let dirtyOverflowLogged = false;
+
+function addBounded(set: Set<string>, values: string[], label: string): void {
+  for (const v of values) {
+    if (set.size >= MAX_DIRTY) {
+      if (!dirtyOverflowLogged) {
+        console.warn(
+          `[bg-worker] dirty ${label} set full (${MAX_DIRTY}); dropping further additions until next recompute cycle`,
+        );
+        dirtyOverflowLogged = true;
+      }
+      return;
+    }
+    set.add(v);
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Message handler — receives dirty sets from main thread
@@ -100,10 +124,11 @@ self.onmessage = (event: MessageEvent) => {
   const msg = event.data;
 
   if (msg.type === "dirty") {
-    for (const id of msg.ids) dirtyIds.add(id);
-    for (const pk of msg.pubkeys) dirtyPubkeys.add(pk);
+    addBounded(dirtyIds, msg.ids, "ids");
+    addBounded(dirtyPubkeys, msg.pubkeys, "pubkeys");
     if (msg.addrs.length > 0) nip85.addDirtyAddrs(new Set(msg.addrs));
-    if (msg.identifiers.length > 0) nip85.addDirtyIdentifiers(new Set(msg.identifiers));
+    if (msg.identifiers.length > 0)
+      nip85.addDirtyIdentifiers(new Set(msg.identifiers));
   }
 };
 
@@ -119,6 +144,7 @@ async function recomputeLoop(): Promise<void> {
   const pubkeys = dirtyPubkeys.size > 0 ? [...dirtyPubkeys] : [];
   dirtyIds.clear();
   dirtyPubkeys.clear();
+  dirtyOverflowLogged = false;
 
   if (ids.length === 0 && pubkeys.length === 0) {
     // Even with no dirty events, still flush NIP-85 addr/identifier stats

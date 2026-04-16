@@ -42,10 +42,20 @@ export class Nip85 {
   private signer: NostrSigner;
   private broadcast?: (event: NostrEvent) => void;
 
+  /**
+   * Maximum size of each dirty set. Once reached, further additions are
+   * dropped until the next flush. Prevents unbounded growth if the flush
+   * loop falls behind ingest (each dirty entry triggers OpenSearch
+   * aggregations in {@link flushAddrStats} / {@link flushIdentifierStats}).
+   */
+  static readonly MAX_DIRTY = 100_000;
+
   /** Addressable event addresses (`<kind>:<pubkey>:<d-tag>`) needing stats refresh. */
   private dirtyAddrs = new Set<string>();
   /** NIP-73 external identifiers needing stats refresh. */
   private dirtyIdentifiers = new Set<string>();
+  /** Whether we've already warned about a full dirty set this flush cycle. */
+  private dirtyOverflowWarned = false;
 
   constructor(opts: Nip85Opts) {
     this.client = opts.client;
@@ -149,15 +159,21 @@ export class Nip85 {
     this.dirtyAddrs.clear();
     const identifiers = [...this.dirtyIdentifiers];
     this.dirtyIdentifiers.clear();
+    this.dirtyOverflowWarned = false;
     return { addrs, identifiers };
   }
 
   /**
    * Accept dirty addressable event addresses for later stats computation.
-   * Called by the {@link OpenSearchRelay.onDirtyAddrs} callback.
+   * Called by the {@link OpenSearchRelay.onDirtyAddrs} callback. Silently
+   * drops additions past {@link MAX_DIRTY} to bound worst-case fan-out.
    */
   addDirtyAddrs(addrs: Set<string>): void {
     for (const addr of addrs) {
+      if (this.dirtyAddrs.size >= Nip85.MAX_DIRTY) {
+        this.warnDirtyOverflow("addrs");
+        return;
+      }
       this.dirtyAddrs.add(addr);
     }
   }
@@ -178,6 +194,7 @@ export class Nip85 {
     // Atomically drain dirty set.
     const addrs = [...this.dirtyAddrs];
     this.dirtyAddrs.clear();
+    this.dirtyOverflowWarned = false;
 
     if (addrs.length === 0) return;
 
@@ -217,10 +234,25 @@ export class Nip85 {
   /**
    * Accept dirty external identifiers for later stats computation.
    * Called by the {@link OpenSearchRelay.onDirtyIdentifiers} callback.
+   * Silently drops additions past {@link MAX_DIRTY}.
    */
   addDirtyIdentifiers(identifiers: Set<string>): void {
     for (const id of identifiers) {
+      if (this.dirtyIdentifiers.size >= Nip85.MAX_DIRTY) {
+        this.warnDirtyOverflow("identifiers");
+        return;
+      }
       this.dirtyIdentifiers.add(id);
+    }
+  }
+
+  /** Log once per flush cycle when a dirty set hits the cap. */
+  private warnDirtyOverflow(which: string): void {
+    if (!this.dirtyOverflowWarned) {
+      console.warn(
+        `[nip85] dirty ${which} set full (${Nip85.MAX_DIRTY}); dropping further additions until next flush`,
+      );
+      this.dirtyOverflowWarned = true;
     }
   }
 
@@ -237,6 +269,7 @@ export class Nip85 {
     // Atomically drain dirty set.
     const identifiers = [...this.dirtyIdentifiers];
     this.dirtyIdentifiers.clear();
+    this.dirtyOverflowWarned = false;
 
     if (identifiers.length === 0) return;
 

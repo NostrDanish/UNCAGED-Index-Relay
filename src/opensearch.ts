@@ -147,6 +147,19 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
   private pendingDirtyPubkeys = new Set<string>();
 
   /**
+   * Maximum size of each pending-dirty set. When a set is full, further
+   * additions are silently dropped until the next drain. This bounds the
+   * fan-out of score-recomputation work triggered by a single flood of
+   * referencing events (kinds 1/6/7/16/17/1111/9735), since each dirty ID
+   * produces 6 msearches and each dirty pubkey produces 1 msearch in
+   * {@link recomputeScores}.
+   */
+  static readonly MAX_PENDING_DIRTY = 100_000;
+
+  /** Whether we've already warned about a full dirty set this drain cycle. */
+  private dirtyOverflowWarned = false;
+
+  /**
    * Optional callback invoked when engagement events reference addressable
    * events via `a` tags. Called with the set of `a` tag values (event
    * addresses like `30023:pubkey:slug`) that need NIP-85 stats updates.
@@ -162,20 +175,44 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
 
   /**
    * Add event IDs to the pending dirty set for score recomputation.
+   * Silently drops additions when {@link MAX_PENDING_DIRTY} is reached.
    * Used by the background worker to inject dirty state received from the
    * main thread via `postMessage`.
    */
   addDirtyIds(ids: string[]): void {
-    for (const id of ids) this.pendingDirtyIds.add(id);
+    for (const id of ids) {
+      if (this.pendingDirtyIds.size >= OpenSearchRelay.MAX_PENDING_DIRTY) {
+        this.warnDirtyOverflow("ids");
+        return;
+      }
+      this.pendingDirtyIds.add(id);
+    }
   }
 
   /**
    * Add pubkeys to the pending dirty set for score recomputation.
+   * Silently drops additions when {@link MAX_PENDING_DIRTY} is reached.
    * Used by the background worker to inject dirty state received from the
    * main thread via `postMessage`.
    */
   addDirtyPubkeys(pubkeys: string[]): void {
-    for (const pk of pubkeys) this.pendingDirtyPubkeys.add(pk);
+    for (const pk of pubkeys) {
+      if (this.pendingDirtyPubkeys.size >= OpenSearchRelay.MAX_PENDING_DIRTY) {
+        this.warnDirtyOverflow("pubkeys");
+        return;
+      }
+      this.pendingDirtyPubkeys.add(pk);
+    }
+  }
+
+  /** Log once per drain cycle when a dirty set hits the cap. */
+  private warnDirtyOverflow(which: string): void {
+    if (!this.dirtyOverflowWarned) {
+      console.warn(
+        `[opensearch] pendingDirty${which === "ids" ? "Ids" : "Pubkeys"} full (${OpenSearchRelay.MAX_PENDING_DIRTY}); dropping further additions until drain`,
+      );
+      this.dirtyOverflowWarned = true;
+    }
   }
 
   /**
@@ -188,6 +225,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     this.pendingDirtyIds = new Set();
     const pubkeys = [...this.pendingDirtyPubkeys];
     this.pendingDirtyPubkeys = new Set();
+    this.dirtyOverflowWarned = false;
     return { ids, pubkeys };
   }
 
@@ -1659,8 +1697,13 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
         // Mark kind 0 pubkey as dirty so follower count gets recomputed
         // on the next recomputeScores() cycle. Follower counts are
         // pubkey-based (from kind 3 contact lists), so they transfer
-        // to the new profile event automatically.
-        if (slot.kind === 0) {
+        // to the new profile event automatically. Cap-aware: if the set
+        // is full we just skip — the slot will be picked up on a later
+        // flush once the current batch drains.
+        if (
+          slot.kind === 0 &&
+          this.pendingDirtyPubkeys.size < OpenSearchRelay.MAX_PENDING_DIRTY
+        ) {
           this.pendingDirtyPubkeys.add(slot.pubkey);
         }
       } catch (error) {
@@ -1704,6 +1747,25 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     const referencedAddrs = new Set<string>();
     const referencedIdentifiers = new Set<string>();
 
+    // Cap-aware helpers. Once either set is full, subsequent additions are
+    // dropped until the next drain. We use these instead of direct `.add()`
+    // so a single flood of referencing events cannot amplify into unbounded
+    // recomputeScores() work.
+    const addDirtyId = (id: string): void => {
+      if (this.pendingDirtyIds.size >= OpenSearchRelay.MAX_PENDING_DIRTY) {
+        this.warnDirtyOverflow("ids");
+        return;
+      }
+      this.pendingDirtyIds.add(id);
+    };
+    const addDirtyPubkey = (pk: string): void => {
+      if (this.pendingDirtyPubkeys.size >= OpenSearchRelay.MAX_PENDING_DIRTY) {
+        this.warnDirtyOverflow("pubkeys");
+        return;
+      }
+      this.pendingDirtyPubkeys.add(pk);
+    };
+
     for (const entry of entries) {
       // Engagement-referencing events: accumulate target event IDs,
       // and collect addressable event references via `a` tags.
@@ -1712,7 +1774,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
         if (entry.event.kind === 7) {
           for (let i = entry.event.tags.length - 1; i >= 0; i--) {
             if (entry.event.tags[i][0] === "e" && entry.event.tags[i][1]) {
-              this.pendingDirtyIds.add(entry.event.tags[i][1]);
+              addDirtyId(entry.event.tags[i][1]);
               break;
             }
           }
@@ -1720,10 +1782,10 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
 
         for (const tag of entry.event.tags) {
           if (tag[0] === "e" && tag[1] && entry.event.kind !== 7) {
-            this.pendingDirtyIds.add(tag[1]);
+            addDirtyId(tag[1]);
           } else if (tag[0] === "q" && tag[1]) {
             // NIP-18: Quote reposts reference the quoted event via `q` tag.
-            this.pendingDirtyIds.add(tag[1]);
+            addDirtyId(tag[1]);
           } else if (tag[0] === "a" && tag[1]) {
             referencedAddrs.add(tag[1]);
           } else if (tag[0] === "i" && tag[1]) {
@@ -1739,7 +1801,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
       if (entry.event.kind === 3) {
         for (const tag of entry.event.tags) {
           if (tag[0] === "p" && tag[1]) {
-            this.pendingDirtyPubkeys.add(tag[1]);
+            addDirtyPubkey(tag[1]);
           }
         }
       }
@@ -1769,6 +1831,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     this.pendingDirtyIds = new Set();
     const pubkeys = this.pendingDirtyPubkeys;
     this.pendingDirtyPubkeys = new Set();
+    this.dirtyOverflowWarned = false;
     return { ids, pubkeys };
   }
 
