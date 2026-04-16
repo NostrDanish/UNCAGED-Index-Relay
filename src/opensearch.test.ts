@@ -4440,9 +4440,10 @@ describe("OpenSearchRelay", () => {
     });
 
     it("default cap is TAG_VALUE_MAX_COUNT_PER_NAME (5000) — kind-3 contact lists index fully", async () => {
-      // A kind-3 contact list with 2000 p-tags (NIP-11 max_event_tags) must
-      // be fully projected into tags_map.p with the default cap, otherwise
-      // follower counts and NIP-85 stats would be wrong.
+      // A kind-3 contact list with 2000 p-tags must be fully projected into
+      // tags_map.p with the default cap, otherwise follower counts and
+      // NIP-85 stats would be wrong. The cap is also advertised as NIP-11
+      // `limitation.max_event_tags`.
       assert.equal(OpenSearchRelay.TAG_VALUE_MAX_COUNT_PER_NAME, 5000);
       const tags = Array.from({ length: 2000 }, (_, i) => [
         "p",

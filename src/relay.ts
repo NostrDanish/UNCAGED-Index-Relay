@@ -134,6 +134,15 @@ export class Relay {
        * `limitation.max_filter_values`. Default: 5000.
        */
       maxFilterValues?: number;
+      /**
+       * Maximum number of tags on a single event that the indexer will fully
+       * project into `tags_map`. Only advertised via NIP-11
+       * `limitation.max_event_tags` — events exceeding this are still
+       * accepted and stored verbatim, but per-tag-name values beyond this
+       * count are dropped from the searchable projection. Should match the
+       * storage layer's `tagValueMaxCountPerName`. Default: 5000.
+       */
+      maxEventTags?: number;
     },
   ) {
     this.storage = storage;
@@ -153,8 +162,7 @@ export class Relay {
         max_filters: 100,
         max_limit: 5000,
         max_subid_length: 100,
-        max_event_tags: 2000,
-        max_content_length: 102400,
+        max_event_tags: opts.maxEventTags ?? 5000,
         min_pow_difficulty: 0,
         auth_required: false,
         payment_required: false,

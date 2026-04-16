@@ -1177,6 +1177,43 @@ describe("Relay", () => {
       });
     });
 
+    describe("NIP-11 limitation accuracy", () => {
+      it("advertises max_event_tags matching the constructor option", () => {
+        const customRelay = new Relay(mockStorage, {
+          relayUrl: "wss://relay.test/",
+          maxEventTags: 1234,
+        });
+        const lim = customRelay.getRelayInfo().limitation as
+          | { max_event_tags?: number }
+          | undefined;
+        assert.equal(lim?.max_event_tags, 1234);
+      });
+
+      it("defaults max_event_tags to 5000 when unset", () => {
+        const defaultRelay = new Relay(mockStorage, {
+          relayUrl: "wss://relay.test/",
+        });
+        const lim = defaultRelay.getRelayInfo().limitation as
+          | { max_event_tags?: number }
+          | undefined;
+        assert.equal(lim?.max_event_tags, 5000);
+      });
+
+      it("does not advertise max_content_length (not enforced beyond max_message_length)", () => {
+        const defaultRelay = new Relay(mockStorage, {
+          relayUrl: "wss://relay.test/",
+        });
+        const lim = defaultRelay.getRelayInfo().limitation as
+          | Record<string, unknown>
+          | undefined;
+        assert.ok(lim, "limitation object is present");
+        assert.ok(
+          !("max_content_length" in (lim as object)),
+          "max_content_length should not be advertised",
+        );
+      });
+    });
+
     it("should reject REQ with missing parameters", async () => {
       const message = JSON.stringify(["REQ", "sub1"]);
       await relay.handleMessage(mockWs, message);

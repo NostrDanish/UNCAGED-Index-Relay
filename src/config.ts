@@ -56,9 +56,10 @@ export class Config {
   /**
    * Maximum number of values stored per tag name in the indexed `tags_map`
    * projection. Bounds the per-document inverted-index growth from events
-   * with very high tag counts. Default: 5000 (matches the NIP-11
-   * `max_event_tags` recommendation so any compliant event is fully
-   * indexable).
+   * with very high tag counts. Also surfaced to clients as NIP-11
+   * `limitation.max_event_tags`: events with more tags of the same name
+   * are still accepted and stored verbatim, but values beyond this count
+   * are dropped from the searchable projection. Default: 5000.
    */
   readonly tagValueMaxCountPerName: number;
   readonly nostrSigner: NostrSigner;
