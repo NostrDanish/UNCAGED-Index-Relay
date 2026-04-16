@@ -24,13 +24,26 @@ interface PendingRequest {
  * Events are batched per microtask and dispatched to workers in
  * arrays to amortize the structured-clone cost of postMessage.
  */
+/** Request sent to a worker: an event tagged with an opaque correlation id. */
+export interface AnalyzeRequest {
+  reqId: number;
+  event: NostrEvent;
+}
+
 export class AnalyzePool {
   private workers: Worker[];
-  private pending: Map<string, PendingRequest> = new Map();
+  private pending: Map<number, PendingRequest> = new Map();
   private nextWorker = 0;
+  /**
+   * Monotonic correlation counter. Wraps at Number.MAX_SAFE_INTEGER as a
+   * cheap belt-and-suspenders — in practice it will never overflow, but
+   * wrapping keeps the counter from silently producing non-integer ids
+   * if the relay runs long enough to hit 2^53.
+   */
+  private nextReqId = 0;
 
-  /** Per-worker queues of events awaiting dispatch. */
-  private queues: NostrEvent[][];
+  /** Per-worker queues of requests awaiting dispatch. */
+  private queues: AnalyzeRequest[][];
   /** Whether a microtask flush is already scheduled. */
   private flushScheduled = false;
 
@@ -42,12 +55,12 @@ export class AnalyzePool {
     this.workers = Array.from({ length: poolSize }, () => {
       const worker = new Worker(workerUrl, { smol: true });
       worker.onmessage = (
-        event: MessageEvent<({ id: string } & AnalyzeResult)[]>,
+        event: MessageEvent<({ reqId: number } & AnalyzeResult)[]>,
       ) => {
         const results = event.data;
         for (const result of results) {
           const {
-            id,
+            reqId,
             verified,
             search_text,
             language,
@@ -55,9 +68,9 @@ export class AnalyzePool {
             media,
             video,
           } = result;
-          const request = this.pending.get(id);
+          const request = this.pending.get(reqId);
           if (request) {
-            this.pending.delete(id);
+            this.pending.delete(reqId);
             request.resolve({
               verified,
               ...(search_text && { search_text }),
@@ -86,10 +99,14 @@ export class AnalyzePool {
     const workerIndex = this.nextWorker;
     this.nextWorker = (this.nextWorker + 1) % this.workers.length;
 
+    const reqId = this.nextReqId;
+    this.nextReqId =
+      this.nextReqId >= Number.MAX_SAFE_INTEGER ? 0 : this.nextReqId + 1;
+
     return new Promise<AnalyzeResult>((resolve, reject) => {
-      this.pending.set(`${event.id}:${event.sig}`, { resolve, reject });
+      this.pending.set(reqId, { resolve, reject });
       analyzePendingGauge.set(this.pending.size);
-      this.queues[workerIndex].push(event);
+      this.queues[workerIndex].push({ reqId, event });
       if (!this.flushScheduled) {
         this.flushScheduled = true;
         queueMicrotask(() => this.flush());

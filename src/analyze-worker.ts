@@ -13,7 +13,7 @@ import { initNostrWasm } from "nostr-wasm";
 import Sentiment from "sentiment";
 import { detect as detectLanguage } from "tinyld";
 
-import type { AnalyzeResult } from "./analyze-pool.ts";
+import type { AnalyzeRequest, AnalyzeResult } from "./analyze-pool.ts";
 import { detectMedia } from "./media.ts";
 import { buildSearchText } from "./search-text.ts";
 
@@ -86,11 +86,11 @@ function detectEventSentiment(
   return "neutral";
 }
 
-/** Analyze a single event and return the result with its correlation id. */
+/** Analyze a single request and return the result with its correlation id. */
 function analyzeOne(
-  nostrEvent: NostrEvent,
-): { id: string } & AnalyzeResult {
-  const id = `${nostrEvent.id}:${nostrEvent.sig}`;
+  request: AnalyzeRequest,
+): { reqId: number } & AnalyzeResult {
+  const { reqId, event: nostrEvent } = request;
 
   // Step 1: Verify signature
   let verified: boolean;
@@ -103,7 +103,7 @@ function analyzeOne(
 
   // Short-circuit if verification failed — don't waste time on analysis
   if (!verified) {
-    return { id, verified };
+    return { reqId, verified };
   }
 
   // Step 2: Build search text (used by language/sentiment detection below)
@@ -115,7 +115,7 @@ function analyzeOne(
   const { media, video } = detectMedia(nostrEvent);
 
   return {
-    id,
+    reqId,
     verified,
     ...(searchText && { search_text: searchText }),
     ...(language && { language }),
@@ -125,7 +125,7 @@ function analyzeOne(
   };
 }
 
-self.onmessage = (event: MessageEvent<NostrEvent[]>) => {
+self.onmessage = (event: MessageEvent<AnalyzeRequest[]>) => {
   const batch = event.data;
   const results = batch.map(analyzeOne);
   postMessage(results);

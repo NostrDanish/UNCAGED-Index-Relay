@@ -205,7 +205,7 @@ describe("AnalyzePool", () => {
     assert.ok(results.every((r) => r.verified === true));
   });
 
-  it("should correctly correlate responses using id:sig key", async () => {
+  it("should correctly correlate responses across distinct events", async () => {
     console.log = () => {};
     pool = new AnalyzePool(1);
 
@@ -220,6 +220,37 @@ describe("AnalyzePool", () => {
 
     assert.equal(result1.verified, true);
     assert.equal(result2.verified, true);
+  });
+
+  it("should resolve both promises when the same event is submitted concurrently", async () => {
+    console.log = () => {};
+    pool = new AnalyzePool(1);
+
+    // Submit the identical event object twice in parallel. Before the
+    // reqId-based correlation fix, the second call overwrote the first
+    // in the pending map (keyed by `${id}:${sig}`), causing one promise
+    // to hang forever. Both must now resolve independently.
+    const event = createValidEvent("duplicate submission");
+
+    const [result1, result2] = await Promise.all([
+      pool.analyze(event),
+      pool.analyze(event),
+    ]);
+
+    assert.equal(result1.verified, true);
+    assert.equal(result2.verified, true);
+  });
+
+  it("should resolve all promises when the same event is submitted many times concurrently", async () => {
+    console.log = () => {};
+    pool = new AnalyzePool(2);
+
+    const event = createValidEvent("highly duplicated submission");
+    const promises = Array.from({ length: 10 }, () => pool.analyze(event));
+
+    const results = await Promise.all(promises);
+    assert.equal(results.length, 10);
+    assert.ok(results.every((r) => r.verified === true));
   });
 
   it("should reject pending requests on dispose", async () => {
