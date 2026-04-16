@@ -31,8 +31,22 @@ const MEDIA_EXTENSIONS: Record<string, string> = {
   opus: "audio",
 };
 
-/** Regex to match media URLs with file extensions in text. */
-const MEDIA_URL_RE = /https?:\/\/\S+\.(\w+)(?:\?\S*)?(?:#\S*)?(?=\s|$)/gi;
+/**
+ * Maximum number of bytes of `event.content` scanned for media URLs.
+ *
+ * This is a hard DoS defense, independent of NIP-11 `max_content_length`,
+ * because this function runs on the main event-handling path. URLs that
+ * straddle the boundary are silently dropped.
+ */
+const MAX_CONTENT_SCAN = 32_768;
+
+/**
+ * Anchored per-token media URL regex. Matched against whitespace-delimited
+ * tokens rather than against raw content with the `g` flag, which eliminates
+ * catastrophic backtracking on adversarial input. Capture group 1 is the
+ * file extension.
+ */
+const MEDIA_URL_TOKEN_RE = /^https?:\/\/[^\s?#]+\.(\w+)(?:[?#][^\s]*)?$/i;
 
 /**
  * Parse imeta tags from an event into structured metadata entries.
@@ -71,14 +85,26 @@ export function detectMedia(event: NostrEvent): {
 } {
   const imeta = parseImeta(event);
 
-  // Fallback: for kind 1 events without imeta tags, detect media URLs in content
+  // Fallback: for kind 1 events without imeta tags, detect media URLs in content.
+  // Scanning is capped at MAX_CONTENT_SCAN bytes, then tokenized on whitespace
+  // and each token is tested against an anchored regex — this avoids the
+  // quadratic backtracking the previous unanchored/global regex exhibited on
+  // adversarial input.
   if (imeta.length === 0 && event.kind === 1) {
-    for (const match of event.content.matchAll(MEDIA_URL_RE)) {
+    const scanBuf =
+      event.content.length > MAX_CONTENT_SCAN
+        ? event.content.slice(0, MAX_CONTENT_SCAN)
+        : event.content;
+
+    for (const token of scanBuf.split(/\s+/)) {
+      if (token.length === 0) continue;
+      const match = MEDIA_URL_TOKEN_RE.exec(token);
+      if (!match) continue;
       const ext = match[1].toLowerCase();
       const baseType = MEDIA_EXTENSIONS[ext];
       if (baseType) {
         const map = new Map<string, string>();
-        map.set("url", match[0]);
+        map.set("url", token);
         map.set("m", `${baseType}/${ext}`);
         imeta.push(map);
       }
