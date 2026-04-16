@@ -821,6 +821,153 @@ describe("Relay", () => {
       assert.ok((sentMessages[0][1] as string).includes("exactly 1 parameter"));
     });
 
+    describe("EVENT payload schema validation", () => {
+      // A well-formed EVENT payload with a valid 64-hex id. Individual tests
+      // mutate a single field to prove validation catches it.
+      const validIdHex = "a".repeat(64);
+      const validPubkey = "b".repeat(64);
+      const validSig = "c".repeat(128);
+      const baseEvent = () => ({
+        id: validIdHex,
+        pubkey: validPubkey,
+        created_at: 1_700_000_000,
+        kind: 1,
+        tags: [],
+        content: "hi",
+        sig: validSig,
+      });
+
+      it("rejects EVENT with non-object payload (string)", async () => {
+        const message = JSON.stringify(["EVENT", "not an event"]);
+        await relay.handleMessage(mockWs, message);
+        assert.equal(sentMessages.length, 1);
+        assert.equal(sentMessages[0][0], "NOTICE");
+        assert.ok((sentMessages[0][1] as string).includes("schema validation"));
+      });
+
+      it("rejects EVENT with null payload", async () => {
+        const message = JSON.stringify(["EVENT", null]);
+        await relay.handleMessage(mockWs, message);
+        assert.equal(sentMessages.length, 1);
+        assert.equal(sentMessages[0][0], "NOTICE");
+      });
+
+      it("rejects EVENT with missing id (no OK reply, falls back to NOTICE)", async () => {
+        const bad = baseEvent();
+        delete (bad as { id?: string }).id;
+        const message = JSON.stringify(["EVENT", bad]);
+        await relay.handleMessage(mockWs, message);
+        assert.equal(sentMessages.length, 1);
+        assert.equal(sentMessages[0][0], "NOTICE");
+      });
+
+      it("replies OK/false when id is valid-looking but other fields fail", async () => {
+        const bad = { ...baseEvent(), kind: "not-a-number" };
+        const message = JSON.stringify(["EVENT", bad]);
+        await relay.handleMessage(mockWs, message);
+        assert.equal(sentMessages.length, 1);
+        assert.deepEqual(sentMessages[0], [
+          "OK",
+          validIdHex,
+          false,
+          "invalid: event failed schema validation",
+        ]);
+      });
+
+      it("rejects EVENT with short id", async () => {
+        const bad = { ...baseEvent(), id: "abc" };
+        const message = JSON.stringify(["EVENT", bad]);
+        await relay.handleMessage(mockWs, message);
+        assert.equal(sentMessages.length, 1);
+        // id isn't 64-hex, so fallback to NOTICE
+        assert.equal(sentMessages[0][0], "NOTICE");
+      });
+
+      it("rejects EVENT with tags as string", async () => {
+        const bad = { ...baseEvent(), tags: "lol" };
+        const message = JSON.stringify(["EVENT", bad]);
+        await relay.handleMessage(mockWs, message);
+        assert.equal(sentMessages.length, 1);
+        assert.equal(sentMessages[0][0], "OK");
+        assert.equal(sentMessages[0][2], false);
+      });
+
+      it("rejects EVENT with non-string tag element", async () => {
+        const bad = { ...baseEvent(), tags: [["e", 123]] };
+        const message = JSON.stringify(["EVENT", bad]);
+        await relay.handleMessage(mockWs, message);
+        assert.equal(sentMessages.length, 1);
+        assert.equal(sentMessages[0][0], "OK");
+        assert.equal(sentMessages[0][2], false);
+      });
+
+      it("rejects EVENT with missing sig", async () => {
+        const bad = baseEvent();
+        delete (bad as { sig?: string }).sig;
+        const message = JSON.stringify(["EVENT", bad]);
+        await relay.handleMessage(mockWs, message);
+        assert.equal(sentMessages.length, 1);
+        assert.equal(sentMessages[0][0], "OK");
+        assert.equal(sentMessages[0][2], false);
+      });
+
+      it("rejects EVENT with non-integer created_at", async () => {
+        const bad = { ...baseEvent(), created_at: 1.5 };
+        const message = JSON.stringify(["EVENT", bad]);
+        await relay.handleMessage(mockWs, message);
+        assert.equal(sentMessages.length, 1);
+        assert.equal(sentMessages[0][0], "OK");
+        assert.equal(sentMessages[0][2], false);
+      });
+
+      it("does not pollute Object.prototype from __proto__ payload", async () => {
+        // Object literal written as JSON so __proto__ is treated as a data
+        // key by JSON.parse, not as the literal prototype slot.
+        const message = `["EVENT", {
+          "id": "${validIdHex}",
+          "pubkey": "${validPubkey}",
+          "created_at": 1700000000,
+          "kind": 1,
+          "tags": "bogus",
+          "content": "",
+          "sig": "${validSig}",
+          "__proto__": { "polluted": true }
+        }]`;
+        await relay.handleMessage(mockWs, message);
+        // Schema rejects the event entirely (tags is a string, not array)...
+        assert.equal(sentMessages[0][0], "OK");
+        assert.equal(sentMessages[0][2], false);
+        // ...and critically, no pollution leaked into Object.prototype.
+        assert.equal(({} as Record<string, unknown>).polluted, undefined);
+      });
+    });
+
+    describe("AUTH payload schema validation", () => {
+      it("rejects AUTH with non-object payload", async () => {
+        const message = JSON.stringify(["AUTH", "not an event"]);
+        await relay.handleMessage(mockWs, message);
+        assert.equal(sentMessages.length, 1);
+        assert.equal(sentMessages[0][0], "NOTICE");
+        assert.ok((sentMessages[0][1] as string).includes("schema validation"));
+      });
+
+      it("rejects AUTH with malformed event (no OK reply for AUTH)", async () => {
+        const bad = {
+          id: "a".repeat(64),
+          pubkey: "b".repeat(64),
+          created_at: 1_700_000_000,
+          kind: "not-a-number",
+          tags: [],
+          content: "",
+          sig: "c".repeat(128),
+        };
+        const message = JSON.stringify(["AUTH", bad]);
+        await relay.handleMessage(mockWs, message);
+        assert.equal(sentMessages.length, 1);
+        assert.equal(sentMessages[0][0], "NOTICE");
+      });
+    });
+
     it("should reject REQ with missing parameters", async () => {
       const message = JSON.stringify(["REQ", "sub1"]);
       await relay.handleMessage(mockWs, message);

@@ -1,7 +1,7 @@
 import type { Buffer } from "node:buffer";
 import { randomBytes } from "node:crypto";
 import type { NostrRelayInfo, NRelay } from "@nostrify/nostrify";
-import { NKinds } from "@nostrify/nostrify";
+import { NKinds, NSchema as n } from "@nostrify/nostrify";
 import type { ServerWebSocket } from "bun";
 import type { Filter, NostrEvent } from "nostr-tools";
 import { matchFilter, verifyEvent } from "nostr-tools";
@@ -1190,7 +1190,30 @@ export class Relay {
             ]);
             return;
           }
-          await this.handleEvent(ws, params[0] as NostrEvent);
+          {
+            // Schema-validate the event object before touching any of its
+            // fields on the main thread. This strips unknown keys (including
+            // __proto__ payloads), ensures correct types, and front-loads
+            // rejection so malformed events never reach the verify worker.
+            const parsed = n.event().safeParse(params[0]);
+            if (!parsed.success) {
+              // If the caller sent a 64-hex `id`, reply OK/false so conforming
+              // clients get per-event feedback; otherwise fall back to NOTICE.
+              const raw = params[0] as { id?: unknown };
+              const id =
+                typeof raw?.id === "string" && /^[0-9a-f]{64}$/.test(raw.id)
+                  ? raw.id
+                  : undefined;
+              const reason = "invalid: event failed schema validation";
+              if (id) {
+                this.sendMessage(ws, ["OK", id, false, reason]);
+              } else {
+                this.sendMessage(ws, ["NOTICE", reason]);
+              }
+              return;
+            }
+            await this.handleEvent(ws, parsed.data);
+          }
           break;
 
         case "REQ": {
@@ -1234,7 +1257,19 @@ export class Relay {
             ]);
             return;
           }
-          await this.handleAuth(ws, params[0] as NostrEvent);
+          {
+            // Same structural validation as EVENT. AUTH has no OK-style
+            // response, so rejections always go back as NOTICE.
+            const parsed = n.event().safeParse(params[0]);
+            if (!parsed.success) {
+              this.sendMessage(ws, [
+                "NOTICE",
+                "invalid: AUTH event failed schema validation",
+              ]);
+              return;
+            }
+            await this.handleAuth(ws, parsed.data);
+          }
           break;
 
         case "CLOSE":
