@@ -294,6 +294,44 @@ describe("Config", () => {
     });
   });
 
+  describe("tagValueMaxCountPerName", () => {
+    it("should default to 5000 when not set", () => {
+      const config = new Config(baseEnv());
+      assert.equal(config.tagValueMaxCountPerName, 5000);
+    });
+
+    it("should parse from environment", () => {
+      const config = new Config(
+        baseEnv([["RELAY_TAG_VALUE_MAX_COUNT_PER_NAME", "1024"]]),
+      );
+      assert.equal(config.tagValueMaxCountPerName, 1024);
+    });
+
+    it("should throw when not a number", () => {
+      assert.throws(
+        () =>
+          new Config(baseEnv([["RELAY_TAG_VALUE_MAX_COUNT_PER_NAME", "nope"]])),
+        /RELAY_TAG_VALUE_MAX_COUNT_PER_NAME/,
+      );
+    });
+
+    it("should throw when zero", () => {
+      assert.throws(
+        () =>
+          new Config(baseEnv([["RELAY_TAG_VALUE_MAX_COUNT_PER_NAME", "0"]])),
+        /RELAY_TAG_VALUE_MAX_COUNT_PER_NAME/,
+      );
+    });
+
+    it("should throw when negative", () => {
+      assert.throws(
+        () =>
+          new Config(baseEnv([["RELAY_TAG_VALUE_MAX_COUNT_PER_NAME", "-1"]])),
+        /RELAY_TAG_VALUE_MAX_COUNT_PER_NAME/,
+      );
+    });
+  });
+
   describe("historyKindsExcluded", () => {
     it("should default to NIP-85 kinds (30382-30385)", () => {
       const config = new Config(baseEnv());

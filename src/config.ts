@@ -53,6 +53,14 @@ export class Config {
    * `terms` clauses. Default: 5000.
    */
   readonly maxFilterValues: number;
+  /**
+   * Maximum number of values stored per tag name in the indexed `tags_map`
+   * projection. Bounds the per-document inverted-index growth from events
+   * with very high tag counts. Default: 5000 (matches the NIP-11
+   * `max_event_tags` recommendation so any compliant event is fully
+   * indexable).
+   */
+  readonly tagValueMaxCountPerName: number;
   readonly nostrSigner: NostrSigner;
 
   constructor(env: { get(key: string): string | undefined }) {
@@ -193,6 +201,22 @@ export class Config {
         throw new Error("RELAY_MAX_FILTER_VALUES must be a positive integer.");
       }
       this.maxFilterValues = n;
+    }
+
+    // tagValueMaxCountPerName
+    const tagValueMaxCountPerNameValue = env.get(
+      "RELAY_TAG_VALUE_MAX_COUNT_PER_NAME",
+    );
+    if (!tagValueMaxCountPerNameValue) {
+      this.tagValueMaxCountPerName = 5000;
+    } else {
+      const n = parseInt(tagValueMaxCountPerNameValue, 10);
+      if (Number.isNaN(n) || n <= 0) {
+        throw new Error(
+          "RELAY_TAG_VALUE_MAX_COUNT_PER_NAME must be a positive integer.",
+        );
+      }
+      this.tagValueMaxCountPerName = n;
     }
 
     // nostrSigner

@@ -52,6 +52,7 @@ const relay = new OpenSearchRelay(readClient, {
   historyKindsExcluded: config.historyKindsExcluded,
   authKinds: config.authKinds,
   writeClient,
+  tagValueMaxCountPerName: config.tagValueMaxCountPerName,
 });
 
 const signer = config.nostrSigner;

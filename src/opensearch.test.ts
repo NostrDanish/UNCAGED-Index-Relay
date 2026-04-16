@@ -4236,18 +4236,20 @@ describe("OpenSearchRelay", () => {
     /** Helper to store an event and return its tags_map from the mock. */
     const getTagsMap = async (
       tags: string[][],
+      opts?: { tagValueMaxCountPerName?: number; kind?: number },
     ): Promise<Record<string, string[]>> => {
       const { client, documents } = createMockClient();
       const relay = new OpenSearchRelay(client as unknown as Client, {
         indexName: "test-index",
         bulkMaxSize: 1,
         refreshDelayMs: 0,
+        tagValueMaxCountPerName: opts?.tagValueMaxCountPerName,
       });
 
       const sk = generateSecretKey();
       const event = finalizeEvent(
         {
-          kind: 1,
+          kind: opts?.kind ?? 1,
           created_at: Math.floor(Date.now() / 1000),
           tags,
           content: "",
@@ -4384,6 +4386,70 @@ describe("OpenSearchRelay", () => {
 
       assert.equal(tagsMap.e, undefined);
       assert.deepEqual(tagsMap.p, ["value"]);
+    });
+
+    it("should cap values per tag name at the configured tagValueMaxCountPerName", async () => {
+      const cap = 10;
+      // Build 2*cap p-tags, each with a unique value.
+      const tags = Array.from({ length: cap * 2 }, (_, i) => [
+        "p",
+        `${i}`.padStart(64, "0"),
+      ]);
+      const tagsMap = await getTagsMap(tags, { tagValueMaxCountPerName: cap });
+
+      assert.equal(tagsMap.p.length, cap);
+      // The first `cap` values should be kept (in-order).
+      assert.equal(tagsMap.p[0], "0".repeat(64));
+      assert.equal(tagsMap.p[cap - 1], `${cap - 1}`.padStart(64, "0"));
+      // The (cap+1)-th value should have been dropped.
+      assert.ok(!tagsMap.p.includes(`${cap}`.padStart(64, "0")));
+    });
+
+    it("per-tag-name cap applies independently to each tag name", async () => {
+      const cap = 10;
+      const tags: string[][] = [];
+      for (let i = 0; i < cap + 10; i++) {
+        tags.push(["e", `e-${i}`.padStart(64, "0")]);
+        tags.push(["p", `p-${i}`.padStart(64, "0")]);
+      }
+      const tagsMap = await getTagsMap(tags, { tagValueMaxCountPerName: cap });
+      // Each tag name is independently capped.
+      assert.equal(tagsMap.e.length, cap);
+      assert.equal(tagsMap.p.length, cap);
+    });
+
+    it("kind 7: last e tag is preserved even when earlier e-tags were dropped by cap", async () => {
+      // Build a kind 7 event with more e-tags than the cap. The last one
+      // (the true reaction target per NIP-25) must survive even though
+      // earlier e-tags filled the bucket first.
+      const cap = 10;
+      const tags: string[][] = [];
+      for (let i = 0; i < cap + 5; i++) {
+        tags.push(["e", `filler-${i}`.padStart(64, "0")]);
+      }
+      const targetId = "ff".repeat(32);
+      tags.push(["e", targetId]);
+
+      const tagsMap = await getTagsMap(tags, {
+        tagValueMaxCountPerName: cap,
+        kind: 7,
+      });
+
+      // NIP-25: only the last e tag should be indexed.
+      assert.deepEqual(tagsMap.e, [targetId]);
+    });
+
+    it("default cap is TAG_VALUE_MAX_COUNT_PER_NAME (5000) — kind-3 contact lists index fully", async () => {
+      // A kind-3 contact list with 2000 p-tags (NIP-11 max_event_tags) must
+      // be fully projected into tags_map.p with the default cap, otherwise
+      // follower counts and NIP-85 stats would be wrong.
+      assert.equal(OpenSearchRelay.TAG_VALUE_MAX_COUNT_PER_NAME, 5000);
+      const tags = Array.from({ length: 2000 }, (_, i) => [
+        "p",
+        `${i}`.padStart(64, "0"),
+      ]);
+      const tagsMap = await getTagsMap(tags, { kind: 3 });
+      assert.equal(tagsMap.p.length, 2000);
     });
   });
 

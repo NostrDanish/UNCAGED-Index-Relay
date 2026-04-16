@@ -43,6 +43,7 @@ const opensearchRelay = new OpenSearchRelay(opensearchReadClient, {
   historyKindsExcluded: config.historyKindsExcluded,
   authKinds: config.authKinds,
   writeClient: opensearchWriteClient,
+  tagValueMaxCountPerName: config.tagValueMaxCountPerName,
 });
 
 const relay = new Relay(opensearchRelay, {

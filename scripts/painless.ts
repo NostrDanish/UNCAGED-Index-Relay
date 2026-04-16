@@ -1,8 +1,9 @@
 /**
  * Painless script builders for OpenSearch reindex and update-by-query
  * operations. These mirror the tag filtering logic in OpenSearchRelay
- * (MULTI_LETTER_TAG_WHITELIST, TAG_VALUE_MAX_LENGTH) so the rules stay
- * in sync between TypeScript and server-side Painless execution.
+ * (MULTI_LETTER_TAG_WHITELIST, TAG_VALUE_MAX_LENGTH,
+ * TAG_VALUE_MAX_COUNT_PER_NAME) so the rules stay in sync between
+ * TypeScript and server-side Painless execution.
  */
 
 import { OpenSearchRelay } from "../src/opensearch.ts";
@@ -12,8 +13,15 @@ import { OpenSearchRelay } from "../src/opensearch.ts";
  * `ctx._source.tags`, mirroring the `buildTagsMap` / `isIndexableTagName`
  * logic. Used by reindex and update-by-query scripts so the filtering
  * rules stay in sync with the TypeScript implementation.
+ *
+ * @param maxCount per-tag-name value cap. Pass the runtime-configured cap
+ *   (e.g. `config.tagValueMaxCountPerName`) when reindexing so the script
+ *   and runtime produce identical `tags_map` projections. Defaults to
+ *   {@link OpenSearchRelay.TAG_VALUE_MAX_COUNT_PER_NAME}.
  */
-export function buildTagsMapPainlessScript(): string {
+export function buildTagsMapPainlessScript(
+  maxCount: number = OpenSearchRelay.TAG_VALUE_MAX_COUNT_PER_NAME,
+): string {
   const adds = [...OpenSearchRelay.MULTI_LETTER_TAG_WHITELIST]
     .map((t) => `whitelist.add('${t}');`)
     .join(" ");
@@ -33,7 +41,8 @@ export function buildTagsMapPainlessScript(): string {
           if (!tagsMap.containsKey(tagName)) {
             tagsMap.put(tagName, new ArrayList());
           }
-          if (value.length() <= ${OpenSearchRelay.TAG_VALUE_MAX_LENGTH}) {
+          if (value.length() <= ${OpenSearchRelay.TAG_VALUE_MAX_LENGTH}
+              && tagsMap.get(tagName).size() < ${maxCount}) {
             tagsMap.get(tagName).add(value);
           }
         }
@@ -41,9 +50,18 @@ export function buildTagsMapPainlessScript(): string {
     }
     ctx._source.tags_map = tagsMap;
     // NIP-25: For kind 7 reactions, only keep the last e tag value.
-    if (ctx._source.kind == 7 && tagsMap.containsKey('e') && tagsMap.get('e').size() > 1) {
-      def last = tagsMap.get('e').get(tagsMap.get('e').size() - 1);
-      tagsMap.put('e', [last]);
+    // Iterate the original tags array (not the clipped tagsMap) so we pick
+    // up the true last e tag even when earlier e tags have been dropped by
+    // the per-tag-name count cap above.
+    if (ctx._source.kind == 7 && ctx._source.tags != null) {
+      for (int i = ctx._source.tags.size() - 1; i >= 0; i--) {
+        def t = ctx._source.tags[i];
+        if (t != null && t.size() >= 2 && t[0].toString() == 'e'
+            && t[1].toString().length() <= ${OpenSearchRelay.TAG_VALUE_MAX_LENGTH}) {
+          tagsMap.put('e', [t[1].toString()]);
+          break;
+        }
+      }
     }`;
 }
 
@@ -55,10 +73,14 @@ export function buildTagsMapPainlessScript(): string {
  *    `repost_count` → `repost_cnt`
  * 3. Builds `search_text` from event content and tags
  *
+ * @param maxCount propagated to {@link buildTagsMapPainlessScript}.
+ *
  * Returns the Painless script source string.
  */
-export function buildReindexPainlessScript(): string {
-  const tagsMapScript = buildTagsMapPainlessScript();
+export function buildReindexPainlessScript(
+  maxCount: number = OpenSearchRelay.TAG_VALUE_MAX_COUNT_PER_NAME,
+): string {
+  const tagsMapScript = buildTagsMapPainlessScript(maxCount);
 
   return `
     ${tagsMapScript}

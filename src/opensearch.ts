@@ -237,6 +237,9 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
    *  Set to 0 in tests where the mock client resolves synchronously. */
   private refreshDelayMs: number;
 
+  /** Per-instance override of TAG_VALUE_MAX_COUNT_PER_NAME. */
+  private tagValueMaxCountPerName: number;
+
   constructor(
     client: Client,
     opts?: {
@@ -254,6 +257,12 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
       /** Delay in ms before Phase 2 replaceable slot resolution. Defaults to
        *  1000 (one refresh_interval cycle). Set to 0 in tests. */
       refreshDelayMs?: number;
+      /**
+       * Override the per-tag-name value cap applied in
+       * {@link buildTagsMap}. Defaults to
+       * {@link TAG_VALUE_MAX_COUNT_PER_NAME} (5000).
+       */
+      tagValueMaxCountPerName?: number;
     },
   ) {
     this.client = client;
@@ -267,6 +276,9 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
       opts?.historyKindsExcluded ?? new Set([30382, 30383, 30384, 30385]);
     this.authKinds = opts?.authKinds ?? new Set();
     this.refreshDelayMs = opts?.refreshDelayMs ?? 1_000;
+    this.tagValueMaxCountPerName =
+      opts?.tagValueMaxCountPerName ??
+      OpenSearchRelay.TAG_VALUE_MAX_COUNT_PER_NAME;
   }
 
   /**
@@ -291,6 +303,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
       historyKindsWhitelist: config.historyKindsWhitelist,
       historyKindsExcluded: config.historyKindsExcluded,
       authKinds: config.authKinds,
+      tagValueMaxCountPerName: config.tagValueMaxCountPerName,
     });
   }
 
@@ -328,6 +341,25 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
   static readonly TAG_VALUE_MAX_LENGTH = 255;
 
   /**
+   * Default maximum number of values stored per tag name in tags_map.
+   * Overridable per-instance via the `tagValueMaxCountPerName` constructor
+   * option (wired to the `RELAY_TAG_VALUE_MAX_COUNT_PER_NAME` env var).
+   *
+   * Tags beyond this limit are silently dropped during indexing. Prevents a
+   * single event from inflating the per-document `tags_map` field and the
+   * inverted index's term dictionary unboundedly.
+   *
+   * The default of 5000 accommodates legitimate high-cardinality cases such
+   * as kind-3 contact lists with many `p` tags, preserving correctness of
+   * follower counts, trending pubkeys, and NIP-85 kind 30382 stats.
+   *
+   * The raw `tags` array is still stored in full under the `tags` field
+   * (which has `enabled: false` in the mapping), so NIP-01 protocol
+   * correctness is preserved — only the searchable projection is clipped.
+   */
+  static readonly TAG_VALUE_MAX_COUNT_PER_NAME = 5000;
+
+  /**
    * Check whether a tag name is indexable.
    *
    * - All single-character tag names are allowed (covers a-z, A-Z, `-`, etc.).
@@ -350,6 +382,11 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
    * - Tag values must be ≤ 255 characters. Values that exceed the limit are
    *   skipped, but the tag name key is still created (with an empty array if
    *   no values pass).
+   * - At most `tagValueMaxCountPerName` values are stored per tag name
+   *   (default {@link TAG_VALUE_MAX_COUNT_PER_NAME}). Further values
+   *   (in-order) are silently dropped. The raw `tags` array is still
+   *   preserved under the disabled `tags` field, so the full event data is
+   *   returned verbatim to query consumers.
    */
   private buildTagsMap(
     tags: string[][],
@@ -369,7 +406,10 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
           tagsMap[tagName] = [];
         }
 
-        if (value.length <= OpenSearchRelay.TAG_VALUE_MAX_LENGTH) {
+        if (
+          value.length <= OpenSearchRelay.TAG_VALUE_MAX_LENGTH &&
+          tagsMap[tagName].length < this.tagValueMaxCountPerName
+        ) {
           tagsMap[tagName].push(value);
         }
       }
@@ -377,8 +417,21 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
 
     // NIP-25: For kind 7 reactions, the target event is the *last* e tag.
     // Only index the last value to avoid inflating stats for intermediate refs.
-    if (kind === 7 && tagsMap["e"]?.length > 1) {
-      tagsMap["e"] = [tagsMap["e"][tagsMap["e"].length - 1]];
+    // We reference the original `tags` array rather than the clipped tagsMap
+    // because the last e tag might have been dropped above when the event has
+    // more than `tagValueMaxCountPerName` e-tags.
+    if (kind === 7 && tagsMap["e"]?.length) {
+      for (let i = tags.length - 1; i >= 0; i--) {
+        const t = tags[i];
+        if (
+          t.length >= 2 &&
+          t[0] === "e" &&
+          t[1].length <= OpenSearchRelay.TAG_VALUE_MAX_LENGTH
+        ) {
+          tagsMap["e"] = [t[1]];
+          break;
+        }
+      }
     }
 
     return tagsMap;
