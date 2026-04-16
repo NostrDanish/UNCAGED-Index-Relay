@@ -10,6 +10,48 @@ function esc(str: string): string {
     .replace(/'/g, "&#039;");
 }
 
+/**
+ * Validate that `raw` is a parseable URL whose protocol is in `allowed`.
+ * Returns the normalized URL string, or `null` if the URL is unparseable or
+ * uses a disallowed scheme (e.g. `javascript:`, `data:`).
+ *
+ * Callers still need to HTML-escape the return value before placing it in
+ * an HTML attribute.
+ */
+function safeUrl(
+  raw: string,
+  allowed: readonly string[],
+  fieldName: string,
+): string | null {
+  let parsed: URL;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    console.warn(
+      `[landing-page] ${fieldName}: not a valid URL (${JSON.stringify(raw)}), omitting`,
+    );
+    return null;
+  }
+  if (!allowed.includes(parsed.protocol.toLowerCase())) {
+    console.warn(
+      `[landing-page] ${fieldName}: disallowed URL scheme ${JSON.stringify(parsed.protocol)} (${JSON.stringify(raw)}), omitting`,
+    );
+    return null;
+  }
+  return parsed.toString();
+}
+
+/**
+ * Basic syntactic check for `user@host` email shape. Deliberately narrow:
+ * excludes `:` and `/` so scheme-prefixed inputs like
+ * `javascript:alert(1)//@x.com` cannot slip through and get wrapped in a
+ * `mailto:` href.
+ */
+const EMAIL_RE = /^[^\s@:/]+@[^\s@:/]+\.[^\s@:/]+$/;
+
+const HTTP_SCHEMES = ["http:", "https:"] as const;
+const WS_SCHEMES = ["ws:", "wss:"] as const;
+
 /** Generate a polished single-page HTML landing page from NIP-11 relay info. */
 export function renderLandingPage(
   info: NostrRelayInfo,
@@ -17,22 +59,55 @@ export function renderLandingPage(
 ): string {
   const name = esc(String(info.name ?? "Nostr Relay"));
   const description = esc(String(info.description ?? ""));
-  const banner = info.banner ? esc(String(info.banner)) : "";
-  const icon = info.icon ? esc(String(info.icon)) : "";
-  const version = info.version ? esc(String(info.version)) : "";
-  const contact = info.contact ? esc(String(info.contact)) : "";
-  const software = info.software ? esc(String(info.software)) : "";
-  const relay = esc(relayUrl);
 
-  const contactHtml = contact
-    ? contact.startsWith("mailto:")
-      ? `<a href="${contact}">${esc(contact.replace(/^mailto:/, ""))}</a>`
-      : contact.includes("@")
-        ? `<a href="mailto:${contact}">${contact}</a>`
-        : contact.startsWith("http")
-          ? `<a href="${contact}" target="_blank" rel="noopener">${contact}</a>`
-          : contact
-    : "";
+  // URL fields: validate scheme before embedding in href/src attributes to
+  // block javascript:, data:, and similar XSS vectors from a misconfigured
+  // RELAY_* env var. safeUrl returns null for disallowed/unparseable inputs.
+  const bannerRaw = info.banner
+    ? safeUrl(String(info.banner), HTTP_SCHEMES, "banner")
+    : null;
+  const banner = bannerRaw ? esc(bannerRaw) : "";
+
+  const iconRaw = info.icon
+    ? safeUrl(String(info.icon), HTTP_SCHEMES, "icon")
+    : null;
+  const icon = iconRaw ? esc(iconRaw) : "";
+
+  const version = info.version ? esc(String(info.version)) : "";
+
+  const softwareRaw = info.software
+    ? safeUrl(String(info.software), HTTP_SCHEMES, "software")
+    : null;
+  const software = softwareRaw ? esc(softwareRaw) : "";
+
+  const relayUrlSafe = safeUrl(relayUrl, WS_SCHEMES, "relayUrl");
+  const relay = relayUrlSafe ? esc(relayUrlSafe) : "";
+
+  // Contact: may be a mailto: URL, a bare email, or an http(s) URL. Each
+  // branch validates its input before it reaches an href attribute.
+  let contactHtml = "";
+  if (info.contact) {
+    const raw = String(info.contact);
+    if (raw.startsWith("mailto:")) {
+      const validated = safeUrl(raw, ["mailto:"], "contact");
+      if (validated) {
+        const addr = validated.replace(/^mailto:/i, "");
+        contactHtml = `<a href="${esc(validated)}">${esc(addr)}</a>`;
+      }
+    } else if (raw.startsWith("http://") || raw.startsWith("https://")) {
+      const validated = safeUrl(raw, HTTP_SCHEMES, "contact");
+      if (validated) {
+        contactHtml = `<a href="${esc(validated)}" target="_blank" rel="noopener">${esc(validated)}</a>`;
+      }
+    } else if (EMAIL_RE.test(raw)) {
+      const escAddr = esc(raw);
+      contactHtml = `<a href="mailto:${escAddr}">${escAddr}</a>`;
+    } else {
+      console.warn(
+        `[landing-page] contact: unrecognized format (${JSON.stringify(raw)}), omitting`,
+      );
+    }
+  }
 
   return `<!DOCTYPE html>
 <html lang="en">
