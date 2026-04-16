@@ -40,6 +40,13 @@ export class Config {
   readonly authKinds: Set<number>;
   /** Whether to enable background stats recomputation and NIP-85 publishing. Default: true. */
   readonly statsEnabled: boolean;
+  /**
+   * Maximum size (in bytes) of a single inbound WebSocket message.
+   * Used both as Bun's `maxPayloadLength` (enforcement) and as NIP-11
+   * `limitation.max_message_length` (advertisement) — single source of truth.
+   * Default: 4_000_000 (4 MB).
+   */
+  readonly maxMessageLength: number;
   readonly nostrSigner: NostrSigner;
 
   constructor(env: { get(key: string): string | undefined }) {
@@ -154,6 +161,20 @@ export class Config {
     } else {
       this.statsEnabled =
         statsValue.toLowerCase() === "true" || statsValue === "1";
+    }
+
+    // maxMessageLength
+    const maxMsgValue = env.get("RELAY_MAX_MESSAGE_LENGTH");
+    if (!maxMsgValue) {
+      this.maxMessageLength = 4_000_000;
+    } else {
+      const bytes = parseInt(maxMsgValue, 10);
+      if (Number.isNaN(bytes) || bytes <= 0) {
+        throw new Error(
+          "RELAY_MAX_MESSAGE_LENGTH must be a positive integer (bytes).",
+        );
+      }
+      this.maxMessageLength = bytes;
     }
 
     // nostrSigner

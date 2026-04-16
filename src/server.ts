@@ -49,6 +49,7 @@ const relay = new Relay(opensearchRelay, {
   analyze: (event) => analyzePool.analyze(event),
   relayUrl: config.relayUrl,
   authKinds: config.authKinds,
+  maxMessageLength: config.maxMessageLength,
   relayInfo: {
     pubkey: config.relayPubkey,
     contact: config.relayContact,
@@ -227,6 +228,12 @@ const server = serve<WebSocketData>({
   },
 
   websocket: {
+    // Enforce the advertised NIP-11 max_message_length at the transport
+    // layer. Frames larger than this are dropped by Bun with code 1009
+    // before reaching `handleMessage` — the JSON.parse / validation path
+    // never sees them.
+    maxPayloadLength: config.maxMessageLength,
+
     open(ws) {
       relay.handleOpen(ws);
     },

@@ -118,6 +118,13 @@ export class Relay {
       analyze?: AnalyzeFn;
       relayUrl: string;
       authKinds?: Set<number>;
+      /**
+       * Maximum size (bytes) of a single WebSocket message. Advertised via
+       * NIP-11 `limitation.max_message_length`. Must match the transport-layer
+       * limit (`Bun.serve` `maxPayloadLength`) so the advertised value is
+       * actually enforced. Default: 4_000_000 (4 MB).
+       */
+      maxMessageLength?: number;
     },
   ) {
     this.storage = storage;
@@ -131,7 +138,7 @@ export class Relay {
       software: "https://gitlab.com/soapbox-pub/ditto-relay",
       version: "0.1.0",
       limitation: {
-        max_message_length: 128000,
+        max_message_length: opts.maxMessageLength ?? 4_000_000,
         max_subscriptions: 20,
         max_filters: 100,
         max_limit: 5000,

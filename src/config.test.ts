@@ -226,6 +226,41 @@ describe("Config", () => {
     });
   });
 
+  describe("maxMessageLength", () => {
+    it("should default to 4_000_000 when not set", () => {
+      const config = new Config(baseEnv());
+      assert.equal(config.maxMessageLength, 4_000_000);
+    });
+
+    it("should parse from environment", () => {
+      const config = new Config(
+        baseEnv([["RELAY_MAX_MESSAGE_LENGTH", "128000"]]),
+      );
+      assert.equal(config.maxMessageLength, 128_000);
+    });
+
+    it("should throw when not a number", () => {
+      assert.throws(
+        () => new Config(baseEnv([["RELAY_MAX_MESSAGE_LENGTH", "invalid"]])),
+        /RELAY_MAX_MESSAGE_LENGTH/,
+      );
+    });
+
+    it("should throw when zero", () => {
+      assert.throws(
+        () => new Config(baseEnv([["RELAY_MAX_MESSAGE_LENGTH", "0"]])),
+        /RELAY_MAX_MESSAGE_LENGTH/,
+      );
+    });
+
+    it("should throw when negative", () => {
+      assert.throws(
+        () => new Config(baseEnv([["RELAY_MAX_MESSAGE_LENGTH", "-1"]])),
+        /RELAY_MAX_MESSAGE_LENGTH/,
+      );
+    });
+  });
+
   describe("historyKindsExcluded", () => {
     it("should default to NIP-85 kinds (30382-30385)", () => {
       const config = new Config(baseEnv());
