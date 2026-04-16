@@ -968,6 +968,123 @@ describe("Relay", () => {
       });
     });
 
+    describe("REQ/COUNT filter schema validation", () => {
+      it("rejects REQ filter with non-array kinds", async () => {
+        const message = JSON.stringify(["REQ", "sub1", { kinds: "nope" }]);
+        await relay.handleMessage(mockWs, message);
+        assert.equal(sentMessages.length, 1);
+        assert.equal(sentMessages[0][0], "CLOSED");
+        assert.equal(sentMessages[0][1], "sub1");
+        assert.ok((sentMessages[0][2] as string).includes("schema validation"));
+      });
+
+      it("rejects REQ filter with non-numeric kind element", async () => {
+        const message = JSON.stringify(["REQ", "sub1", { kinds: ["1"] }]);
+        await relay.handleMessage(mockWs, message);
+        assert.equal(sentMessages[0][0], "CLOSED");
+        assert.ok((sentMessages[0][2] as string).includes("schema validation"));
+      });
+
+      it("rejects REQ filter with non-hex author", async () => {
+        const message = JSON.stringify([
+          "REQ",
+          "sub1",
+          { authors: ["not-hex"] },
+        ]);
+        await relay.handleMessage(mockWs, message);
+        assert.equal(sentMessages[0][0], "CLOSED");
+        assert.ok((sentMessages[0][2] as string).includes("schema validation"));
+      });
+
+      it("rejects REQ filter with short id", async () => {
+        const message = JSON.stringify(["REQ", "sub1", { ids: ["deadbeef"] }]);
+        await relay.handleMessage(mockWs, message);
+        assert.equal(sentMessages[0][0], "CLOSED");
+        assert.ok((sentMessages[0][2] as string).includes("schema validation"));
+      });
+
+      it("rejects REQ filter with negative limit", async () => {
+        const message = JSON.stringify(["REQ", "sub1", { limit: -1 }]);
+        await relay.handleMessage(mockWs, message);
+        assert.equal(sentMessages[0][0], "CLOSED");
+        assert.ok((sentMessages[0][2] as string).includes("schema validation"));
+      });
+
+      it("rejects REQ filter with non-numeric since", async () => {
+        const message = JSON.stringify(["REQ", "sub1", { since: "yesterday" }]);
+        await relay.handleMessage(mockWs, message);
+        assert.equal(sentMessages[0][0], "CLOSED");
+        assert.ok((sentMessages[0][2] as string).includes("schema validation"));
+      });
+
+      it("rejects REQ filter with non-string search", async () => {
+        const message = JSON.stringify(["REQ", "sub1", { search: 123 }]);
+        await relay.handleMessage(mockWs, message);
+        assert.equal(sentMessages[0][0], "CLOSED");
+        assert.ok((sentMessages[0][2] as string).includes("schema validation"));
+      });
+
+      it("rejects REQ filter that is not an object", async () => {
+        const message = JSON.stringify(["REQ", "sub1", "not-a-filter"]);
+        await relay.handleMessage(mockWs, message);
+        assert.equal(sentMessages[0][0], "CLOSED");
+        assert.ok((sentMessages[0][2] as string).includes("schema validation"));
+      });
+
+      it("rejects if ANY filter in the REQ is invalid (rest are ignored)", async () => {
+        mockStorage.query = async () => [];
+        const message = JSON.stringify([
+          "REQ",
+          "sub1",
+          { kinds: [1] }, // valid
+          { kinds: ["2"] }, // invalid
+        ]);
+        await relay.handleMessage(mockWs, message);
+        assert.equal(sentMessages[0][0], "CLOSED");
+        assert.ok((sentMessages[0][2] as string).includes("schema validation"));
+      });
+
+      it("accepts REQ with valid filter", async () => {
+        mockStorage.query = async () => [];
+        const message = JSON.stringify([
+          "REQ",
+          "sub1",
+          { kinds: [1], authors: ["a".repeat(64)], limit: 10 },
+        ]);
+        await relay.handleMessage(mockWs, message);
+        // Last message should be EOSE — no CLOSED with schema error.
+        const last = sentMessages[sentMessages.length - 1];
+        assert.equal(last[0], "EOSE");
+      });
+
+      it("accepts REQ with unknown top-level key (silently dropped)", async () => {
+        // NSchema.filter() uses looseObject + transform that strips unknowns,
+        // so an extra key doesn't cause rejection. The key simply isn't passed
+        // downstream to OpenSearch.
+        mockStorage.query = async () => [];
+        const message = JSON.stringify([
+          "REQ",
+          "sub1",
+          { kinds: [1], weirdKey: { nested: "attack" } },
+        ]);
+        await relay.handleMessage(mockWs, message);
+        const last = sentMessages[sentMessages.length - 1];
+        assert.equal(last[0], "EOSE");
+      });
+
+      it("rejects COUNT with invalid filter", async () => {
+        const message = JSON.stringify([
+          "COUNT",
+          "c1",
+          { authors: ["not-hex"] },
+        ]);
+        await relay.handleMessage(mockWs, message);
+        assert.equal(sentMessages[0][0], "CLOSED");
+        assert.equal(sentMessages[0][1], "c1");
+        assert.ok((sentMessages[0][2] as string).includes("schema validation"));
+      });
+    });
+
     it("should reject REQ with missing parameters", async () => {
       const message = JSON.stringify(["REQ", "sub1"]);
       await relay.handleMessage(mockWs, message);

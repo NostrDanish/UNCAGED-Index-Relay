@@ -1225,8 +1225,24 @@ export class Relay {
             ]);
             return;
           }
-          const [subId, ...filters] = params;
-          await this.handleReq(ws, subId as string, filters as Filter[]);
+          const [subId, ...rawFilters] = params;
+          // Validate filter shapes: enforces numeric kinds, 64-hex ids/authors,
+          // nonneg since/until/limit, array shapes on #tags. Unknown top-level
+          // keys are stripped by NSchema.filter()'s transform.
+          const parsedFilters: Filter[] = [];
+          for (const raw of rawFilters) {
+            const parsed = n.filter().safeParse(raw);
+            if (!parsed.success) {
+              this.sendMessage(ws, [
+                "CLOSED",
+                typeof subId === "string" ? subId : "",
+                "invalid: filter failed schema validation",
+              ]);
+              return;
+            }
+            parsedFilters.push(parsed.data as Filter);
+          }
+          await this.handleReq(ws, subId as string, parsedFilters);
           break;
         }
 
@@ -1239,12 +1255,21 @@ export class Relay {
             ]);
             return;
           }
-          const [countSubId, ...countFilters] = params;
-          await this.handleCount(
-            ws,
-            countSubId as string,
-            countFilters as Filter[],
-          );
+          const [countSubId, ...rawCountFilters] = params;
+          const parsedCountFilters: Filter[] = [];
+          for (const raw of rawCountFilters) {
+            const parsed = n.filter().safeParse(raw);
+            if (!parsed.success) {
+              this.sendMessage(ws, [
+                "CLOSED",
+                typeof countSubId === "string" ? countSubId : "",
+                "invalid: filter failed schema validation",
+              ]);
+              return;
+            }
+            parsedCountFilters.push(parsed.data as Filter);
+          }
+          await this.handleCount(ws, countSubId as string, parsedCountFilters);
           break;
         }
 
