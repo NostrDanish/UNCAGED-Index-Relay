@@ -619,6 +619,98 @@ describe("Nip85", () => {
       );
     });
 
+    it("counts kind 8333 onchain zaps toward zap_cnt and zap_amount", async () => {
+      const { client, documents } = createMockClient();
+      const relay = createMockRelay();
+      const signer = createMockSigner();
+
+      const addr = "30023:pubkey123:my-article";
+
+      // Two Lightning zaps (kind 9735), one onchain zap (kind 8333).
+      documents.push(
+        makeDoc({
+          kind: 9735,
+          pubkey: "ln_zapper_0",
+          tags: [["a", addr]],
+          amount_msats: 10_000,
+        }),
+      );
+      documents.push(
+        makeDoc({
+          kind: 9735,
+          pubkey: "ln_zapper_1",
+          tags: [["a", addr]],
+          amount_msats: 5_000,
+        }),
+      );
+      // Onchain zap: amount_msats field is populated from the `amount` tag
+      // by eventToDocument. Tests bypass that by setting the field directly.
+      documents.push(
+        makeDoc({
+          kind: 8333,
+          pubkey: "onchain_zapper_0",
+          tags: [
+            ["a", addr],
+            ["amount", "25000"], // 25,000 sats = 25,000,000 msats
+          ],
+          amount_msats: 25_000_000,
+        }),
+      );
+
+      const nip85 = new Nip85({ client, indexName: "test", relay, signer });
+      nip85.addDirtyAddrs(new Set([addr]));
+      await nip85.flushAddrStats();
+
+      assert.equal(relay.events.length, 1);
+      const event = relay.events[0];
+      assert.equal(event.kind, 30384);
+      // 2 Lightning + 1 onchain = 3
+      assert.deepEqual(
+        event.tags.find((t) => t[0] === "zap_cnt"),
+        ["zap_cnt", "3"],
+      );
+      // Total msats = 10_000 + 5_000 + 25_000_000 = 25_015_000 → 25_015 sats
+      assert.deepEqual(
+        event.tags.find((t) => t[0] === "zap_amount"),
+        ["zap_amount", "25015"],
+      );
+    });
+
+    it("counts kind 8333 onchain zaps even without any kind 9735 zaps", async () => {
+      const { client, documents } = createMockClient();
+      const relay = createMockRelay();
+      const signer = createMockSigner();
+
+      const addr = "30023:pubkey123:my-article";
+
+      documents.push(
+        makeDoc({
+          kind: 8333,
+          pubkey: "onchain_zapper",
+          tags: [
+            ["a", addr],
+            ["amount", "1000"],
+          ],
+          amount_msats: 1_000_000,
+        }),
+      );
+
+      const nip85 = new Nip85({ client, indexName: "test", relay, signer });
+      nip85.addDirtyAddrs(new Set([addr]));
+      await nip85.flushAddrStats();
+
+      assert.equal(relay.events.length, 1);
+      const event = relay.events[0];
+      assert.deepEqual(
+        event.tags.find((t) => t[0] === "zap_cnt"),
+        ["zap_cnt", "1"],
+      );
+      assert.deepEqual(
+        event.tags.find((t) => t[0] === "zap_amount"),
+        ["zap_amount", "1000"],
+      );
+    });
+
     it("drains the dirty set after flush", async () => {
       const { client, documents } = createMockClient();
       const relay = createMockRelay();

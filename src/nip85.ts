@@ -187,8 +187,10 @@ export class Nip85 {
    * - `repost_cnt`   -- kind 6 + 16 referencing via `a` tag
    * - `reaction_cnt` -- kind 7 referencing via `a` tag
    * - `quote_cnt`    -- kind 1 referencing via `q` tag (quote reposts)
-   * - `zap_cnt`      -- kind 9735 count referencing via `a` tag
-   * - `zap_amount`   -- sum of zap sats referencing via `a` tag
+   * - `zap_cnt`      -- kind 9735 (Lightning) + kind 8333 (onchain) count
+   *                     referencing via `a` tag
+   * - `zap_amount`   -- sum of zap sats from both kind 9735 and kind 8333
+   *                     referencing via `a` tag
    */
   async flushAddrStats(): Promise<void> {
     // Atomically drain dirty set.
@@ -359,7 +361,8 @@ export class Nip85 {
    * Runs two queries:
    * 1. Engagement aggregation (kinds 1/6/7/16/1111) grouped by `tags_map.a`
    *    with cardinality and per-kind sub-aggregations.
-   * 2. Zap aggregation (kind 9735) grouped by `tags_map.a` with sum of amount_msats.
+   * 2. Zap aggregation (kind 9735 Lightning + kind 8333 onchain) grouped by
+   *    `tags_map.a` with sum of amount_msats.
    */
   private async getAddrEngagement(
     addrs: string[],
@@ -445,7 +448,7 @@ export class Nip85 {
       }
     }
 
-    // Query 2: Zaps (kind 9735).
+    // Query 2: Zaps (kind 9735 Lightning + kind 8333 onchain).
     const zapResponse = await this.client.search({
       index: this.indexName,
       body: {
@@ -454,7 +457,7 @@ export class Nip85 {
             must: [
               { term: { deleted: false } },
               { term: { replaced: false } },
-              { term: { kind: 9735 } },
+              { terms: { kind: [9735, 8333] } },
               { terms: { "tags_map.a": addrs } },
             ],
           },

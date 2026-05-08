@@ -1,6 +1,8 @@
 /**
- * Backfill script to populate the amount_msats field for existing zap receipts
- * (kind 9735) by parsing the bolt11 invoice amount.
+ * Backfill script to populate the amount_msats field for existing zap events:
+ *
+ * - Kind 9735 (Lightning zap receipts): parse amount from the bolt11 invoice.
+ * - Kind 8333 (onchain zaps): convert the `amount` tag (sats) to msats.
  *
  * Usage:
  *   bun run scripts/backfill-zap-amounts.ts
@@ -37,13 +39,13 @@ async function main() {
   const client = new OpenSearchClient(clientOptions);
 
   try {
-    // Count zap receipts without amount_msats
+    // Count zap events (kind 9735 + 8333) without amount_msats.
     const countResult = await client.count({
       index: config.opensearchIndex,
       body: {
         query: {
           bool: {
-            must: [{ term: { kind: 9735 } }],
+            must: [{ terms: { kind: [9735, 8333] } }],
             must_not: [{ exists: { field: "amount_msats" } }],
           },
         },
@@ -51,14 +53,14 @@ async function main() {
     });
 
     const total = countResult.body.count as number;
-    console.log(`Found ${total} zap receipts without amount_msats\n`);
+    console.log(`Found ${total} zap events without amount_msats\n`);
 
     if (total === 0) {
       console.log("Nothing to backfill");
       return;
     }
 
-    // Scroll through zap receipts and update in bulk
+    // Scroll through zap events and update in bulk
     let processed = 0;
     let updated = 0;
     let failed = 0;
@@ -69,42 +71,57 @@ async function main() {
       body: {
         query: {
           bool: {
-            must: [{ term: { kind: 9735 } }],
+            must: [{ terms: { kind: [9735, 8333] } }],
             must_not: [{ exists: { field: "amount_msats" } }],
           },
         },
         size: 500,
-        _source: ["tags"],
+        _source: ["kind", "tags"],
       },
     });
 
     let scrollId = scrollResponse.body._scroll_id as string;
     let hits = scrollResponse.body.hits.hits as unknown as Array<{
       _id: string;
-      _source: { tags: string[][] };
+      _source: { kind: number; tags: string[][] };
     }>;
 
     while (hits.length > 0) {
       const bulkBody: Array<Record<string, unknown>> = [];
 
       for (const hit of hits) {
-        const bolt11Tag = hit._source.tags?.find(
-          (t: string[]) => t[0] === "bolt11" && t[1],
-        );
+        let amountMsats: number | undefined;
 
-        if (bolt11Tag) {
-          const amountMsats = OpenSearchRelay.parseBolt11Amount(bolt11Tag[1]);
-          if (amountMsats !== undefined) {
-            bulkBody.push({
-              update: {
-                _index: config.opensearchIndex,
-                _id: hit._id,
-              },
-            });
-            bulkBody.push({
-              doc: { amount_msats: amountMsats },
-            });
+        if (hit._source.kind === 9735) {
+          const bolt11Tag = hit._source.tags?.find(
+            (t: string[]) => t[0] === "bolt11" && t[1],
+          );
+          if (bolt11Tag) {
+            amountMsats = OpenSearchRelay.parseBolt11Amount(bolt11Tag[1]);
           }
+        } else if (hit._source.kind === 8333) {
+          // Reconstruct just enough of the event for the static helper.
+          amountMsats = OpenSearchRelay.parseOnchainZapAmount({
+            id: hit._id,
+            pubkey: "",
+            created_at: 0,
+            kind: 8333,
+            tags: hit._source.tags ?? [],
+            content: "",
+            sig: "",
+          });
+        }
+
+        if (amountMsats !== undefined) {
+          bulkBody.push({
+            update: {
+              _index: config.opensearchIndex,
+              _id: hit._id,
+            },
+          });
+          bulkBody.push({
+            doc: { amount_msats: amountMsats },
+          });
         }
       }
 
@@ -135,7 +152,7 @@ async function main() {
       scrollId = nextScroll.body._scroll_id as string;
       hits = nextScroll.body.hits.hits as unknown as Array<{
         _id: string;
-        _source: { tags: string[][] };
+        _source: { kind: number; tags: string[][] };
       }>;
     }
 

@@ -71,9 +71,15 @@ interface NostrEventDocument extends NostrEvent {
   repost_cnt: number;
   /** Count of kind 1 quote reposts referencing via `q` tag. */
   quote_cnt: number;
-  /** Sum of amount_msats from kind 9735 zap receipts referencing this event. */
+  /**
+   * Sum of amount_msats from kind 9735 Lightning zap receipts and kind 8333
+   * onchain zap events referencing this event.
+   */
   zap_amount_msats: number;
-  /** Count of kind 9735 zap receipts referencing this event. */
+  /**
+   * Count of kind 9735 Lightning zap receipts + kind 8333 onchain zap events
+   * referencing this event.
+   */
   zap_cnt: number;
 }
 
@@ -150,7 +156,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
    * Maximum size of each pending-dirty set. When a set is full, further
    * additions are silently dropped until the next drain. This bounds the
    * fan-out of score-recomputation work triggered by a single flood of
-   * referencing events (kinds 1/6/7/16/17/1111/9735), since each dirty ID
+   * referencing events (kinds 1/6/7/16/17/1111/9735/8333), since each dirty ID
    * produces 6 msearches and each dirty pubkey produces 1 msearch in
    * {@link recomputeScores}.
    */
@@ -475,6 +481,29 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
   }
 
   /**
+   * Parse the amount in millisatoshis from a kind 8333 onchain zap event.
+   * The `amount` tag on kind 8333 holds a decimal integer number of
+   * **satoshis** (per the kind 8333 spec in Ditto's NIP.md). This helper
+   * reads that tag and converts to msats for consistency with the
+   * `amount_msats` field used for kind 9735 zap receipts.
+   *
+   * Returns undefined when the event has no valid `amount` tag.
+   */
+  static parseOnchainZapAmount(event: NostrEvent): number | undefined {
+    const amountTag = event.tags.find((t) => t[0] === "amount" && t[1]);
+    if (!amountTag) return undefined;
+
+    // Per NIP.md kind 8333: "amount" is a decimal integer in sats.
+    // Reject non-integer / negative / non-finite values.
+    if (!/^\d+$/.test(amountTag[1])) return undefined;
+
+    const sats = Number.parseInt(amountTag[1], 10);
+    if (!Number.isFinite(sats) || sats < 0) return undefined;
+
+    return sats * 1000;
+  }
+
+  /**
    * Detect media attachments for an event.
    * Delegates to the shared `detectMedia()` function in `media.ts`.
    */
@@ -528,13 +557,16 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     );
     const protocol = proxyTag?.[2];
 
-    // Extract zap amount from bolt11 for kind 9735 (zap receipts)
+    // Extract zap amount from bolt11 for kind 9735 (zap receipts),
+    // or from the `amount` tag (sats) for kind 8333 (onchain zaps).
     let amount_msats: number | undefined;
     if (event.kind === 9735) {
       const bolt11Tag = event.tags.find((t) => t[0] === "bolt11" && t[1]);
       if (bolt11Tag) {
         amount_msats = OpenSearchRelay.parseBolt11Amount(bolt11Tag[1]);
       }
+    } else if (event.kind === 8333) {
+      amount_msats = OpenSearchRelay.parseOnchainZapAmount(event);
     }
 
     const language = analysis?.language;
@@ -1785,7 +1817,9 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
   }
 
   /** Kinds whose `e`-tag references affect engagement scores. */
-  private static REFERENCING_KINDS = new Set([1, 6, 7, 16, 17, 1111, 9735]);
+  private static REFERENCING_KINDS = new Set([
+    1, 6, 7, 16, 17, 1111, 9735, 8333,
+  ]);
 
   /**
    * After indexing referencing events, accumulate the target event IDs and
@@ -2565,7 +2599,8 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
           },
         });
 
-        // 3: zaps (kind 9735) — need sum aggregation for amount_msats
+        // 3: zaps (kind 9735 Lightning + kind 8333 onchain) — need sum
+        // aggregation for amount_msats
         engagementSearches.push({
           index: this.indexName,
           body: {
@@ -2573,7 +2608,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
               bool: {
                 must: [
                   ...baseMust,
-                  { term: { kind: 9735 } },
+                  { terms: { kind: [9735, 8333] } },
                   { term: { "tags_map.e": eventId } },
                 ],
               },
@@ -2614,7 +2649,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
               bool: {
                 must: [
                   ...baseMust,
-                  { terms: { kind: [1, 6, 7, 16, 1111, 9735] } },
+                  { terms: { kind: [1, 6, 7, 16, 1111, 9735, 8333] } },
                   { term: { "tags_map.e": eventId } },
                 ],
               },

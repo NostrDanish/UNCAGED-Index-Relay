@@ -6088,6 +6088,57 @@ describe("OpenSearchRelay", () => {
     });
   });
 
+  describe("parseOnchainZapAmount", () => {
+    /** Build a minimal kind 8333 event with the given tags. */
+    const makeEvt = (tags: string[][]) => ({
+      id: "e".repeat(64),
+      pubkey: "a".repeat(64),
+      created_at: 0,
+      kind: 8333,
+      tags,
+      content: "",
+      sig: "",
+    });
+
+    it("returns msats (sats × 1000) from the `amount` tag", () => {
+      const evt = makeEvt([
+        ["i", "bitcoin:tx:" + "f".repeat(64)],
+        ["p", "b".repeat(64)],
+        ["amount", "25000"],
+      ]);
+      assert.equal(OpenSearchRelay.parseOnchainZapAmount(evt), 25_000_000);
+    });
+
+    it("returns 0 for an amount of zero", () => {
+      const evt = makeEvt([["amount", "0"]]);
+      assert.equal(OpenSearchRelay.parseOnchainZapAmount(evt), 0);
+    });
+
+    it("returns undefined when no amount tag is present", () => {
+      const evt = makeEvt([["p", "b".repeat(64)]]);
+      assert.equal(OpenSearchRelay.parseOnchainZapAmount(evt), undefined);
+    });
+
+    it("returns undefined for non-integer amounts", () => {
+      assert.equal(
+        OpenSearchRelay.parseOnchainZapAmount(makeEvt([["amount", "1.5"]])),
+        undefined,
+      );
+      assert.equal(
+        OpenSearchRelay.parseOnchainZapAmount(makeEvt([["amount", "-1"]])),
+        undefined,
+      );
+      assert.equal(
+        OpenSearchRelay.parseOnchainZapAmount(makeEvt([["amount", "abc"]])),
+        undefined,
+      );
+      assert.equal(
+        OpenSearchRelay.parseOnchainZapAmount(makeEvt([["amount", ""]])),
+        undefined,
+      );
+    });
+  });
+
   describe("authKinds exclusion with ids filter", () => {
     it("should exclude auth kinds from queries without ids or explicit kinds", async () => {
       let capturedBody: Record<string, unknown> | undefined;
