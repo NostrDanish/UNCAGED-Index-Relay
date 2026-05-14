@@ -14,8 +14,10 @@ import {
   opensearchBulkQueueGauge,
   opensearchEventsCounter,
   opensearchFlushDurationHistogram,
+  opensearchPhase2DroppedCounter,
   opensearchQueriesCounter,
   opensearchQueryDurationHistogram,
+  opensearchSlotDeepHistoryCounter,
 } from "./metrics.ts";
 import type { ClientOptions } from "./opensearch-client.ts";
 import {
@@ -36,6 +38,24 @@ const NOSTR_EVENT_FIELDS = [
   "content",
   "sig",
 ] as const;
+
+/**
+ * Partial document applied to losers during Phase 2 history-preserving
+ * cleanup. Marks the doc as replaced and zeroes its score fields so it
+ * doesn't contribute to engagement aggregations. Frozen because it's
+ * shared by reference across every bulk update.
+ */
+const REPLACED_DOC: Readonly<Record<string, unknown>> = Object.freeze({
+  replaced: true,
+  followers: 0,
+  engagers: 0,
+  comment_cnt: 0,
+  reaction_cnt: 0,
+  repost_cnt: 0,
+  quote_cnt: 0,
+  zap_amount_msats: 0,
+  zap_cnt: 0,
+});
 
 /**
  * OpenSearch document structure for Nostr events
@@ -171,6 +191,16 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
    * Phase 2 tasks queue rather than fan out.
    */
   static readonly MAX_PHASE2_CONCURRENCY = 4;
+
+  /**
+   * Maximum number of Phase 2 tasks permitted to wait behind the
+   * concurrency semaphore. When exceeded, the new task is **dropped**
+   * (logged + counted) rather than queued. Dropping is safe: the next
+   * replacement event for any affected slot will re-trigger cleanup via
+   * its own Phase 2 task. The cap exists to prevent unbounded waiter
+   * accumulation under sustained overload.
+   */
+  static readonly MAX_PHASE2_WAITERS = 64;
 
   /** Currently in-flight Phase 2 tasks (counted against MAX_PHASE2_CONCURRENCY). */
   private phase2InFlight = 0;
@@ -1690,14 +1720,22 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
   }
 
   /**
-   * Acquire a slot in the Phase 2 concurrency semaphore. Resolves immediately
-   * if capacity is available; otherwise queues until {@link releasePhase2Slot}
-   * is called.
+   * Acquire a slot in the Phase 2 concurrency semaphore. Resolves
+   * immediately if capacity is available; otherwise queues until
+   * {@link releasePhase2Slot} is called.
+   *
+   * If the waiter queue is full ({@link MAX_PHASE2_WAITERS}), returns
+   * `false` so the caller can drop the task. Dropping is safe — the next
+   * replacement event for any affected slot will re-trigger cleanup. The
+   * cap prevents unbounded waiter accumulation under sustained overload.
    */
-  private async acquirePhase2Slot(): Promise<void> {
+  private async acquirePhase2Slot(): Promise<boolean> {
     if (this.phase2InFlight < OpenSearchRelay.MAX_PHASE2_CONCURRENCY) {
       this.phase2InFlight++;
-      return;
+      return true;
+    }
+    if (this.phase2Waiters.length >= OpenSearchRelay.MAX_PHASE2_WAITERS) {
+      return false;
     }
     await new Promise<void>((resolve) => {
       this.phase2Waiters.push(() => {
@@ -1705,6 +1743,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
         resolve();
       });
     });
+    return true;
   }
 
   /**
@@ -1724,24 +1763,38 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
    *
    * Batched implementation:
    *   1. One {@link Client.msearch} over all slots returns winner + a peek
-   *      at any prior version (`size: 2`). Counted as `slot_resolution`.
+   *      at any prior version (`size: 2`). Routed through the read client
+   *      since it's a single query per flush. Counted as `slot_resolution`.
    *   2. Slots whose `msearch` returned only the just-indexed event have
    *      no prior versions and are skipped — a fast-path that dominates
    *      first-time-write workloads (e.g. Bluesky bridge backfill).
-   *   3. Slots that need cleanup are grouped by history-preservation policy
-   *      and resolved in **two** combined ops at most:
+   *   3. Slots that need cleanup are resolved in at most three combined
+   *      ops:
    *        - history-preserving losers: one bulk partial-doc `update` per
-   *          known loser id (no painless script); plus a single
-   *          `updateByQuery` fallback if any slot has deep history
-   *          (>1 prior version, not visible from `size: 2`).
-   *        - excluded-kind losers: a single `deleteByQuery` over all slots.
-   *      Counted as `slot_cleanup`.
+   *          known loser id, skipping losers that were concurrently
+   *          soft-deleted. Counted as `slot_cleanup_history`.
+   *        - excluded-kind losers: a single `deleteByQuery` over all
+   *          slots. Counted as `slot_cleanup_delete`.
+   *        - deep-history sweep: a single `updateByQuery` covering slots
+   *          whose msearch hit its size cap, in case stragglers exist
+   *          behind the visible loser. Counted as `slot_cleanup_deep`.
    *
-   * Phase 2 is wrapped by a class-wide semaphore (`MAX_PHASE2_CONCURRENCY`)
-   * so concurrent flushes cannot stack and starve REQ traffic.
+   * Phase 2 is wrapped by a class-wide semaphore
+   * ({@link MAX_PHASE2_CONCURRENCY}) so concurrent flushes cannot stack
+   * and starve REQ traffic. When the waiter queue overflows
+   * ({@link MAX_PHASE2_WAITERS}), excess tasks are dropped — the
+   * deep-history fallback ensures the next replacement event for an
+   * affected slot still picks up any stragglers.
    */
   private async resolveReplaceableSlots(entries: BulkEntry[]): Promise<void> {
-    await this.acquirePhase2Slot();
+    const acquired = await this.acquirePhase2Slot();
+    if (!acquired) {
+      opensearchPhase2DroppedCounter.inc();
+      console.warn(
+        `[opensearch] Phase 2 task dropped: waiter queue full (${OpenSearchRelay.MAX_PHASE2_WAITERS}). Affected slots will be cleaned up on the next replacement event.`,
+      );
+      return;
+    }
     try {
       await this.resolveReplaceableSlotsInner(entries);
     } finally {
@@ -1814,17 +1867,27 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
 
     const slotList = Array.from(slots.values());
 
-    // --- Step 1: One msearch over all slots, returning each slot's top 2
-    // candidates (winner + a peek at any prior version). Routes through
-    // writeClient so it doesn't compete with live REQ traffic on the read
-    // pool's HTTP sockets.
+    // --- Step 1: One msearch over all slots, returning each slot's top 3
+    // candidates. We need `size: 3` (not 2) so we can distinguish:
+    //
+    //   - hits.length === 1 → only the just-indexed event, no prior version
+    //   - hits.length === 2 → exactly one prior version (the common case;
+    //     can be resolved with a single partial-doc update by id)
+    //   - hits.length === 3 → msearch hit the size cap; older stragglers
+    //     may exist behind the visible loser, schedule a deep-history sweep
+    //
+    // Routes through the read client because it's a single query per flush
+    // regardless of slot count; the write pool is the hot resource during
+    // replaceable-event floods (Phase 1 bulk + Phase 2 cleanup both hit
+    // it), so reads belong on the read pool where they can run in parallel
+    // with ongoing writes.
     const msearchRequests = slotList.map((slot) => ({
       index: this.indexName,
       body: {
         query: { bool: { must: buildSlotMust(slot) } },
         sort: [{ created_at: { order: "desc" } }, { id: { order: "asc" } }],
-        size: 2,
-        _source: ["id"],
+        size: 3,
+        _source: ["id", "deleted"],
       },
     }));
 
@@ -1833,16 +1896,22 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
       type: "slot_resolution",
     });
     let msearchResponses: Array<{
-      hits?: { hits?: Array<{ _source?: { id: string } }> };
+      hits?: {
+        hits?: Array<{ _source?: { id: string; deleted?: boolean } }>;
+      };
     }>;
     try {
-      const result = await this.writeClient.msearch(msearchRequests);
+      const result = await this.client.msearch(msearchRequests);
       slotEnd();
       msearchResponses =
         (
           result.body as {
             responses?: Array<{
-              hits?: { hits?: Array<{ _source?: { id: string } }> };
+              hits?: {
+                hits?: Array<{
+                  _source?: { id: string; deleted?: boolean };
+                }>;
+              };
             }>;
           }
         ).responses ?? [];
@@ -1852,23 +1921,29 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
       return;
     }
 
-    // --- Step 2: Categorize slots into:
-    //   - "skip"      → no prior version, nothing to clean up (#6).
-    //   - "history"   → at least one prior version; preserve via partial-doc
-    //                   update on the known loser id.
-    //   - "delete"    → at least one prior version; kind is excluded from
-    //                   history retention, so we delete prior versions.
+    // --- Step 2: Categorize each slot.
     //
-    // Note: msearch returns size:2, so we only see the most recent loser per
-    // slot. If a slot has older `replaced: false` stragglers (e.g. from a
-    // prior failed cleanup), they will be picked up on the next replacement
-    // event for that slot. The Phase 1 winner-resolution at query time
-    // already filters by `replaced: false` + `created_at desc`, so user-
-    // visible behavior is correct even with stragglers present.
+    // history losers:   slot's kind preserves history AND msearch returned
+    //                   exactly one prior version (hits.length === 2).
+    //                   Resolved by partial-doc update by id in 3a.
+    //
+    // delete slots:     slot's kind is excluded from history retention,
+    //                   regardless of how many priors are visible. The
+    //                   batched deleteByQuery in 3b doesn't have a size
+    //                   cap so it cleans deep history transparently.
+    //
+    // deep-history:     slot's kind preserves history AND msearch hit its
+    //                   size cap (hits.length === 3). Stragglers may exist
+    //                   behind the visible window — resolved by a scoped
+    //                   updateByQuery sweep in 3c so the system self-heals
+    //                   on every Phase 2 pass instead of waiting for a
+    //                   future replacement event.
     type Loser = { slot: Slot; loserId: string };
     const historyLosers: Loser[] = [];
     const deleteSlots: Slot[] = [];
     const deleteWinnerIds: string[] = [];
+    const deepHistorySlots: Slot[] = [];
+    const deepHistoryWinnerIds: string[] = [];
 
     for (let i = 0; i < slotList.length; i++) {
       const slot = slotList[i];
@@ -1887,11 +1962,38 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
       // and the partial-doc update entirely.
       if (hits.length < 2) continue;
 
-      const loserId = hits[1]?._source?.id;
-      if (!loserId) continue;
+      const preserve = this.shouldPreserveHistory(slot.kind);
+      const hitDeepHistory = hits.length >= 3;
 
-      if (this.shouldPreserveHistory(slot.kind)) {
-        historyLosers.push({ slot, loserId });
+      if (hitDeepHistory) {
+        // msearch hit its size cap; stragglers may exist. Tracked in
+        // metrics — in healthy operation this counter should stay near
+        // zero. The deep-history sweep in 3c covers preserve-history
+        // slots; excluded-kind slots are handled fully by 3b which has
+        // no size cap.
+        opensearchSlotDeepHistoryCounter.inc();
+      }
+
+      if (preserve) {
+        if (hitDeepHistory) {
+          // Defer entirely to the scoped updateByQuery sweep in 3c, which
+          // covers every straggler in the slot. Skipping 3a here avoids
+          // double-writing the visible loser.
+          deepHistorySlots.push(slot);
+          deepHistoryWinnerIds.push(winnerId);
+        } else {
+          const loser = hits[1]?._source;
+          const loserId = loser?.id;
+          if (!loserId) continue;
+          // Loser was concurrently soft-deleted (NIP-09) between msearch
+          // and this code path. Skip the partial-doc update — overwriting
+          // would clobber `deleted: true` back to `replaced: true` and
+          // resurrect the doc into history queries. It's already excluded
+          // from queries by the `deleted: false` filter, so leaving it
+          // alone is correct.
+          if (loser?.deleted === true) continue;
+          historyLosers.push({ slot, loserId });
+        }
       } else {
         deleteSlots.push(slot);
         deleteWinnerIds.push(winnerId);
@@ -1909,35 +2011,26 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
       }
     }
 
-    // --- Step 3: Cleanup — at most two round-trips total per flush.
+    // --- Step 3: Cleanup. At most three round-trips total per flush
+    // (history bulk update + delete sweep + deep-history sweep), and only
+    // when each path has slots to act on.
     //
     // 3a. Bulk partial-doc update of known history losers. Avoids the
     //     painless script entirely, which is much cheaper than
     //     updateByQuery (no script compile/cache, no query scan, direct
     //     doc-id lookup on the write thread pool).
     if (historyLosers.length > 0) {
-      opensearchQueriesCounter.inc({ type: "slot_cleanup" });
+      opensearchQueriesCounter.inc({ type: "slot_cleanup_history" });
       const cleanupEnd = opensearchQueryDurationHistogram.startTimer({
-        type: "slot_cleanup",
+        type: "slot_cleanup_history",
       });
       try {
         const bulkBody: Array<Record<string, unknown>> = [];
-        const replacedDoc: Record<string, unknown> = {
-          replaced: true,
-          followers: 0,
-          engagers: 0,
-          comment_cnt: 0,
-          reaction_cnt: 0,
-          repost_cnt: 0,
-          quote_cnt: 0,
-          zap_amount_msats: 0,
-          zap_cnt: 0,
-        };
         for (const { loserId } of historyLosers) {
           bulkBody.push({
             update: { _index: this.indexName, _id: loserId },
           });
-          bulkBody.push({ doc: replacedDoc });
+          bulkBody.push({ doc: REPLACED_DOC });
         }
         await this.writeClient.bulk({ body: bulkBody });
       } catch (error) {
@@ -1950,11 +2043,12 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     // 3b. Single combined deleteByQuery for slots whose kind is excluded
     //     from history retention. All such slots collapsed into one HTTP
     //     round-trip via a bool.should over the per-slot must-clauses,
-    //     with the slot winners excluded so they survive.
+    //     with the slot winners excluded so they survive. No size cap, so
+    //     deep history is handled transparently here.
     if (deleteSlots.length > 0) {
-      opensearchQueriesCounter.inc({ type: "slot_cleanup" });
+      opensearchQueriesCounter.inc({ type: "slot_cleanup_delete" });
       const deleteEnd = opensearchQueryDurationHistogram.startTimer({
-        type: "slot_cleanup",
+        type: "slot_cleanup_delete",
       });
       try {
         const should = deleteSlots.map((slot) => ({
@@ -1981,6 +2075,60 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
         console.warn("Phase 2 delete sweep failed:", error);
       } finally {
         deleteEnd();
+      }
+    }
+
+    // 3c. Deep-history sweep for history-preserving slots where msearch
+    //     hit its size cap (≥1 straggler likely exists behind the visible
+    //     window). Uses a scoped `updateByQuery` painless script — the
+    //     only path that still pays the script-compile cost, but only
+    //     fires when 3a's fast path can't cover the slot completely.
+    //
+    //     This self-heals from prior cleanup failures: without it, a
+    //     transient OpenSearch error during 3a would leave stragglers in
+    //     a slot indefinitely (until the next replacement event for that
+    //     slot, which may never come for inactive accounts).
+    if (deepHistorySlots.length > 0) {
+      opensearchQueriesCounter.inc({ type: "slot_cleanup_deep" });
+      const deepEnd = opensearchQueryDurationHistogram.startTimer({
+        type: "slot_cleanup_deep",
+      });
+      try {
+        const should = deepHistorySlots.map((slot) => ({
+          bool: { must: buildSlotMust(slot) },
+        }));
+        await this.writeClient.updateByQuery({
+          index: this.indexName,
+          body: {
+            query: {
+              bool: {
+                should,
+                minimum_should_match: 1,
+                must_not: [{ ids: { values: deepHistoryWinnerIds } }],
+              },
+            },
+            script: {
+              source: `
+                ctx._source.replaced = true;
+                ctx._source.followers = 0;
+                ctx._source.engagers = 0;
+                ctx._source.comment_cnt = 0;
+                ctx._source.reaction_cnt = 0;
+                ctx._source.repost_cnt = 0;
+                ctx._source.quote_cnt = 0;
+                ctx._source.zap_amount_msats = 0;
+                ctx._source.zap_cnt = 0;
+              `,
+              lang: "painless",
+            },
+          },
+          refresh: false,
+          conflicts: "proceed",
+        });
+      } catch (error) {
+        console.warn("Phase 2 deep-history sweep failed:", error);
+      } finally {
+        deepEnd();
       }
     }
   }

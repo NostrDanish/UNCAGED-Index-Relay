@@ -770,7 +770,6 @@ describe("OpenSearchRelay", () => {
           },
           // biome-ignore lint/suspicious/noExplicitAny: mock accepts any query shape
           updateByQuery: async ({ body }: { body: any }) => {
-            const filters = extractFilters(body.query.bool);
             let updated = 0;
 
             for (const [_id, doc] of documents.entries()) {
@@ -779,7 +778,7 @@ describe("OpenSearchRelay", () => {
                 replaced?: boolean;
                 tags_map?: Record<string, string[]>;
               };
-              if (!matchesFilters(d, filters)) continue;
+              if (!matchesQueryBool(d, body.query.bool)) continue;
 
               const script = body.script.source as string;
               if (script.includes("ctx._source.deleted = true")) {
@@ -1167,6 +1166,148 @@ describe("OpenSearchRelay", () => {
         historyIds,
         expectedIds,
         "History should contain V1 and V2",
+      );
+    });
+
+    it("should self-heal stragglers via deep-history sweep", async () => {
+      // Simulates a prior cleanup failure: two `replaced: false` docs sit
+      // in the same slot when a new replacement arrives. The msearch in
+      // Phase 2 hits its size cap (3 hits), which routes the slot through
+      // the deep-history fallback (scoped updateByQuery) instead of the
+      // fast-path bulk partial-doc update. All older versions should end
+      // up marked `replaced: true` after the next event arrives.
+      const { client, documents } = createHistoryMockClient();
+      const relay = new OpenSearchRelay(client as unknown as Client, {
+        indexName: "test-index",
+        bulkMaxSize: 1,
+        refreshDelayMs: 0,
+      });
+
+      const sk = generateSecretKey();
+      const now = Math.floor(Date.now() / 1000);
+
+      // V1, V2 indexed normally — V1 ends up `replaced: true` after V2.
+      const event1 = finalizeEvent(
+        {
+          kind: 0,
+          created_at: now - 300,
+          tags: [],
+          content: JSON.stringify({ name: "V1" }),
+        },
+        sk,
+      );
+      await relay.event(event1);
+
+      const event2 = finalizeEvent(
+        {
+          kind: 0,
+          created_at: now - 200,
+          tags: [],
+          content: JSON.stringify({ name: "V2" }),
+        },
+        sk,
+      );
+      await relay.event(event2);
+
+      // Simulate a prior Phase 2 cleanup failure: V1 is *not* marked
+      // replaced. Now there are two `replaced: false` docs in the slot.
+      const v1Doc = documents.get(event1.id) as Record<string, unknown>;
+      v1Doc.replaced = false;
+
+      // V3 arrives. Its Phase 2 msearch will see V1, V2, V3 all with
+      // `replaced: false` → hits.length === 3 → deep-history sweep path.
+      const event3 = finalizeEvent(
+        {
+          kind: 0,
+          created_at: now - 100,
+          tags: [],
+          content: JSON.stringify({ name: "V3" }),
+        },
+        sk,
+      );
+      await relay.event(event3);
+
+      const docs = Array.from(documents.values()) as Array<
+        NostrEvent & { replaced?: boolean }
+      >;
+      const currentDocs = docs.filter((d) => !d.replaced);
+      assert.equal(
+        currentDocs.length,
+        1,
+        "Deep-history sweep should leave exactly one current version",
+      );
+      assert.equal(
+        currentDocs[0].id,
+        event3.id,
+        "Current version should be V3",
+      );
+
+      const historyDocs = docs.filter((d) => d.replaced === true);
+      const historyIds = historyDocs.map((d) => d.id).sort();
+      const expectedIds = [event1.id, event2.id].sort();
+      assert.deepEqual(
+        historyIds,
+        expectedIds,
+        "Both V1 and V2 should be marked replaced after deep-history sweep",
+      );
+    });
+
+    it("should not overwrite a concurrently-soft-deleted loser", async () => {
+      // Simulates a NIP-09 deletion racing the Phase 2 cleanup: the
+      // msearch returns a `_source` where `deleted: true`. The bulk
+      // partial-doc update path must skip that loser, otherwise it would
+      // clobber `deleted` back to false and resurrect the doc.
+      const { client, documents } = createHistoryMockClient();
+      const relay = new OpenSearchRelay(client as unknown as Client, {
+        indexName: "test-index",
+        bulkMaxSize: 1,
+        refreshDelayMs: 0,
+      });
+
+      const sk = generateSecretKey();
+      const now = Math.floor(Date.now() / 1000);
+
+      const event1 = finalizeEvent(
+        {
+          kind: 0,
+          created_at: now - 100,
+          tags: [],
+          content: JSON.stringify({ name: "V1" }),
+        },
+        sk,
+      );
+      await relay.event(event1);
+
+      // Mark V1 as soft-deleted *before* V2's Phase 2 runs. The mock
+      // resolves Phase 2 synchronously (refreshDelayMs: 0), so we have
+      // to set this up via direct doc mutation.
+      const v1Doc = documents.get(event1.id) as Record<string, unknown>;
+      v1Doc.deleted = true;
+
+      const event2 = finalizeEvent(
+        {
+          kind: 0,
+          created_at: now,
+          tags: [],
+          content: JSON.stringify({ name: "V2" }),
+        },
+        sk,
+      );
+      await relay.event(event2);
+
+      // The msearch for V2's slot filters by `deleted: false`, so V1 is
+      // not visible and Phase 2 sees hits.length === 1 → no cleanup.
+      // V1's `deleted: true` is preserved.
+      const v1After = documents.get(event1.id) as Record<string, unknown>;
+      assert.equal(
+        v1After.deleted,
+        true,
+        "V1 should remain soft-deleted after V2's Phase 2 runs",
+      );
+      assert.notEqual(
+        v1After.replaced,
+        true,
+        "V1 should not have been overwritten with replaced: true",
       );
     });
 

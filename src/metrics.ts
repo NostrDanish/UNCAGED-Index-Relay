@@ -299,11 +299,34 @@ export const opensearchEventsCounter = new Counter({
   labelNames: ["kind"] as const,
 });
 
-/** Total OpenSearch queries executed, labeled by type (req, sort, count, slot_resolution, slot_cleanup, aggregation). */
+/** Total OpenSearch queries executed, labeled by type (req, sort, count, slot_resolution, slot_cleanup_history, slot_cleanup_delete, slot_cleanup_deep, aggregation). */
 export const opensearchQueriesCounter = new Counter({
   name: "ditto_opensearch_queries_total",
   help: "Total OpenSearch queries executed",
   labelNames: ["type"] as const,
+});
+
+/**
+ * Count of Phase 2 slots that had deep history visible at msearch time
+ * (i.e. msearch returned `size: 2` worth of hits, indicating ≥1 prior
+ * version may be older than the one we saw). Under healthy operation this
+ * should be near zero; sustained nonzero values mean prior cleanup ops
+ * have been failing and stragglers are accumulating in slots.
+ */
+export const opensearchSlotDeepHistoryCounter = new Counter({
+  name: "ditto_opensearch_slot_deep_history_total",
+  help: "Phase 2 slots where msearch hit its size limit, indicating possible stragglers",
+});
+
+/**
+ * Count of Phase 2 tasks dropped because the waiter queue exceeded its
+ * cap. Dropped tasks are safe (the next replacement event for any
+ * affected slot will resolve it), but a nonzero value indicates ingest
+ * is sustainedly outrunning Phase 2 capacity.
+ */
+export const opensearchPhase2DroppedCounter = new Counter({
+  name: "ditto_opensearch_phase2_dropped_total",
+  help: "Phase 2 tasks dropped due to waiter-queue overflow",
 });
 
 /** Duration of OpenSearch queries in seconds, labeled by type. */
