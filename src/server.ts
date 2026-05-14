@@ -18,7 +18,9 @@ const config = new Config({
 });
 
 // Initialize analysis worker pool (signature verification, language & sentiment detection)
-const analyzePool = new AnalyzePool();
+const analyzePool = new AnalyzePool(config.analyzePoolSize, {
+  maxPending: config.analyzeMaxPending,
+});
 
 // Construct OpenSearch clients. Read and write operations use separate clients
 // so that long-running write operations (e.g. bulk flushes with
@@ -44,6 +46,7 @@ const opensearchRelay = new OpenSearchRelay(opensearchReadClient, {
   authKinds: config.authKinds,
   writeClient: opensearchWriteClient,
   tagValueMaxCountPerName: config.tagValueMaxCountPerName,
+  bulkMaxQueue: config.bulkMaxQueue,
 });
 
 const relay = new Relay(opensearchRelay, {
@@ -241,8 +244,23 @@ const server = serve<WebSocketData>({
       relay.handleOpen(ws);
     },
 
-    async message(ws, message) {
-      await relay.handleMessage(ws, message);
+    message(ws, message) {
+      // Fire-and-forget: do NOT await `handleMessage` here. Awaiting would
+      // serialize message processing per connection, which becomes a hard
+      // bottleneck when a single client (e.g. a Bluesky bridge) pumps
+      // events at firehose rates — every event would block the next on
+      // analyze-worker hops + bulk-flush latency. With fire-and-forget,
+      // events from one connection can fan out into the analyze pool and
+      // be batched together, and OK responses come back in their natural
+      // completion order (NIP-01 does not require strict OK ordering).
+      // Errors thrown inside handleMessage are caught internally and
+      // converted to NOTICE / OK-false responses.
+      relay.handleMessage(ws, message).catch((err) => {
+        // handleMessage already catches and converts errors to NOTICE
+        // responses; this is just a belt-and-suspenders to prevent an
+        // unhandled rejection from crashing the process.
+        console.error("Unhandled error in handleMessage:", err);
+      });
     },
 
     close(ws) {

@@ -353,4 +353,87 @@ describe("Config", () => {
       assert.deepEqual(config.historyKindsExcluded, new Set());
     });
   });
+
+  describe("analyzePoolSize", () => {
+    it("should default to 0 (auto) when unset", () => {
+      const config = new Config(baseEnv());
+      assert.equal(config.analyzePoolSize, 0);
+    });
+
+    it("should parse a positive integer", () => {
+      const config = new Config(baseEnv([["ANALYZE_POOL_SIZE", "3"]]));
+      assert.equal(config.analyzePoolSize, 3);
+    });
+
+    it("should accept 0 explicitly", () => {
+      const config = new Config(baseEnv([["ANALYZE_POOL_SIZE", "0"]]));
+      assert.equal(config.analyzePoolSize, 0);
+    });
+
+    it("should throw when negative", () => {
+      assert.throws(
+        () => new Config(baseEnv([["ANALYZE_POOL_SIZE", "-1"]])),
+        /ANALYZE_POOL_SIZE/,
+      );
+    });
+
+    it("should throw when non-numeric", () => {
+      assert.throws(
+        () => new Config(baseEnv([["ANALYZE_POOL_SIZE", "foo"]])),
+        /ANALYZE_POOL_SIZE/,
+      );
+    });
+  });
+
+  describe("analyzeMaxPending", () => {
+    it("should default to 20000", () => {
+      const config = new Config(baseEnv());
+      assert.equal(config.analyzeMaxPending, 20_000);
+    });
+
+    it("should parse a positive integer", () => {
+      const config = new Config(baseEnv([["ANALYZE_MAX_PENDING", "5000"]]));
+      assert.equal(config.analyzeMaxPending, 5000);
+    });
+
+    it("should throw when zero", () => {
+      assert.throws(
+        () => new Config(baseEnv([["ANALYZE_MAX_PENDING", "0"]])),
+        /ANALYZE_MAX_PENDING/,
+      );
+    });
+
+    it("should throw when negative", () => {
+      assert.throws(
+        () => new Config(baseEnv([["ANALYZE_MAX_PENDING", "-1"]])),
+        /ANALYZE_MAX_PENDING/,
+      );
+    });
+  });
+
+  describe("bulkMaxQueue", () => {
+    it("should default to 5000", () => {
+      const config = new Config(baseEnv());
+      assert.equal(config.bulkMaxQueue, 5_000);
+    });
+
+    it("should parse a positive integer", () => {
+      const config = new Config(baseEnv([["BULK_MAX_QUEUE", "1000"]]));
+      assert.equal(config.bulkMaxQueue, 1000);
+    });
+
+    it("should throw when zero", () => {
+      assert.throws(
+        () => new Config(baseEnv([["BULK_MAX_QUEUE", "0"]])),
+        /BULK_MAX_QUEUE/,
+      );
+    });
+
+    it("should throw when negative", () => {
+      assert.throws(
+        () => new Config(baseEnv([["BULK_MAX_QUEUE", "-1"]])),
+        /BULK_MAX_QUEUE/,
+      );
+    });
+  });
 });

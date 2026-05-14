@@ -62,6 +62,25 @@ export class Config {
    * are dropped from the searchable projection. Default: 5000.
    */
   readonly tagValueMaxCountPerName: number;
+  /**
+   * Number of analyze worker threads. Defaults to `hardwareConcurrency - 1`
+   * (minimum 1) so the main thread keeps a dedicated core for the WebSocket
+   * event loop and OpenSearch I/O. Override with `ANALYZE_POOL_SIZE`.
+   * Set to 0 to use the default. Hard-capped at `hardwareConcurrency`.
+   */
+  readonly analyzePoolSize: number;
+  /**
+   * Maximum pending analyze requests (queued + in-flight) before the relay
+   * starts rejecting new EVENT messages with `error: relay overloaded`.
+   * Protects the relay from OOM under firehose-style ingest. Default: 20_000.
+   */
+  readonly analyzeMaxPending: number;
+  /**
+   * Maximum size of the OpenSearch bulk indexing queue before
+   * `relay.storage.event(...)` rejects new events with `error: relay
+   * overloaded`. Default: 5_000.
+   */
+  readonly bulkMaxQueue: number;
   readonly nostrSigner: NostrSigner;
 
   constructor(env: { get(key: string): string | undefined }) {
@@ -218,6 +237,44 @@ export class Config {
         );
       }
       this.tagValueMaxCountPerName = n;
+    }
+
+    // analyzePoolSize: 0 (or unset) means "auto" — the pool itself picks
+    // `hardwareConcurrency - 1`. We accept the raw value here and the pool
+    // applies the auto default + hard cap.
+    const analyzePoolSizeValue = env.get("ANALYZE_POOL_SIZE");
+    if (!analyzePoolSizeValue) {
+      this.analyzePoolSize = 0;
+    } else {
+      const n = parseInt(analyzePoolSizeValue, 10);
+      if (Number.isNaN(n) || n < 0) {
+        throw new Error("ANALYZE_POOL_SIZE must be a non-negative integer.");
+      }
+      this.analyzePoolSize = n;
+    }
+
+    // analyzeMaxPending
+    const analyzeMaxPendingValue = env.get("ANALYZE_MAX_PENDING");
+    if (!analyzeMaxPendingValue) {
+      this.analyzeMaxPending = 20_000;
+    } else {
+      const n = parseInt(analyzeMaxPendingValue, 10);
+      if (Number.isNaN(n) || n <= 0) {
+        throw new Error("ANALYZE_MAX_PENDING must be a positive integer.");
+      }
+      this.analyzeMaxPending = n;
+    }
+
+    // bulkMaxQueue
+    const bulkMaxQueueValue = env.get("BULK_MAX_QUEUE");
+    if (!bulkMaxQueueValue) {
+      this.bulkMaxQueue = 5_000;
+    } else {
+      const n = parseInt(bulkMaxQueueValue, 10);
+      if (Number.isNaN(n) || n <= 0) {
+        throw new Error("BULK_MAX_QUEUE must be a positive integer.");
+      }
+      this.bulkMaxQueue = n;
     }
 
     // nostrSigner

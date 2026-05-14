@@ -360,3 +360,28 @@ export const analyzePendingGauge = new Gauge({
   name: "ditto_analyze_pending",
   help: "Pending analysis requests in the worker pool",
 });
+
+/**
+ * Per-worker inflight analyze requests (posted to the worker but not yet
+ * returned). Useful for diagnosing skewed dispatch and head-of-line
+ * blocking when one worker stalls on a slow batch.
+ */
+export const analyzeWorkerInflightGauge = new Gauge({
+  name: "ditto_analyze_worker_inflight",
+  help: "Inflight analyze requests per worker",
+  labelNames: ["worker"] as const,
+});
+
+// ---------------------------------------------------------------------------
+// Overload / backpressure
+// ---------------------------------------------------------------------------
+
+/**
+ * Count of EVENT messages rejected because the relay was overloaded
+ * (analyze pool pending cap or OpenSearch bulk queue cap exceeded).
+ */
+export const relayOverloadCounter = new Counter({
+  name: "ditto_relay_overload_total",
+  help: "EVENT messages rejected due to backpressure",
+  labelNames: ["source"] as const, // "analyze" | "storage"
+});

@@ -1,10 +1,10 @@
 import { strict as assert } from "node:assert";
 import { describe, it } from "node:test";
-import type { Client } from "./opensearch-client.ts";
 import type { NostrEvent } from "nostr-tools";
 import { finalizeEvent, generateSecretKey, getPublicKey } from "nostr-tools";
 import { Config } from "./config.ts";
 import { OpenSearchRelay } from "./opensearch.ts";
+import type { Client } from "./opensearch-client.ts";
 
 describe("OpenSearchRelay", () => {
   /** Minimum env required to construct a Config (RELAY_URL and NOSTR_NSEC are mandatory). */
@@ -6205,6 +6205,53 @@ describe("OpenSearchRelay", () => {
         undefined,
         "should not exclude auth kinds when ids present",
       );
+    });
+  });
+
+  describe("bulkMaxQueue backpressure", () => {
+    it("should reject event() with StorageOverloaded when queue is full", async () => {
+      // Mock client whose bulk() never resolves — the queue fills up and
+      // the next event() call must throw synchronously instead of growing
+      // the queue without bound.
+      const mockClient = {
+        bulk: () =>
+          new Promise(() => {
+            /* never resolves */
+          }),
+      } as unknown as Client;
+
+      const relay = new OpenSearchRelay(mockClient, {
+        // Set the queue cap to 2, and bulkMaxSize > 2 so the queue doesn't
+        // auto-flush before the cap is reached.
+        bulkMaxSize: 10,
+        bulkMaxQueue: 2,
+      });
+
+      const sk = generateSecretKey();
+      const ev = (i: number): NostrEvent =>
+        finalizeEvent(
+          {
+            kind: 1,
+            created_at: Math.floor(Date.now() / 1000),
+            tags: [],
+            content: `event ${i}`,
+          },
+          sk,
+        );
+
+      // First two go in fine (don't await; they'll never resolve because
+      // bulk() never resolves).
+      const p1 = relay.event(ev(1)).catch(() => {});
+      const p2 = relay.event(ev(2)).catch(() => {});
+
+      // Third must reject with StorageOverloaded.
+      await assert.rejects(relay.event(ev(3)), {
+        name: "StorageOverloaded",
+      });
+
+      // Suppress unresolved-promise warnings on p1/p2 — they're intentional.
+      void p1;
+      void p2;
     });
   });
 });

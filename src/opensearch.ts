@@ -8,6 +8,7 @@ import type {
 } from "@nostrify/nostrify";
 import { NIP50, NKinds, NSchema as n } from "@nostrify/nostrify";
 import type { Config } from "./config.ts";
+import { StorageOverloaded } from "./errors.ts";
 import { detectMedia } from "./media.ts";
 import {
   opensearchBulkQueueGauge,
@@ -246,12 +247,26 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
   /** Per-instance override of TAG_VALUE_MAX_COUNT_PER_NAME. */
   private tagValueMaxCountPerName: number;
 
+  /**
+   * Maximum number of events permitted to sit in the bulk queue. When
+   * exceeded, {@link event} rejects new events with {@link StorageOverloaded}
+   * so the relay can NACK upstream clients instead of accumulating an
+   * unbounded backlog under firehose ingest. Default: 5_000.
+   */
+  private bulkMaxQueue: number;
+
   constructor(
     client: Client,
     opts?: {
       indexName?: string;
       bulkMaxSize?: number;
       bulkFlushMs?: number;
+      /**
+       * Maximum number of events permitted to sit in the bulk queue before
+       * {@link event} starts rejecting with {@link StorageOverloaded}.
+       * Default: 5_000.
+       */
+      bulkMaxQueue?: number;
       historyEnabled?: boolean;
       historyKindsWhitelist?: Set<number>;
       historyKindsExcluded?: Set<number>;
@@ -276,6 +291,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     this.indexName = opts?.indexName || "nostr-events";
     this.bulkMaxSize = opts?.bulkMaxSize ?? 100;
     this.bulkFlushMs = opts?.bulkFlushMs ?? 200;
+    this.bulkMaxQueue = opts?.bulkMaxQueue ?? 5_000;
     this.historyEnabled = opts?.historyEnabled ?? true;
     this.historyKindsWhitelist = opts?.historyKindsWhitelist;
     this.historyKindsExcluded =
@@ -1511,6 +1527,12 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
    * When `opts.analysis` is provided (pre-computed by the analyze worker pool),
    * language and sentiment values are used directly instead of being detected
    * on the main thread.
+   *
+   * Rejects with {@link StorageOverloaded} when the bulk queue is already at
+   * {@link bulkMaxQueue} entries. This is the storage-side counterpart to the
+   * analyze pool's backpressure: it prevents the queue from growing without
+   * bound when OpenSearch can't keep up with ingest. The relay translates this
+   * into an `OK false "error: relay overloaded"` response per NIP-01.
    */
   async event(
     event: NostrEvent,
@@ -1525,6 +1547,10 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
       };
     },
   ): Promise<void> {
+    if (this.bulkQueue.length >= this.bulkMaxQueue) {
+      throw new StorageOverloaded(this.bulkQueue.length, this.bulkMaxQueue);
+    }
+
     const doc = this.eventToDocument(event, opts?.analysis);
     const docId = this.getDocumentId(event);
 

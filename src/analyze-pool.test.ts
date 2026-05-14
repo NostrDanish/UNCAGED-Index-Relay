@@ -3,6 +3,7 @@ import { after, afterEach, describe, it } from "node:test";
 import type { NostrEvent } from "nostr-tools";
 import { finalizeEvent, generateSecretKey } from "nostr-tools";
 import { AnalyzePool } from "./analyze-pool.ts";
+import { AnalyzePoolOverloaded } from "./errors.ts";
 
 describe("AnalyzePool", () => {
   let pool: AnalyzePool;
@@ -192,13 +193,13 @@ describe("AnalyzePool", () => {
     assert.equal(results[3].verified, false);
   });
 
-  it("should distribute work across workers via round-robin", async () => {
+  it("should distribute work across workers", async () => {
     console.log = () => {};
     pool = new AnalyzePool(4);
 
     // Analyze enough events that all 4 workers get used
     const events = Array.from({ length: 8 }, (_, i) =>
-      createValidEvent(`round-robin ${i}`),
+      createValidEvent(`distribute ${i}`),
     );
 
     const results = await Promise.all(events.map((e) => pool.analyze(e)));
@@ -319,5 +320,95 @@ describe("AnalyzePool", () => {
     const urlResult = await pool.analyze(urlEvent);
     assert.equal(urlResult.verified, true);
     assert.equal(urlResult.media, true);
+  });
+
+  it("should throw AnalyzePoolOverloaded when pending exceeds maxPending", async () => {
+    console.log = () => {};
+    // 1 worker so we can stall it predictably; tiny cap of 2.
+    pool = new AnalyzePool(1, { maxPending: 2 });
+
+    // Fire two requests; both go into the queue, then become inflight after
+    // setImmediate-scheduled flush. Don't await — we want them pending so the
+    // third call sees pendingCount === maxPending and throws.
+    const p1 = pool.analyze(createValidEvent("first"));
+    const p2 = pool.analyze(createValidEvent("second"));
+
+    // pendingCount is 2 right now (both still in pending Map until worker
+    // responds). The third call must throw synchronously.
+    assert.equal(pool.pendingCount, 2);
+    assert.throws(
+      () => pool.analyze(createValidEvent("third")),
+      AnalyzePoolOverloaded,
+    );
+
+    // First two still resolve normally — backpressure doesn't poison them.
+    const [r1, r2] = await Promise.all([p1, p2]);
+    assert.equal(r1.verified, true);
+    assert.equal(r2.verified, true);
+
+    // After they resolve, the pool accepts new work again.
+    const r3 = await pool.analyze(createValidEvent("third again"));
+    assert.equal(r3.verified, true);
+  });
+
+  it("should batch multiple analyze() calls in one tick into one postMessage", async () => {
+    // Spy on a worker's postMessage to count batches.  We use a pool size
+    // of 1 so all requests land on the same worker; with setImmediate-based
+    // flushing, sync-back-to-back enqueues should fan out as one batch.
+    console.log = () => {};
+    pool = new AnalyzePool(1);
+
+    // biome-ignore lint/suspicious/noExplicitAny: test-only access to private worker
+    const worker = (pool as any).workers[0] as Worker;
+    const originalPost = worker.postMessage.bind(worker);
+    let postCount = 0;
+    let lastBatchSize = 0;
+    worker.postMessage = (msg: unknown) => {
+      postCount++;
+      if (Array.isArray(msg)) lastBatchSize = msg.length;
+      return originalPost(msg);
+    };
+
+    const events = Array.from({ length: 5 }, (_, i) =>
+      createValidEvent(`batch ${i}`),
+    );
+    // Fire all 5 synchronously in the same tick — no await between them.
+    const promises = events.map((e) => pool.analyze(e));
+
+    const results = await Promise.all(promises);
+    assert.ok(results.every((r) => r.verified === true));
+
+    // All 5 should have gone in a single postMessage call.
+    assert.equal(postCount, 1, "expected single batched postMessage");
+    assert.equal(lastBatchSize, 5);
+  });
+
+  it("should use least-loaded dispatch when one worker is busier", async () => {
+    // Two workers; we manually skew the queue/inflight to make worker 1 the
+    // less-loaded choice, then verify the next analyze() lands on worker 1.
+    console.log = () => {};
+    pool = new AnalyzePool(2);
+
+    // biome-ignore lint/suspicious/noExplicitAny: test-only access
+    const p = pool as any;
+
+    // Simulate worker 0 having 3 inflight; worker 1 idle.
+    p.inflight[0] = 3;
+    p.inflight[1] = 0;
+
+    const ev = createValidEvent("least-loaded");
+    const promise = pool.analyze(ev);
+
+    // queues[1] should now hold the request; queues[0] empty.
+    assert.equal(p.queues[0].length, 0);
+    assert.equal(p.queues[1].length, 1);
+
+    // Reset inflight so the worker-response handler doesn't underflow.
+    p.inflight[0] = 0;
+
+    // Await the dispatched analysis so the promise isn't left dangling
+    // (afterEach disposes the pool, which rejects any leftover pending).
+    const result = await promise;
+    assert.equal(result.verified, true);
   });
 });

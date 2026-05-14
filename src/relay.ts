@@ -7,13 +7,22 @@ import type { Filter, NostrEvent } from "nostr-tools";
 import { matchFilter, verifyEvent } from "nostr-tools";
 
 import type { AnalyzeResult } from "./analyze-pool.ts";
+import { AnalyzePoolOverloaded, StorageOverloaded } from "./errors.ts";
 import {
   relayBroadcastQueueGauge,
   relayConnectionsGauge,
   relayEventsCounter,
   relayMessagesCounter,
+  relayOverloadCounter,
   relayReqDurationHistogram,
 } from "./metrics.ts";
+
+/**
+ * Cached zod schemas. NSchema.event() and NSchema.filter() construct a fresh
+ * z.object each call; on a hot ingest path that adds up. Build once, reuse.
+ */
+const EVENT_SCHEMA = n.event();
+const FILTER_SCHEMA = n.filter();
 
 /** Pre-computed analysis data that can be passed alongside an event to avoid redundant work. */
 export interface EventAnalysis {
@@ -442,8 +451,24 @@ export class Relay {
     accepted: boolean;
     message: string;
   }> {
-    // Analyze event off the main thread: verify signature, detect language/sentiment
-    const analysis = await this.analyze(event);
+    // Analyze event off the main thread: verify signature, detect language/sentiment.
+    // Backpressure: if the pool is overloaded, analyze() throws synchronously
+    // and we reply OK/false so the client backs off instead of holding the
+    // connection while we OOM.
+    let analysis: AnalyzeResult;
+    try {
+      analysis = await this.analyze(event);
+    } catch (err) {
+      if (err instanceof AnalyzePoolOverloaded) {
+        relayOverloadCounter.inc({ source: "analyze" });
+        return {
+          eventId: event.id,
+          accepted: false,
+          message: "error: relay overloaded, try again",
+        };
+      }
+      throw err;
+    }
     if (!analysis.verified) {
       return {
         eventId: event.id,
@@ -629,6 +654,14 @@ export class Relay {
         message: "",
       };
     } catch (error) {
+      if (error instanceof StorageOverloaded) {
+        relayOverloadCounter.inc({ source: "storage" });
+        return {
+          eventId: event.id,
+          accepted: false,
+          message: "error: relay overloaded, try again",
+        };
+      }
       console.error("Failed to store event:", error);
       return {
         eventId: event.id,
@@ -1133,8 +1166,25 @@ export class Relay {
     ws: ServerWebSocket<WebSocketData>,
     event: NostrEvent,
   ): Promise<void> {
-    // Verify signature (AUTH events don't need language/sentiment analysis)
-    const { verified } = await this.analyze(event);
+    // Verify signature (AUTH events don't need language/sentiment analysis).
+    // If the pool is overloaded, surface that as an explicit OK/false so the
+    // client retries instead of treating it as a signature failure.
+    let verified: boolean;
+    try {
+      ({ verified } = await this.analyze(event));
+    } catch (err) {
+      if (err instanceof AnalyzePoolOverloaded) {
+        relayOverloadCounter.inc({ source: "analyze" });
+        this.sendMessage(ws, [
+          "OK",
+          event.id,
+          false,
+          "error: relay overloaded, try again",
+        ]);
+        return;
+      }
+      throw err;
+    }
     if (!verified) {
       this.sendMessage(ws, [
         "OK",
@@ -1242,7 +1292,7 @@ export class Relay {
             // fields on the main thread. This strips unknown keys (including
             // __proto__ payloads), ensures correct types, and front-loads
             // rejection so malformed events never reach the verify worker.
-            const parsed = n.event().safeParse(params[0]);
+            const parsed = EVENT_SCHEMA.safeParse(params[0]);
             if (!parsed.success) {
               // If the caller sent a 64-hex `id`, reply OK/false so conforming
               // clients get per-event feedback; otherwise fall back to NOTICE.
@@ -1259,6 +1309,12 @@ export class Relay {
               }
               return;
             }
+            // Note: we await `handleEvent` here so callers of
+            // `handleMessage` (including tests) see the OK response before
+            // the returned Promise resolves. In production, `server.ts`
+            // doesn't await `handleMessage` itself — Bun fires WS messages
+            // in parallel — so events from the same connection still
+            // interleave through the analyze pool and batch together.
             await this.handleEvent(ws, parsed.data);
           }
           break;
@@ -1278,7 +1334,7 @@ export class Relay {
           // keys are stripped by NSchema.filter()'s transform.
           const parsedFilters: Filter[] = [];
           for (const raw of rawFilters) {
-            const parsed = n.filter().safeParse(raw);
+            const parsed = FILTER_SCHEMA.safeParse(raw);
             if (!parsed.success) {
               this.sendMessage(ws, [
                 "CLOSED",
@@ -1315,7 +1371,7 @@ export class Relay {
           const [countSubId, ...rawCountFilters] = params;
           const parsedCountFilters: Filter[] = [];
           for (const raw of rawCountFilters) {
-            const parsed = n.filter().safeParse(raw);
+            const parsed = FILTER_SCHEMA.safeParse(raw);
             if (!parsed.success) {
               this.sendMessage(ws, [
                 "CLOSED",
@@ -1352,7 +1408,7 @@ export class Relay {
           {
             // Same structural validation as EVENT. AUTH has no OK-style
             // response, so rejections always go back as NOTICE.
-            const parsed = n.event().safeParse(params[0]);
+            const parsed = EVENT_SCHEMA.safeParse(params[0]);
             if (!parsed.success) {
               this.sendMessage(ws, [
                 "NOTICE",
