@@ -212,6 +212,11 @@ describe("OpenSearchRelay", () => {
             return { body: { found: false }, statusCode: 404 };
           },
           updateByQuery: async () => ({ body: { updated: 0 } }),
+          msearch: async (requests: unknown[]) => ({
+            body: {
+              responses: requests.map(() => ({ hits: { hits: [] } })),
+            },
+          }),
           indices: {
             exists: async () => ({ body: true }),
             create: async () => ({ body: {} }),
@@ -625,39 +630,87 @@ describe("OpenSearchRelay", () => {
       return true;
     };
 
+    /**
+     * Match a document against a `bool` query, handling `must`, `must_not`,
+     * `should`, and `ids` clauses. Recurses for batched slot-cleanup queries
+     * that combine multiple per-slot `bool.must` clauses inside `bool.should`.
+     */
+    const matchesQueryBool = (
+      d: NostrEvent & {
+        deleted?: boolean;
+        replaced?: boolean;
+        tags_map?: Record<string, string[]>;
+      },
+      // biome-ignore lint/suspicious/noExplicitAny: mock accepts any query shape
+      bool: any,
+    ): boolean => {
+      // must_not: { ids: { values: [...] } } excludes specific docs by ID.
+      const mustNot = (bool.must_not ?? []) as Array<Record<string, unknown>>;
+      for (const clause of mustNot) {
+        const ids = (clause.ids as { values?: string[] } | undefined)?.values;
+        if (ids && ids.includes(d.id)) return false;
+      }
+
+      // should: [{ bool: {...} }, ...] with minimum_should_match: 1 means at
+      // least one inner bool must match.
+      const should = bool.should as Array<Record<string, unknown>> | undefined;
+      if (should && should.length > 0) {
+        const min = (bool.minimum_should_match as number | undefined) ?? 1;
+        let matched = 0;
+        for (const clause of should) {
+          const inner = clause.bool as Record<string, unknown> | undefined;
+          if (inner && matchesQueryBool(d, inner)) {
+            matched++;
+            if (matched >= min) break;
+          }
+        }
+        if (matched < min) return false;
+      }
+
+      // Fall back to the flat-must/must_not extractor for the leaf bool case.
+      const filters = extractFilters(bool);
+      return matchesFilters(d, filters);
+    };
+
     const createHistoryMockClient = () => {
       const documents = new Map<string, unknown>();
+      // biome-ignore lint/suspicious/noExplicitAny: shared search impl reused by msearch
+      const runSearch = (body: any) => {
+        const results: unknown[] = [];
+        const filters = extractFilters(body.query.bool);
+
+        for (const [_id, doc] of documents.entries()) {
+          const d = doc as NostrEvent & {
+            deleted?: boolean;
+            replaced?: boolean;
+            tags_map?: Record<string, string[]>;
+          };
+          if (!matchesFilters(d, filters)) continue;
+          results.push(doc);
+        }
+
+        results.sort(
+          (a, b) => (b as NostrEvent).created_at - (a as NostrEvent).created_at,
+        );
+
+        const size = body.size ?? results.length;
+        return {
+          hits: {
+            hits: results.slice(0, size).map((doc) => ({ _source: doc })),
+          },
+        };
+      };
       return {
         documents,
         client: {
           // biome-ignore lint/suspicious/noExplicitAny: mock accepts any query shape
           search: async ({ body }: { body: any }) => {
-            const results: unknown[] = [];
-            const filters = extractFilters(body.query.bool);
-
-            for (const [_id, doc] of documents.entries()) {
-              const d = doc as NostrEvent & {
-                deleted?: boolean;
-                replaced?: boolean;
-                tags_map?: Record<string, string[]>;
-              };
-              if (!matchesFilters(d, filters)) continue;
-              results.push(doc);
-            }
-
-            results.sort(
-              (a, b) =>
-                (b as NostrEvent).created_at - (a as NostrEvent).created_at,
-            );
-
-            const size = body.size ?? results.length;
-            return {
-              body: {
-                hits: {
-                  hits: results.slice(0, size).map((doc) => ({ _source: doc })),
-                },
-              },
-            };
+            return { body: runSearch(body) };
+          },
+          // biome-ignore lint/suspicious/noExplicitAny: mock accepts any query shape
+          msearch: async (requests: Array<{ body: any }>) => {
+            const responses = requests.map((req) => runSearch(req.body));
+            return { body: { responses } };
           },
           bulk: async ({ body }: { body: unknown[] }) => {
             const items: Array<Record<string, unknown>> = [];
@@ -693,7 +746,13 @@ describe("OpenSearchRelay", () => {
           },
           // biome-ignore lint/suspicious/noExplicitAny: mock accepts any query shape
           deleteByQuery: async ({ body }: { body: any }) => {
-            const filters = extractFilters(body.query.bool);
+            const matchesQuery = (
+              d: NostrEvent & {
+                deleted?: boolean;
+                replaced?: boolean;
+                tags_map?: Record<string, string[]>;
+              },
+            ): boolean => matchesQueryBool(d, body.query.bool);
             let deleted = 0;
 
             for (const [id, doc] of documents.entries()) {
@@ -702,7 +761,7 @@ describe("OpenSearchRelay", () => {
                 replaced?: boolean;
                 tags_map?: Record<string, string[]>;
               };
-              if (!matchesFilters(d, filters)) continue;
+              if (!matchesQuery(d)) continue;
               documents.delete(id);
               deleted++;
             }
@@ -2280,6 +2339,11 @@ describe("OpenSearchRelay", () => {
             return { body: { docs } };
           },
           updateByQuery: async () => ({ body: { updated: 0 } }),
+          msearch: async (requests: unknown[]) => ({
+            body: {
+              responses: requests.map(() => ({ hits: { hits: [] } })),
+            },
+          }),
           count: async () => {
             const nonDeleted = Array.from(documents.values()).filter(
               (doc) => !(doc as { deleted?: boolean }).deleted,
@@ -3597,6 +3661,11 @@ describe("OpenSearchRelay", () => {
             return { body: { docs } };
           },
           updateByQuery: async () => ({ body: { updated: 0 } }),
+          msearch: async (requests: unknown[]) => ({
+            body: {
+              responses: requests.map(() => ({ hits: { hits: [] } })),
+            },
+          }),
           count: async () => {
             const nonDeleted = Array.from(documents.values()).filter(
               (doc) => !(doc as { deleted?: boolean }).deleted,
@@ -4224,6 +4293,11 @@ describe("OpenSearchRelay", () => {
             return { body: { docs } };
           },
           updateByQuery: async () => ({ body: { updated: 0 } }),
+          msearch: async (requests: unknown[]) => ({
+            body: {
+              responses: requests.map(() => ({ hits: { hits: [] } })),
+            },
+          }),
           indices: {
             exists: async () => ({ body: true }),
             create: async () => ({ body: {} }),
@@ -4571,6 +4645,11 @@ describe("OpenSearchRelay", () => {
             return { body: { count: nonDeleted.length } };
           },
           updateByQuery: async () => ({ body: { updated: 0 } }),
+          msearch: async (requests: unknown[]) => ({
+            body: {
+              responses: requests.map(() => ({ hits: { hits: [] } })),
+            },
+          }),
           indices: {
             exists: async () => ({ body: true }),
             create: async () => ({ body: {} }),
@@ -4889,6 +4968,11 @@ describe("OpenSearchRelay", () => {
             return { body: { count: nonDeleted.length } };
           },
           updateByQuery: async () => ({ body: { updated: 0 } }),
+          msearch: async (requests: unknown[]) => ({
+            body: {
+              responses: requests.map(() => ({ hits: { hits: [] } })),
+            },
+          }),
           indices: {
             exists: async () => ({ body: true }),
             create: async () => ({ body: {} }),
@@ -5108,6 +5192,11 @@ describe("OpenSearchRelay", () => {
             return { body: { count: nonDeleted.length } };
           },
           updateByQuery: async () => ({ body: { updated: 0 } }),
+          msearch: async (requests: unknown[]) => ({
+            body: {
+              responses: requests.map(() => ({ hits: { hits: [] } })),
+            },
+          }),
           indices: {
             exists: async () => ({ body: true }),
             create: async () => ({ body: {} }),
@@ -5344,6 +5433,11 @@ describe("OpenSearchRelay", () => {
             return { body: { count: nonDeleted.length } };
           },
           updateByQuery: async () => ({ body: { updated: 0 } }),
+          msearch: async (requests: unknown[]) => ({
+            body: {
+              responses: requests.map(() => ({ hits: { hits: [] } })),
+            },
+          }),
           indices: {
             exists: async () => ({ body: true }),
             create: async () => ({ body: {} }),
@@ -5995,6 +6089,11 @@ describe("OpenSearchRelay", () => {
           },
         }),
         updateByQuery: async () => ({ body: { updated: 0 } }),
+        msearch: async (requests: unknown[]) => ({
+          body: {
+            responses: requests.map(() => ({ hits: { hits: [] } })),
+          },
+        }),
         indices: {
           exists: async () => ({ body: true }),
           create: async () => ({ body: {} }),

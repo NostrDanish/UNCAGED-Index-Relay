@@ -299,7 +299,7 @@ export const opensearchEventsCounter = new Counter({
   labelNames: ["kind"] as const,
 });
 
-/** Total OpenSearch queries executed, labeled by type (req, sort, count, slot_resolution, aggregation). */
+/** Total OpenSearch queries executed, labeled by type (req, sort, count, slot_resolution, slot_cleanup, aggregation). */
 export const opensearchQueriesCounter = new Counter({
   name: "ditto_opensearch_queries_total",
   help: "Total OpenSearch queries executed",
