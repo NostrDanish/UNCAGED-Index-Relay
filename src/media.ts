@@ -48,24 +48,44 @@ const MAX_CONTENT_SCAN = 32_768;
  */
 const MEDIA_URL_TOKEN_RE = /^https?:\/\/[^\s?#]+\.(\w+)(?:[?#][^\s]*)?$/i;
 
+/** Parsed imeta entry — only the fields we use are extracted. */
+interface ImetaEntry {
+  url: string;
+  /** MIME type from the `m` key, e.g. `image/jpeg`. */
+  m?: string;
+}
+
 /**
  * Parse imeta tags from an event into structured metadata entries.
  * Each imeta tag has the format: ["imeta", "key value", "key value", ...]
+ *
+ * Single-pass: avoids the chained filter/map/filter and per-entry Map
+ * allocations the previous implementation produced for every event.
  */
-function parseImeta(event: NostrEvent): Array<Map<string, string>> {
-  return event.tags
-    .filter(([name]) => name === "imeta")
-    .map(([, ...entries]) => {
-      const map = new Map<string, string>();
-      for (const entry of entries) {
-        const spaceIdx = entry.indexOf(" ");
-        if (spaceIdx > 0) {
-          map.set(entry.slice(0, spaceIdx), entry.slice(spaceIdx + 1));
-        }
+function parseImeta(event: NostrEvent): ImetaEntry[] {
+  const out: ImetaEntry[] = [];
+  for (const tag of event.tags) {
+    if (tag[0] !== "imeta") continue;
+    let url: string | undefined;
+    let m: string | undefined;
+    for (let i = 1; i < tag.length; i++) {
+      const entry = tag[i];
+      const spaceIdx = entry.indexOf(" ");
+      if (spaceIdx <= 0) continue;
+      const key = entry.slice(0, spaceIdx);
+      if (key === "url") {
+        url = entry.slice(spaceIdx + 1);
+      } else if (key === "m") {
+        m = entry.slice(spaceIdx + 1);
       }
-      return map;
-    })
-    .filter((map) => map.has("url"));
+      // Other imeta keys (alt, dim, blurhash, x, fallback, …) are not used
+      // by media detection and are skipped to avoid wasted parsing work.
+    }
+    if (url) {
+      out.push(m !== undefined ? { url, m } : { url });
+    }
+  }
+  return out;
 }
 
 /**
@@ -103,10 +123,7 @@ export function detectMedia(event: NostrEvent): {
       const ext = match[1].toLowerCase();
       const baseType = MEDIA_EXTENSIONS[ext];
       if (baseType) {
-        const map = new Map<string, string>();
-        map.set("url", token);
-        map.set("m", `${baseType}/${ext}`);
-        imeta.push(map);
+        imeta.push({ url: token, m: `${baseType}/${ext}` });
       }
     }
   }
@@ -117,12 +134,7 @@ export function detectMedia(event: NostrEvent): {
 
   const result: { media?: boolean; video?: boolean } = { media: true };
 
-  if (
-    imeta.every((tags) => {
-      const m = tags.get("m");
-      return m?.startsWith("video/");
-    })
-  ) {
+  if (imeta.every((entry) => entry.m?.startsWith("video/"))) {
     result.video = true;
   }
 

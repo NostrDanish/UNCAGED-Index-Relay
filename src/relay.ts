@@ -44,6 +44,7 @@ export interface AnalyzableRelay extends NRelay {
 /** Function that analyzes a Nostr event off the main thread (verify, detect language/sentiment). */
 export type AnalyzeFn = (
   event: NostrEvent,
+  opts?: { verifyOnly?: boolean },
 ) => AnalyzeResult | Promise<AnalyzeResult>;
 
 /** Default analyze function that only verifies (no language/sentiment detection). */
@@ -1171,7 +1172,7 @@ export class Relay {
     // client retries instead of treating it as a signature failure.
     let verified: boolean;
     try {
-      ({ verified } = await this.analyze(event));
+      ({ verified } = await this.analyze(event, { verifyOnly: true }));
     } catch (err) {
       if (err instanceof AnalyzePoolOverloaded) {
         relayOverloadCounter.inc({ source: "analyze" });

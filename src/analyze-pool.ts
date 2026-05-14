@@ -24,6 +24,12 @@ interface PendingRequest {
 export interface AnalyzeRequest {
   reqId: number;
   event: NostrEvent;
+  /**
+   * When `true`, the worker only performs signature verification and skips
+   * search_text / language / sentiment / media derivation. Used by callers
+   * that only need `verified` (e.g. NIP-42 AUTH handling).
+   */
+  verifyOnly?: boolean;
 }
 
 /**
@@ -98,27 +104,15 @@ export class AnalyzePool {
       ) => {
         const results = event.data;
         for (const result of results) {
-          const {
-            reqId,
-            verified,
-            search_text,
-            language,
-            sentiment,
-            media,
-            video,
-          } = result;
+          // Destructure reqId off and resolve with the rest — the worker
+          // already emits the canonical AnalyzeResult shape, so avoid the
+          // redundant conditional-spread rebuild we used to do here.
+          const { reqId, ...payload } = result;
           const request = this.pending.get(reqId);
           if (request) {
             this.pending.delete(reqId);
             this.inflight[request.workerIndex]--;
-            request.resolve({
-              verified,
-              ...(search_text && { search_text }),
-              ...(language && { language }),
-              ...(sentiment && { sentiment }),
-              ...(media !== undefined && { media }),
-              ...(video !== undefined && { video }),
-            });
+            request.resolve(payload);
           }
         }
         analyzePendingGauge.set(this.pending.size);
@@ -166,11 +160,18 @@ export class AnalyzePool {
   /**
    * Analyze a Nostr event off the main thread.
    *
+   * @param event The event to analyze.
+   * @param opts.verifyOnly When `true`, skip search_text / language /
+   *   sentiment / media derivation and only return `verified`. Useful for
+   *   NIP-42 AUTH where the rest of the analysis is discarded.
    * @throws {AnalyzePoolOverloaded} when `pendingCount >= maxPending`. The
    *   relay translates this into an `OK false "error: relay overloaded"`
    *   response so the client can back off.
    */
-  analyze(event: NostrEvent): Promise<AnalyzeResult> {
+  analyze(
+    event: NostrEvent,
+    opts?: { verifyOnly?: boolean },
+  ): Promise<AnalyzeResult> {
     if (this.pending.size >= this.maxPending) {
       throw new AnalyzePoolOverloaded(this.pending.size, this.maxPending);
     }
@@ -181,10 +182,13 @@ export class AnalyzePool {
     this.nextReqId =
       this.nextReqId >= Number.MAX_SAFE_INTEGER ? 0 : this.nextReqId + 1;
 
+    const request: AnalyzeRequest = { reqId, event };
+    if (opts?.verifyOnly) request.verifyOnly = true;
+
     return new Promise<AnalyzeResult>((resolve, reject) => {
       this.pending.set(reqId, { resolve, reject, workerIndex });
       analyzePendingGauge.set(this.pending.size);
-      this.queues[workerIndex].push({ reqId, event });
+      this.queues[workerIndex].push(request);
       this.scheduleFlush();
     });
   }

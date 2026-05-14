@@ -50,7 +50,7 @@ const opensearchRelay = new OpenSearchRelay(opensearchReadClient, {
 });
 
 const relay = new Relay(opensearchRelay, {
-  analyze: (event) => analyzePool.analyze(event),
+  analyze: (event, opts) => analyzePool.analyze(event, opts),
   relayUrl: config.relayUrl,
   authKinds: config.authKinds,
   maxMessageLength: config.maxMessageLength,
