@@ -24,6 +24,62 @@ import {
 const EVENT_SCHEMA = n.event();
 const FILTER_SCHEMA = n.filter();
 
+/**
+ * Yield the event loop so pending I/O callbacks (e.g. an OpenSearch search
+ * response that a REQ is awaiting) and timer callbacks (e.g. the broadcast
+ * drain's `setTimeout(0)`) can run before we continue. `setImmediate` is the
+ * right primitive here: it fires after I/O callbacks in the same tick and
+ * before the next round of microtasks, which is exactly what we want to give
+ * REQs and broadcasts a chance to interleave with EVENT-handler
+ * continuations.
+ */
+function yieldEventLoop(): Promise<void> {
+  return new Promise((resolve) => setImmediate(resolve));
+}
+
+/**
+ * Simple counting semaphore. Used per-connection to bound the number of
+ * `handleEvent` Promises in flight for a single client. A Bluesky-bridge-
+ * style client that fires 5000 events through one socket in a single tick
+ * would otherwise queue 5000 microtask continuations after `await
+ * analyze()`; those continuations run ahead of any timer/I/O callback,
+ * starving REQs and the broadcast drain. Gating EVENT dispatch behind a
+ * semaphore turns that unbounded fan-out into a bounded one without
+ * dropping events.
+ */
+class Semaphore {
+  private available: number;
+  private queue: Array<() => void> = [];
+
+  constructor(capacity: number) {
+    this.available = capacity;
+  }
+
+  acquire(): Promise<void> {
+    if (this.available > 0) {
+      this.available--;
+      return Promise.resolve();
+    }
+    return new Promise<void>((resolve) => this.queue.push(resolve));
+  }
+
+  release(): void {
+    const next = this.queue.shift();
+    if (next) {
+      // Hand the slot directly to the next waiter without bumping the
+      // counter — the slot was never returned to the pool.
+      next();
+    } else {
+      this.available++;
+    }
+  }
+
+  /** Current number of waiters (does not include holders). */
+  get waiting(): number {
+    return this.queue.length;
+  }
+}
+
 /** Pre-computed analysis data that can be passed alongside an event to avoid redundant work. */
 export interface EventAnalysis {
   search_text?: string;
@@ -123,6 +179,29 @@ export class Relay {
   /** Whether the async drain loop is currently running. */
   private drainingBroadcasts = false;
 
+  /**
+   * Per-connection cap on concurrent `handleEvent` continuations. Bun's WS
+   * `message()` callback fires events into `handleMessage` without awaiting,
+   * so a single client (e.g. a Bluesky bridge) could otherwise enqueue
+   * thousands of in-flight Promises whose post-`await analyze()`
+   * continuations run as microtasks ahead of any I/O callback — starving
+   * REQ HTTP responses and timer-based work (broadcast drain) on the main
+   * thread. Gating EVENT dispatch behind a per-connection semaphore turns
+   * that unbounded fan-out into a bounded one without dropping events.
+   */
+  private maxInflightPerConn: number;
+  private connectionInflight = new WeakMap<
+    ServerWebSocket<WebSocketData>,
+    Semaphore
+  >();
+
+  /**
+   * Chunk size for the REQ EOSE send loop. Yields the event loop every
+   * this-many events so a large REQ (up to `max_limit` 5000) doesn't pin
+   * the main thread for tens of milliseconds.
+   */
+  private static REQ_SEND_CHUNK = 50;
+
   constructor(
     storage: AnalyzableRelay,
     opts: {
@@ -153,6 +232,14 @@ export class Relay {
        * storage layer's `tagValueMaxCountPerName`. Default: 5000.
        */
       maxEventTags?: number;
+      /**
+       * Maximum number of in-flight `handleEvent` Promises per connection.
+       * EVENT messages over the cap wait their turn via a per-connection
+       * semaphore. Prevents one firehose client from flooding the main
+       * thread's microtask queue and starving REQs from other connections.
+       * Default: 32.
+       */
+      maxInflightPerConn?: number;
     },
   ) {
     this.storage = storage;
@@ -160,6 +247,7 @@ export class Relay {
     this.relayUrl = opts.relayUrl;
     this.authKinds = opts.authKinds ?? new Set();
     this.maxFilterValues = opts.maxFilterValues ?? 5000;
+    this.maxInflightPerConn = opts.maxInflightPerConn ?? 32;
     this.relayInfo = {
       name: "Ditto Relay",
       description: "A Nostr relay backed by OpenSearch",
@@ -1051,9 +1139,18 @@ export class Relay {
       data.subscriptions.set(subscriptionId, { id: subscriptionId, filters });
       this.addToIndex(ws, subscriptionId, filters);
 
-      // Send existing events
-      for (const event of result.events) {
-        this.sendMessage(ws, ["EVENT", subscriptionId, event]);
+      // Send existing events. Under firehose load this loop is the largest
+      // single-tick CPU burst the main thread does for any one client — up to
+      // `max_limit` (5000) JSON.stringify + ws.send calls back-to-back. Yield
+      // every REQ_SEND_CHUNK events so other REQs, EVENT continuations, and
+      // the broadcast drain can interleave; without this, a single big REQ
+      // can pin the event loop for tens of milliseconds.
+      const events = result.events;
+      for (let i = 0; i < events.length; i++) {
+        this.sendMessage(ws, ["EVENT", subscriptionId, events[i]]);
+        if ((i + 1) % Relay.REQ_SEND_CHUNK === 0 && i + 1 < events.length) {
+          await yieldEventLoop();
+        }
       }
 
       // Send EOSE (End of Stored Events)
@@ -1316,7 +1413,22 @@ export class Relay {
             // doesn't await `handleMessage` itself — Bun fires WS messages
             // in parallel — so events from the same connection still
             // interleave through the analyze pool and batch together.
-            await this.handleEvent(ws, parsed.data);
+            //
+            // The per-connection semaphore caps how many of those parallel
+            // `handleEvent` Promises can be simultaneously in flight for
+            // one socket. Without the cap, a firehose client (e.g. a
+            // Bluesky bridge) would queue thousands of post-`await
+            // analyze()` continuations as microtasks, which run ahead of
+            // any I/O callback and starve REQs from other connections.
+            // REQs/COUNT/AUTH/CLOSE bypass this gate — they're cheap and
+            // we never want them queued behind EVENTs.
+            const gate = this.getInflightSemaphore(ws);
+            await gate.acquire();
+            try {
+              await this.handleEvent(ws, parsed.data);
+            } finally {
+              gate.release();
+            }
           }
           break;
 
@@ -1452,6 +1564,20 @@ export class Relay {
     // Generate NIP-42 AUTH challenge (sent lazily when needed)
     ws.data.challenge = this.generateChallenge();
     console.log("WebSocket connection opened");
+  }
+
+  /**
+   * Lazily allocate the per-connection in-flight semaphore. Stored in a
+   * WeakMap keyed by ws so it disappears automatically on close without
+   * needing explicit cleanup.
+   */
+  private getInflightSemaphore(ws: ServerWebSocket<WebSocketData>): Semaphore {
+    let sem = this.connectionInflight.get(ws);
+    if (!sem) {
+      sem = new Semaphore(this.maxInflightPerConn);
+      this.connectionInflight.set(ws, sem);
+    }
+    return sem;
   }
 
   // Handle WebSocket close

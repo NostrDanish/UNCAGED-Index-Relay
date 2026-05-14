@@ -81,6 +81,14 @@ export class Config {
    * overloaded`. Default: 5_000.
    */
   readonly bulkMaxQueue: number;
+  /**
+   * Maximum number of in-flight `handleEvent` Promises per WebSocket
+   * connection. EVENT messages over the cap wait their turn via a
+   * per-connection semaphore. Prevents one firehose client from flooding
+   * the main thread's microtask queue and starving REQs from other
+   * connections. Default: 32.
+   */
+  readonly maxInflightPerConn: number;
   readonly nostrSigner: NostrSigner;
 
   constructor(env: { get(key: string): string | undefined }) {
@@ -275,6 +283,20 @@ export class Config {
         throw new Error("BULK_MAX_QUEUE must be a positive integer.");
       }
       this.bulkMaxQueue = n;
+    }
+
+    // maxInflightPerConn
+    const maxInflightPerConnValue = env.get("RELAY_MAX_INFLIGHT_PER_CONN");
+    if (!maxInflightPerConnValue) {
+      this.maxInflightPerConn = 32;
+    } else {
+      const n = parseInt(maxInflightPerConnValue, 10);
+      if (Number.isNaN(n) || n <= 0) {
+        throw new Error(
+          "RELAY_MAX_INFLIGHT_PER_CONN must be a positive integer.",
+        );
+      }
+      this.maxInflightPerConn = n;
     }
 
     // nostrSigner

@@ -672,6 +672,61 @@ describe("Relay", () => {
       assert.equal(subscription.id, "sub1");
       assert.deepEqual(subscription.filters, filters);
     });
+
+    it("should yield to the event loop while sending a large REQ result", async () => {
+      // Generate 120 events (well over REQ_SEND_CHUNK=50) so the send loop
+      // crosses the yield boundary at least twice.
+      const sk = generateSecretKey();
+      const mockEvents: NostrEvent[] = [];
+      for (let i = 0; i < 120; i++) {
+        mockEvents.push(
+          finalizeEvent(
+            {
+              kind: 1,
+              created_at: Math.floor(Date.now() / 1000),
+              tags: [],
+              content: `Event ${i}`,
+            },
+            sk,
+          ),
+        );
+      }
+      mockStorage.query = async () => mockEvents;
+
+      // Schedule a setImmediate callback that runs only if the REQ send loop
+      // yields. If the loop is fully synchronous, this callback will not fire
+      // until after handleReq's await chain unwinds.
+      let interleaved = false;
+      let eventsSentBeforeInterleave = 0;
+      const reqPromise = relay.handleReq(mockWs, "sub1", [{ kinds: [1] }]);
+
+      // Race a setImmediate against the REQ completion. If the REQ yields,
+      // the setImmediate callback fires before EOSE, and at that point we
+      // should see some but not all events already sent.
+      const yieldPromise = new Promise<void>((resolve) => {
+        setImmediate(() => {
+          interleaved = true;
+          eventsSentBeforeInterleave = sentMessages.length;
+          resolve();
+        });
+      });
+
+      await Promise.race([reqPromise, yieldPromise]);
+      await reqPromise;
+
+      assert.equal(interleaved, true, "REQ send loop did not yield");
+      // Some events were sent before the yield, and more were sent after.
+      // The exact count depends on scheduling but we should have at least
+      // one chunk (50) and fewer than the total + EOSE.
+      assert.ok(
+        eventsSentBeforeInterleave > 0 &&
+          eventsSentBeforeInterleave < mockEvents.length + 1,
+        `expected partial progress at yield, got ${eventsSentBeforeInterleave} of ${mockEvents.length}`,
+      );
+      // After completion, all events + EOSE were sent.
+      assert.equal(sentMessages.length, mockEvents.length + 1);
+      assert.equal(sentMessages[sentMessages.length - 1][0], "EOSE");
+    });
   });
 
   describe("handleCount", () => {
@@ -1330,6 +1385,141 @@ describe("Relay", () => {
       assert.ok(mockWs.data.challenge.length > 0);
       // Challenge should not be marked as sent
       assert.equal(mockWs.data.challengeSent, false);
+    });
+  });
+
+  describe("per-connection inflight cap", () => {
+    it("should serialize EVENT processing on one connection past the cap", async () => {
+      // Build a relay with a small cap and a slow analyze so we can observe
+      // that the (cap+1)th event waits for the first to complete.
+      const CAP = 2;
+      let analyzeInflight = 0;
+      let peakInflight = 0;
+      const releaseFns: Array<() => void> = [];
+
+      const cappedRelay = new Relay(mockStorage, {
+        relayUrl: "wss://relay.test/",
+        maxInflightPerConn: CAP,
+        analyze: () => {
+          analyzeInflight++;
+          if (analyzeInflight > peakInflight) peakInflight = analyzeInflight;
+          return new Promise((resolve) => {
+            releaseFns.push(() => {
+              analyzeInflight--;
+              resolve({ verified: true });
+            });
+          });
+        },
+      });
+
+      const sk = generateSecretKey();
+      const messages: string[] = [];
+      for (let i = 0; i < 5; i++) {
+        const ev = finalizeEvent(
+          {
+            kind: 1,
+            created_at: Math.floor(Date.now() / 1000),
+            tags: [],
+            content: `event ${i}`,
+          },
+          sk,
+        );
+        messages.push(JSON.stringify(["EVENT", ev]));
+      }
+
+      // Fire-and-forget all 5 messages.
+      const pending = messages.map((m) => cappedRelay.handleMessage(mockWs, m));
+
+      // Let microtasks settle so the first CAP analyze() calls fire.
+      await new Promise((resolve) => setImmediate(resolve));
+      await new Promise((resolve) => setImmediate(resolve));
+
+      assert.equal(
+        analyzeInflight,
+        CAP,
+        `expected only ${CAP} concurrent analyze() calls, got ${analyzeInflight}`,
+      );
+      assert.equal(
+        peakInflight,
+        CAP,
+        `peak concurrent analyze() should never exceed cap, got ${peakInflight}`,
+      );
+
+      // Release the first batch. Each release lets the next waiter through.
+      while (releaseFns.length > 0) {
+        const next = releaseFns.shift()!;
+        next();
+        await new Promise((resolve) => setImmediate(resolve));
+        await new Promise((resolve) => setImmediate(resolve));
+      }
+
+      await Promise.all(pending);
+
+      // All 5 events should have been processed (OK responses sent).
+      const okMessages = sentMessages.filter((m) => m[0] === "OK");
+      assert.equal(okMessages.length, 5);
+      assert.equal(
+        peakInflight,
+        CAP,
+        "cap should have been respected throughout",
+      );
+    });
+
+    it("should not gate REQ behind the EVENT inflight cap", async () => {
+      // EVENTs hold the cap; a REQ on the same socket must still complete.
+      const CAP = 1;
+      const releaseFns: Array<() => void> = [];
+
+      const cappedRelay = new Relay(mockStorage, {
+        relayUrl: "wss://relay.test/",
+        maxInflightPerConn: CAP,
+        analyze: () =>
+          new Promise((resolve) => {
+            releaseFns.push(() => resolve({ verified: true }));
+          }),
+      });
+
+      mockStorage.query = async () => [];
+
+      const sk = generateSecretKey();
+      const event = finalizeEvent(
+        {
+          kind: 1,
+          created_at: Math.floor(Date.now() / 1000),
+          tags: [],
+          content: "blocker",
+        },
+        sk,
+      );
+
+      // Start an EVENT that will hold the cap until we release.
+      const eventPromise = cappedRelay.handleMessage(
+        mockWs,
+        JSON.stringify(["EVENT", event]),
+      );
+
+      // Let the EVENT acquire the semaphore.
+      await new Promise((resolve) => setImmediate(resolve));
+
+      // Now send a REQ on the same socket — it must complete without
+      // waiting on the held EVENT.
+      const reqPromise = cappedRelay.handleMessage(
+        mockWs,
+        JSON.stringify(["REQ", "subA", { kinds: [1] }]),
+      );
+
+      // REQ should finish promptly.
+      await reqPromise;
+      const lastBeforeRelease = sentMessages[sentMessages.length - 1];
+      assert.equal(
+        lastBeforeRelease[0],
+        "EOSE",
+        "REQ should have completed while EVENT was still gated",
+      );
+
+      // Now release the EVENT and await it.
+      for (const fn of releaseFns) fn();
+      await eventPromise;
     });
   });
 

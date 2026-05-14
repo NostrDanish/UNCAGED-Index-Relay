@@ -436,4 +436,39 @@ describe("Config", () => {
       );
     });
   });
+
+  describe("maxInflightPerConn", () => {
+    it("should default to 32", () => {
+      const config = new Config(baseEnv());
+      assert.equal(config.maxInflightPerConn, 32);
+    });
+
+    it("should parse a positive integer", () => {
+      const config = new Config(
+        baseEnv([["RELAY_MAX_INFLIGHT_PER_CONN", "64"]]),
+      );
+      assert.equal(config.maxInflightPerConn, 64);
+    });
+
+    it("should throw when zero", () => {
+      assert.throws(
+        () => new Config(baseEnv([["RELAY_MAX_INFLIGHT_PER_CONN", "0"]])),
+        /RELAY_MAX_INFLIGHT_PER_CONN/,
+      );
+    });
+
+    it("should throw when negative", () => {
+      assert.throws(
+        () => new Config(baseEnv([["RELAY_MAX_INFLIGHT_PER_CONN", "-1"]])),
+        /RELAY_MAX_INFLIGHT_PER_CONN/,
+      );
+    });
+
+    it("should throw when not a number", () => {
+      assert.throws(
+        () => new Config(baseEnv([["RELAY_MAX_INFLIGHT_PER_CONN", "lots"]])),
+        /RELAY_MAX_INFLIGHT_PER_CONN/,
+      );
+    });
+  });
 });
