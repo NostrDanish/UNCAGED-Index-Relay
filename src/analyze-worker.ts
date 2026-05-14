@@ -20,6 +20,14 @@ import { buildSearchText } from "./search-text.ts";
 const nw = await initNostrWasm();
 const sentimentAnalyzer = new Sentiment();
 
+// Warm up tinyld and the sentiment analyzer at worker startup so the first
+// real request doesn't pay the lazy model/lexicon initialization cost. Both
+// libraries do work on first invocation (tinyld loads its n-gram tables;
+// `Sentiment` lazy-builds its AFINN lookup) which otherwise lands on whatever
+// unlucky event happens to arrive first after the worker spawns.
+detectLanguage("warmup text for language detection");
+sentimentAnalyzer.analyze("warmup text for sentiment analysis");
+
 /** Minimum text length (in characters) required to attempt language detection. */
 const MIN_LANGUAGE_DETECT_LENGTH = 10;
 

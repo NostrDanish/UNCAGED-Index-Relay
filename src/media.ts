@@ -48,6 +48,20 @@ const MAX_CONTENT_SCAN = 32_768;
  */
 const MEDIA_URL_TOKEN_RE = /^https?:\/\/[^\s?#]+\.(\w+)(?:[?#][^\s]*)?$/i;
 
+/**
+ * Whitespace test on a character code — covers the ASCII whitespace set
+ * (space, tab, LF, VT, FF, CR). Faster than running a regex `.test()` per
+ * character, which is what the previous `split(/\s+/)` implicitly did.
+ *
+ * ASCII-only is a deliberate trade-off: Nostr clients overwhelmingly delimit
+ * URLs with normal space/newline, and treating non-breaking space (U+00A0)
+ * et al. as part of a token only means we miss media detection for the
+ * pathological "URL wrapped in NBSP" case. Server-side defense, not parser.
+ */
+function isWhitespace(code: number): boolean {
+  return code === 0x20 || (code >= 0x09 && code <= 0x0d);
+}
+
 /** Parsed imeta entry — only the fields we use are extracted. */
 interface ImetaEntry {
   url: string;
@@ -110,14 +124,33 @@ export function detectMedia(event: NostrEvent): {
   // and each token is tested against an anchored regex — this avoids the
   // quadratic backtracking the previous unanchored/global regex exhibited on
   // adversarial input.
+  //
+  // Manual whitespace tokenization (instead of `split(/\s+/)`) avoids
+  // allocating a full array of every word in the post; we walk the buffer
+  // once and only materialize substrings for tokens that start with "http".
   if (imeta.length === 0 && event.kind === 1) {
-    const scanBuf =
-      event.content.length > MAX_CONTENT_SCAN
-        ? event.content.slice(0, MAX_CONTENT_SCAN)
-        : event.content;
+    const content = event.content;
+    const end =
+      content.length > MAX_CONTENT_SCAN ? MAX_CONTENT_SCAN : content.length;
 
-    for (const token of scanBuf.split(/\s+/)) {
-      if (token.length === 0) continue;
+    let i = 0;
+    while (i < end) {
+      // Skip whitespace using char-code comparisons rather than a regex per
+      // character. Covers ASCII space, tab, LF, CR, VT, FF.
+      while (i < end && isWhitespace(content.charCodeAt(i))) i++;
+      const start = i;
+      // Walk to the next whitespace character.
+      while (i < end && !isWhitespace(content.charCodeAt(i))) i++;
+      if (i === start) continue;
+      // Cheap prefix gate — vast majority of tokens in a note aren't URLs.
+      // `startsWith` with `start` avoids slicing until we're sure it's a URL.
+      if (
+        !content.startsWith("http://", start) &&
+        !content.startsWith("https://", start)
+      ) {
+        continue;
+      }
+      const token = content.slice(start, i);
       const match = MEDIA_URL_TOKEN_RE.exec(token);
       if (!match) continue;
       const ext = match[1].toLowerCase();

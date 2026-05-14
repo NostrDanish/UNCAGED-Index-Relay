@@ -187,7 +187,6 @@ export class AnalyzePool {
 
     return new Promise<AnalyzeResult>((resolve, reject) => {
       this.pending.set(reqId, { resolve, reject, workerIndex });
-      analyzePendingGauge.set(this.pending.size);
       this.queues[workerIndex].push(request);
       this.scheduleFlush();
     });
@@ -205,7 +204,14 @@ export class AnalyzePool {
     setImmediate(() => this.flush());
   }
 
-  /** Send all queued events to their respective workers. */
+  /**
+   * Send all queued events to their respective workers.
+   *
+   * Gauge updates happen here once per flush tick (rather than per
+   * `analyze()` call) so that under firehose load — where thousands of
+   * events can be enqueued in a single tick — we pay the prom-client
+   * gauge write cost O(workers) per tick instead of O(events).
+   */
   private flush(): void {
     this.flushScheduled = false;
     for (let i = 0; i < this.workers.length; i++) {
@@ -217,6 +223,7 @@ export class AnalyzePool {
         this.queues[i] = [];
       }
     }
+    analyzePendingGauge.set(this.pending.size);
   }
 
   /** Terminate all workers. */
