@@ -178,6 +178,60 @@ describe("AnalyzePool", () => {
     assert.equal(thinkingResult.sentiment, "neutral");
   });
 
+  it("should normalize skin-tone modifiers before emoji sentiment lookup", async () => {
+    console.log = () => {};
+    pool = new AnalyzePool(1);
+
+    // 🤙 with medium-light skin tone → positive (base 🤙 is in the table).
+    const callMeMedium = createValidEvent("\u{1F919}\u{1F3FC}", 7);
+    const callMeResult = await pool.analyze(callMeMedium);
+    assert.equal(callMeResult.sentiment, "positive");
+
+    // 👍 with darkest skin tone → positive.
+    const thumbsUpDark = createValidEvent("\u{1F44D}\u{1F3FF}", 7);
+    const thumbsUpDarkResult = await pool.analyze(thumbsUpDark);
+    assert.equal(thumbsUpDarkResult.sentiment, "positive");
+
+    // 🤘 with light skin tone → positive.
+    const hornsLight = createValidEvent("\u{1F918}\u{1F3FB}", 7);
+    const hornsLightResult = await pool.analyze(hornsLight);
+    assert.equal(hornsLightResult.sentiment, "positive");
+  });
+
+  it("should recognize Nostr-specific community-positive emoji", async () => {
+    console.log = () => {};
+    pool = new AnalyzePool(1);
+
+    // 🚀 → positive.
+    const rocket = createValidEvent("\u{1F680}", 7);
+    assert.equal((await pool.analyze(rocket)).sentiment, "positive");
+
+    // 🦅 → positive (Nostr eagle flex).
+    const eagle = createValidEvent("\u{1F985}", 7);
+    assert.equal((await pool.analyze(eagle)).sentiment, "positive");
+
+    // 🤡 → negative (derisive).
+    const clown = createValidEvent("\u{1F921}", 7);
+    assert.equal((await pool.analyze(clown)).sentiment, "negative");
+  });
+
+  it("should recognize known-neutral emoji without invoking the sentiment library", async () => {
+    console.log = () => {};
+    pool = new AnalyzePool(1);
+
+    // 👀 → neutral.
+    const eyes = createValidEvent("\u{1F440}", 7);
+    assert.equal((await pool.analyze(eyes)).sentiment, "neutral");
+
+    // 😮 → neutral.
+    const wow = createValidEvent("\u{1F62E}", 7);
+    assert.equal((await pool.analyze(wow)).sentiment, "neutral");
+
+    // 🙄 → neutral.
+    const rollEyes = createValidEvent("\u{1F644}", 7);
+    assert.equal((await pool.analyze(rollEyes)).sentiment, "neutral");
+  });
+
   it("should still handle custom emoji shortcodes as undefined sentiment", async () => {
     console.log = () => {};
     pool = new AnalyzePool(1);
