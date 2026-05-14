@@ -144,6 +144,49 @@ describe("AnalyzePool", () => {
     assert.equal(result.sentiment, "positive");
   });
 
+  it("should detect sentiment for common emoji reactions via lookup table", async () => {
+    console.log = () => {};
+    pool = new AnalyzePool(1);
+
+    // Hearts → positive (with and without VS16 presentation selector).
+    const heart = createValidEvent("\u2764\uFE0F", 7);
+    const heartResult = await pool.analyze(heart);
+    assert.equal(heartResult.sentiment, "positive");
+
+    const heartNoVs = createValidEvent("\u2764", 7);
+    const heartNoVsResult = await pool.analyze(heartNoVs);
+    assert.equal(heartNoVsResult.sentiment, "positive");
+
+    // Thumbs up → positive.
+    const thumbsUp = createValidEvent("\u{1F44D}", 7);
+    const thumbsUpResult = await pool.analyze(thumbsUp);
+    assert.equal(thumbsUpResult.sentiment, "positive");
+
+    // Thumbs down → negative.
+    const thumbsDown = createValidEvent("\u{1F44E}", 7);
+    const thumbsDownResult = await pool.analyze(thumbsDown);
+    assert.equal(thumbsDownResult.sentiment, "negative");
+
+    // Crying face → negative.
+    const cry = createValidEvent("\u{1F62D}", 7);
+    const cryResult = await pool.analyze(cry);
+    assert.equal(cryResult.sentiment, "negative");
+
+    // Thinking → known-neutral (skip the sentiment library entirely).
+    const thinking = createValidEvent("\u{1F914}", 7);
+    const thinkingResult = await pool.analyze(thinking);
+    assert.equal(thinkingResult.sentiment, "neutral");
+  });
+
+  it("should still handle custom emoji shortcodes as undefined sentiment", async () => {
+    console.log = () => {};
+    pool = new AnalyzePool(1);
+    const event = createValidEvent(":soapbox:", 7);
+
+    const result = await pool.analyze(event);
+    assert.equal(result.verified, true);
+    assert.equal(result.sentiment, undefined);
+  });
   it("should not detect language when search text is too short", async () => {
     console.log = () => {};
     pool = new AnalyzePool(1);

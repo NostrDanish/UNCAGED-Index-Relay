@@ -48,6 +48,126 @@ const MAX_DETECT_INPUT_LENGTH = 1024;
 const CUSTOM_EMOJI_RE = /^:[\w-]+:$/;
 
 /**
+ * Hardcoded sentiment for common emoji reactions. Lets us skip the
+ * sentiment-library call (which tokenizes and looks up every code point in
+ * the AFINN lexicon) for the overwhelming majority of kind 7 reactions on
+ * Nostr, which are a small handful of well-known emoji.
+ *
+ * The variation-selector-16 (U+FE0F) suffix is stripped before lookup, so
+ * both `❤` and `❤️` hit the same entry. Skin-tone modifiers (U+1F3FB–FF)
+ * and ZWJ-joined sequences fall through to the library — for example,
+ * `👍🏽` and family/couple emoji aren't worth enumerating.
+ *
+ * `null` entries (e.g. 🤔, 👀) are explicitly known-neutral: we want to
+ * record the reaction as neutral *without* invoking the analyzer.
+ */
+const EMOJI_SENTIMENT: Record<string, "positive" | "negative" | "neutral"> = {
+  // Hearts — all colors / styles map to positive.
+  "❤": "positive",
+  "🧡": "positive",
+  "💛": "positive",
+  "💚": "positive",
+  "💙": "positive",
+  "💜": "positive",
+  "🤍": "positive",
+  "🤎": "positive",
+  "🖤": "positive",
+  "💖": "positive",
+  "💕": "positive",
+  "💗": "positive",
+  "💘": "positive",
+  "💝": "positive",
+  "💞": "positive",
+  "💟": "positive",
+  "♥": "positive",
+  // Broken / negative hearts.
+  "💔": "negative",
+  // Positive gestures.
+  "👍": "positive",
+  "👏": "positive",
+  "🙌": "positive",
+  "🤝": "positive",
+  "🫶": "positive",
+  "🤙": "positive",
+  "👌": "positive",
+  "🤘": "positive",
+  "✊": "positive",
+  "👊": "positive",
+  "🙏": "positive",
+  // Negative gestures.
+  "👎": "negative",
+  "🖕": "negative",
+  // Positive faces.
+  "😀": "positive",
+  "😃": "positive",
+  "😄": "positive",
+  "😁": "positive",
+  "😆": "positive",
+  "😊": "positive",
+  "🙂": "positive",
+  "😇": "positive",
+  "🥰": "positive",
+  "😍": "positive",
+  "🤩": "positive",
+  "🥳": "positive",
+  "😎": "positive",
+  "🤗": "positive",
+  "😘": "positive",
+  "😗": "positive",
+  "😙": "positive",
+  "😚": "positive",
+  "🥲": "positive",
+  "😋": "positive",
+  "😌": "positive",
+  "🤤": "positive",
+  "😂": "positive",
+  "🤣": "positive",
+  // Negative faces.
+  "😢": "negative",
+  "😭": "negative",
+  "😞": "negative",
+  "😔": "negative",
+  "😟": "negative",
+  "😠": "negative",
+  "😡": "negative",
+  "🤬": "negative",
+  "😤": "negative",
+  "😩": "negative",
+  "😫": "negative",
+  "😨": "negative",
+  "😰": "negative",
+  "😱": "negative",
+  "🤮": "negative",
+  "🤢": "negative",
+  "💀": "negative",
+  "☠": "negative",
+  // Positive symbols.
+  "✨": "positive",
+  "🌟": "positive",
+  "⭐": "positive",
+  "🎉": "positive",
+  "🎊": "positive",
+  "🔥": "positive",
+  "💯": "positive",
+  "✅": "positive",
+  "☑": "positive",
+  "✔": "positive",
+  // Negative symbols.
+  "❌": "negative",
+  "🚫": "negative",
+  "⛔": "negative",
+  // Known-neutral — record the reaction as neutral without calling the lib.
+  "🤔": "neutral",
+  "👀": "neutral",
+  "🤷": "neutral",
+  "😐": "neutral",
+  "😑": "neutral",
+};
+
+/** Variation-selector-16, used to force emoji presentation on dual-use codepoints. */
+const VS16 = "\uFE0F";
+
+/**
  * Kinds whose content is not useful natural-language text: encrypted payloads,
  * NIP-51 lists/sets, reposts, zap receipts, etc. For these we skip language
  * and sentiment detection entirely — the only "text" we'd have to feed in is
@@ -97,8 +217,9 @@ function detectEventLanguage(searchText: string): string | undefined {
  *
  * Uses the pre-computed search text for most kinds. Kind 7 (reactions)
  * is handled specially per NIP-25: `"+"` or `""` maps to `"positive"`,
- * `"-"` maps to `"negative"`, and emoji reactions are passed through
- * the sentiment analyzer.
+ * `"-"` maps to `"negative"`, and emoji reactions are looked up in a
+ * hardcoded table of common emoji before falling back to the sentiment
+ * library for the long tail.
  *
  * Returns `"positive"`, `"negative"`, `"neutral"`, or `undefined` when
  * sentiment cannot be determined.
@@ -110,13 +231,18 @@ function detectEventSentiment(
   // Kind 7 reactions get special handling (NIP-25).
   if (event.kind === 7) {
     const content = event.content;
-    // "+" or empty string = like / upvote
+    // "+" or empty string = like / upvote (NIP-25).
     if (content === "+" || content === "") return "positive";
-    // "-" = dislike / downvote
+    // "-" = dislike / downvote (NIP-25).
     if (content === "-") return "negative";
     // Custom emoji shortcodes have no intrinsic sentiment.
     if (CUSTOM_EMOJI_RE.test(content)) return undefined;
-    // Emoji reactions — let the sentiment library score them.
+    // Fast path: hardcoded lookup for common emoji reactions. Strip the
+    // variation-selector-16 suffix so e.g. "❤️" and "❤" hit the same entry.
+    const stripped = content.endsWith(VS16) ? content.slice(0, -1) : content;
+    const mapped = EMOJI_SENTIMENT[stripped];
+    if (mapped !== undefined) return mapped;
+    // Long-tail emoji / multi-char reactions — let the sentiment library score them.
     const result = sentimentAnalyzer.analyze(content);
     if (result.comparative > SENTIMENT_THRESHOLD) return "positive";
     if (result.comparative < -SENTIMENT_THRESHOLD) return "negative";
