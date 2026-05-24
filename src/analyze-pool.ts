@@ -7,6 +7,7 @@ import { analyzePendingGauge, analyzeWorkerInflightGauge } from "./metrics.ts";
 export interface AnalyzeResult {
   verified: boolean;
   search_text?: string;
+  autocomplete_text?: string;
   language?: string;
   sentiment?: string;
   media?: boolean;

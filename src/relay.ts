@@ -83,6 +83,7 @@ class Semaphore {
 /** Pre-computed analysis data that can be passed alongside an event to avoid redundant work. */
 export interface EventAnalysis {
   search_text?: string;
+  autocomplete_text?: string;
   language?: string;
   sentiment?: string;
   media?: boolean;
@@ -730,6 +731,7 @@ export class Relay {
       const eventOpts = {
         analysis: {
           search_text: analysis.search_text,
+          autocomplete_text: analysis.autocomplete_text,
           language: analysis.language,
           sentiment: analysis.sentiment,
           media: analysis.media,

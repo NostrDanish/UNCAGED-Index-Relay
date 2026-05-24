@@ -9,6 +9,89 @@
 import { OpenSearchRelay } from "../src/opensearch.ts";
 
 /**
+ * Generate the Painless snippet that rebuilds `autocomplete_text` from
+ * `ctx._source`, mirroring the {@link buildAutocompleteText} logic in
+ * src/autocomplete-text.ts. Sets `ctx._source.autocomplete_text` when a
+ * non-empty result is produced; removes any stale field otherwise.
+ */
+export function buildAutocompleteTextPainlessScript(): string {
+  return `
+    // --- Build autocomplete_text ---
+    int AC_MAX_LEN = 512;
+
+    Map autocompleteJsonKindFields = new HashMap();
+    autocompleteJsonKindFields.put(0, new String[] {'name', 'display_name', 'nip05'});
+    autocompleteJsonKindFields.put(40, new String[] {'name'});
+    autocompleteJsonKindFields.put(41, new String[] {'name'});
+    autocompleteJsonKindFields.put(30017, new String[] {'name'});
+    autocompleteJsonKindFields.put(30018, new String[] {'name'});
+    autocompleteJsonKindFields.put(30019, new String[] {'name'});
+    autocompleteJsonKindFields.put(30020, new String[] {'name'});
+
+    Set autocompleteTags = new HashSet();
+    autocompleteTags.add('title');
+    autocompleteTags.add('name');
+    autocompleteTags.add('subject');
+    autocompleteTags.add('d');
+
+    StringBuilder acSb = new StringBuilder();
+
+    // JSON content extraction for kinds with known name fields.
+    String[] acJsonFields = (String[]) autocompleteJsonKindFields.get(ctx._source.kind);
+    if (acJsonFields != null) {
+      String c = ctx._source.content;
+      if (c != null && c.startsWith('{')) {
+        for (String field : acJsonFields) {
+          String key = '"' + field + '"';
+          int keyIdx = c.indexOf(key);
+          if (keyIdx >= 0) {
+            int colonIdx = c.indexOf(':', keyIdx + key.length());
+            if (colonIdx >= 0) {
+              int startQuote = c.indexOf('"', colonIdx + 1);
+              if (startQuote >= 0) {
+                int endQuote = startQuote + 1;
+                while (endQuote < c.length()) {
+                  if (c.charAt(endQuote) == (char)'"' && c.charAt(endQuote - 1) != (char)'\\\\') {
+                    break;
+                  }
+                  endQuote++;
+                }
+                if (endQuote < c.length()) {
+                  String val = c.substring(startQuote + 1, endQuote);
+                  if (val.length() > 0) {
+                    if (acSb.length() > 0) acSb.append(' ');
+                    acSb.append(val);
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+
+    // Tag scan (kind-agnostic).
+    if (ctx._source.tags != null) {
+      for (def tag : ctx._source.tags) {
+        if (tag.length >= 2 && autocompleteTags.contains(tag[0]) && tag[1].length() > 0) {
+          if (acSb.length() > 0) acSb.append(' ');
+          acSb.append(tag[1]);
+        }
+      }
+    }
+
+    String acResult = acSb.toString();
+    if (acResult.length() > AC_MAX_LEN) {
+      acResult = acResult.substring(0, AC_MAX_LEN);
+    }
+    if (acResult.length() > 0) {
+      ctx._source.autocomplete_text = acResult;
+    } else {
+      ctx._source.remove('autocomplete_text');
+    }`;
+}
+
+/**
  * Generate the Painless script snippet that rebuilds `tags_map` from
  * `ctx._source.tags`, mirroring the `buildTagsMap` / `isIndexableTagName`
  * logic. Used by reindex and update-by-query scripts so the filtering
@@ -72,6 +155,7 @@ export function buildTagsMapPainlessScript(
  *    `reply_count` → `comment_cnt`, `reaction_count` → `reaction_cnt`,
  *    `repost_count` → `repost_cnt`
  * 3. Builds `search_text` from event content and tags
+ * 4. Builds `autocomplete_text` from event content and tags
  *
  * @param maxCount propagated to {@link buildTagsMapPainlessScript}.
  *
@@ -81,6 +165,7 @@ export function buildReindexPainlessScript(
   maxCount: number = OpenSearchRelay.TAG_VALUE_MAX_COUNT_PER_NAME,
 ): string {
   const tagsMapScript = buildTagsMapPainlessScript(maxCount);
+  const autocompleteScript = buildAutocompleteTextPainlessScript();
 
   return `
     ${tagsMapScript}
@@ -217,5 +302,7 @@ export function buildReindexPainlessScript(
       result = result.substring(0, MAX_LEN);
     }
     ctx._source.search_text = result;
+
+    ${autocompleteScript}
     `;
 }

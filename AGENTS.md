@@ -27,9 +27,12 @@
 │   ├── media.ts            # Media/video detection from imeta tags and URLs
 │   ├── search-text.ts      # Shared buildSearchText for full-text search indexing
 │   ├── search-text.test.ts # Search text tests
+│   ├── autocomplete-text.ts      # Shared buildAutocompleteText for edge-ngram autocomplete indexing
+│   ├── autocomplete-text.test.ts # Autocomplete text tests
 │   ├── trends.ts           # Trending tag computation and publishing
 │   └── trends.test.ts      # Trends tests
 ├── scripts/
+│   ├── backfill-autocomplete.ts   # Backfill autocomplete_text field for existing events
 │   ├── backfill-language.ts       # Backfill language field for existing events
 │   ├── backfill-media.ts          # Backfill media/video fields for existing events
 │   ├── backfill-protocol.ts       # Backfill protocol field for NIP-48 events

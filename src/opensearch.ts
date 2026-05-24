@@ -7,6 +7,7 @@ import type {
   NRelay,
 } from "@nostrify/nostrify";
 import { NIP50, NKinds, NSchema as n } from "@nostrify/nostrify";
+import { buildAutocompleteText } from "./autocomplete-text.ts";
 import type { Config } from "./config.ts";
 import { StorageOverloaded } from "./errors.ts";
 import { detectMedia } from "./media.ts";
@@ -64,6 +65,12 @@ interface NostrEventDocument extends NostrEvent {
   tags_map: Record<string, string[]>;
   /** Indexed full-text search field, built per-kind from event content. */
   search_text: string;
+  /**
+   * Short, name-shaped surface indexed with the edge-ngram analyzer.
+   * Populated for kinds that have a natural autocomplete field (profiles,
+   * channels, titled events). Queried by NIP-50 `autocomplete:true`.
+   */
+  autocomplete_text?: string;
   deleted?: boolean;
   /** Whether this document is a historical version replaced by a newer event. */
   replaced?: boolean;
@@ -603,6 +610,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     event: NostrEvent,
     analysis?: {
       search_text?: string;
+      autocomplete_text?: string;
       language?: string;
       sentiment?: string;
       media?: boolean;
@@ -643,10 +651,18 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     // Extract profile metadata for kind 0 events (name search).
     const metadata = OpenSearchRelay.parseMetadata(event);
 
+    // Use pre-computed autocomplete text from the analyze worker when
+    // available; otherwise build on the main thread (direct event() calls,
+    // tests). Only set the field when non-empty so events with no
+    // autocomplete surface don't pollute the index.
+    const autocompleteText =
+      analysis?.autocomplete_text ?? buildAutocompleteText(event);
+
     return {
       ...event,
       tags_map: tagsMap,
       search_text: analysis?.search_text ?? buildSearchText(event),
+      ...(autocompleteText && { autocomplete_text: autocompleteText }),
       deleted: false,
       replaced: false,
       ...(protocol && { protocol }),
@@ -1367,15 +1383,30 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
         .map((t) => t.slice(1))
         .filter((t) => t.length > 0);
 
+      // Detect the NIP-50 `autocomplete:true|false` extension token.
+      // Default: enabled for kind-0-only filters (account autocomplete is
+      // the dominant use case), disabled for everything else. An explicit
+      // `autocomplete:true` opts non-kind-0 filters in; `autocomplete:false`
+      // opts kind-0 filters out and back into normal token search.
+      const autocompleteToken = tokens.find(
+        (t) => typeof t === "object" && t.key === "autocomplete",
+      );
+      const autocompleteOn =
+        autocompleteToken && typeof autocompleteToken === "object"
+          ? autocompleteToken.value === "true"
+          : this.isKind0OnlyFilter(filter);
+
       if (positiveTerms.trim()) {
-        if (this.isKind0OnlyFilter(filter)) {
-          // For kind 0 searches, match against parsed metadata name fields
-          // using edge-ngram prefix matching for autocomplete-style queries.
+        if (autocompleteOn) {
+          // Edge-ngram prefix matching against the dedicated autocomplete
+          // field. Documents without `autocomplete_text` (e.g. kind 1) will
+          // simply not match, which is the desired semantics.
           must.push({
-            multi_match: {
-              query: positiveTerms,
-              fields: ["metadata.name", "metadata.display_name"],
-              operator: "and",
+            match: {
+              autocomplete_text: {
+                query: positiveTerms,
+                operator: "and",
+              },
             },
           });
         } else {
@@ -1392,12 +1423,9 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
 
       // Add negative terms as must_not clauses
       for (const term of negativeTerms) {
-        if (this.isKind0OnlyFilter(filter)) {
+        if (autocompleteOn) {
           mustNot.push({
-            multi_match: {
-              query: term,
-              fields: ["metadata.name", "metadata.display_name"],
-            },
+            match: { autocomplete_text: term },
           });
         } else {
           mustNot.push({
@@ -1585,6 +1613,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
       signal?: AbortSignal;
       analysis?: {
         search_text?: string;
+        autocomplete_text?: string;
         language?: string;
         sentiment?: string;
         media?: boolean;
@@ -2554,6 +2583,11 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
           analyzer: "url_analyzer",
         },
       },
+    },
+    autocomplete_text: {
+      type: "text",
+      analyzer: "edge_ngram_analyzer",
+      search_analyzer: "standard",
     },
     sig: { type: "keyword" },
     deleted: { type: "boolean" },

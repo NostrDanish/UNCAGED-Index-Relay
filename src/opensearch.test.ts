@@ -4405,6 +4405,206 @@ describe("OpenSearchRelay", () => {
       assert.equal(results.length, 1);
       assert.equal(results[0].id, post.id);
     });
+
+    it("should opt out of autocomplete via autocomplete:false for kind 0", async () => {
+      // Capture the OpenSearch query body to verify the field routing
+      // rather than rely on the mock's substring matching.
+      let capturedQuery: Record<string, unknown> | undefined;
+      const client = {
+        bulk: async () => ({ body: { errors: false, items: [] } }),
+        mget: async () => ({ body: { docs: [] } }),
+        msearch: async (requests: unknown[]) => ({
+          body: {
+            responses: requests.map(() => ({ hits: { hits: [] } })),
+          },
+        }),
+        search: async ({ body }: { body: Record<string, unknown> }) => {
+          capturedQuery = body.query as Record<string, unknown>;
+          return { body: { hits: { hits: [], total: { value: 0 } } } };
+        },
+        count: async () => ({ body: { count: 0 } }),
+        indices: {
+          exists: async () => ({ body: true }),
+          create: async () => ({ body: {} }),
+        },
+        close: async () => {},
+      };
+      const relay = new OpenSearchRelay(client as unknown as Client, {
+        indexName: "test-index",
+        bulkMaxSize: 1,
+        refreshDelayMs: 0,
+      });
+
+      await relay.query([{ kinds: [0], search: "jac autocomplete:false" }]);
+
+      // The must clauses should include a multi_match against search_text,
+      // NOT a match against autocomplete_text.
+      const must = (
+        (capturedQuery?.bool as Record<string, unknown>)?.must as Array<
+          Record<string, unknown>
+        >
+      ) || [];
+      const hasSearchTextMultiMatch = must.some((clause) => {
+        const mm = clause.multi_match as { fields?: string[] } | undefined;
+        return mm?.fields?.includes("search_text");
+      });
+      const hasAutocompleteMatch = must.some(
+        (clause) =>
+          (clause.match as Record<string, unknown> | undefined)
+            ?.autocomplete_text !== undefined,
+      );
+      assert.equal(hasSearchTextMultiMatch, true);
+      assert.equal(hasAutocompleteMatch, false);
+    });
+
+    it("should opt in to autocomplete via autocomplete:true for non-kind-0", async () => {
+      let capturedQuery: Record<string, unknown> | undefined;
+      const client = {
+        bulk: async () => ({ body: { errors: false, items: [] } }),
+        mget: async () => ({ body: { docs: [] } }),
+        msearch: async (requests: unknown[]) => ({
+          body: {
+            responses: requests.map(() => ({ hits: { hits: [] } })),
+          },
+        }),
+        search: async ({ body }: { body: Record<string, unknown> }) => {
+          capturedQuery = body.query as Record<string, unknown>;
+          return { body: { hits: { hits: [], total: { value: 0 } } } };
+        },
+        count: async () => ({ body: { count: 0 } }),
+        indices: {
+          exists: async () => ({ body: true }),
+          create: async () => ({ body: {} }),
+        },
+        close: async () => {},
+      };
+      const relay = new OpenSearchRelay(client as unknown as Client, {
+        indexName: "test-index",
+        bulkMaxSize: 1,
+        refreshDelayMs: 0,
+      });
+
+      await relay.query([{ kinds: [40], search: "gen autocomplete:true" }]);
+
+      const must = (
+        (capturedQuery?.bool as Record<string, unknown>)?.must as Array<
+          Record<string, unknown>
+        >
+      ) || [];
+      const hasAutocompleteMatch = must.some(
+        (clause) =>
+          (clause.match as Record<string, unknown> | undefined)
+            ?.autocomplete_text !== undefined,
+      );
+      const hasSearchTextMultiMatch = must.some((clause) => {
+        const mm = clause.multi_match as { fields?: string[] } | undefined;
+        return mm?.fields?.includes("search_text");
+      });
+      assert.equal(hasAutocompleteMatch, true);
+      assert.equal(hasSearchTextMultiMatch, false);
+    });
+
+    it("should match nothing when autocomplete:true targets a kind with no autocomplete_text", async () => {
+      const { client, setScore } = createKind0SortMockClient();
+      const relay = new OpenSearchRelay(client as unknown as Client, {
+        indexName: "test-index",
+        bulkMaxSize: 1,
+        refreshDelayMs: 0,
+      });
+
+      const sk = generateSecretKey();
+      const now = Math.floor(Date.now() / 1000);
+
+      // Kind 1 short text note with no autocomplete-shaped tags. The
+      // buildAutocompleteText function produces an empty string for this
+      // event, so the field is not indexed.
+      const post = finalizeEvent(
+        {
+          kind: 1,
+          created_at: now,
+          tags: [],
+          content: "Hello from jack",
+        },
+        sk,
+      );
+
+      await relay.event(post);
+      setScore(post.id, { engagers: 10 });
+
+      // autocomplete:true against a kind with no field → no matches.
+      const results = await relay.query([
+        { kinds: [1], search: "jac autocomplete:true" },
+      ]);
+      assert.equal(results.length, 0);
+    });
+
+    it("should match tag-derived autocomplete_text via the title tag", async () => {
+      const { client, setScore } = createKind0SortMockClient();
+      const relay = new OpenSearchRelay(client as unknown as Client, {
+        indexName: "test-index",
+        bulkMaxSize: 1,
+        refreshDelayMs: 0,
+      });
+
+      const sk = generateSecretKey();
+      const now = Math.floor(Date.now() / 1000);
+
+      // Long-form article whose title is "Football and Friends".
+      const article = finalizeEvent(
+        {
+          kind: 30023,
+          created_at: now,
+          tags: [
+            ["d", "my-article"],
+            ["title", "Football and Friends"],
+          ],
+          content: "article body",
+        },
+        sk,
+      );
+
+      await relay.event(article);
+      setScore(article.id, { engagers: 5 });
+
+      const results = await relay.query([
+        { kinds: [30023], search: "foot autocomplete:true" },
+      ]);
+      assert.equal(results.length, 1);
+      assert.equal(results[0].id, article.id);
+    });
+
+    it("should match nip05 via autocomplete on kind 0", async () => {
+      const { client, setScore } = createKind0SortMockClient();
+      const relay = new OpenSearchRelay(client as unknown as Client, {
+        indexName: "test-index",
+        bulkMaxSize: 1,
+        refreshDelayMs: 0,
+      });
+
+      const sk = generateSecretKey();
+      const now = Math.floor(Date.now() / 1000);
+
+      const profile = finalizeEvent(
+        {
+          kind: 0,
+          created_at: now,
+          tags: [],
+          content: JSON.stringify({
+            name: "alice",
+            nip05: "alice@example.com",
+          }),
+        },
+        sk,
+      );
+
+      await relay.event(profile);
+      setScore(profile.id, { followers: 100 });
+
+      // Prefix of the nip05 should match via autocomplete_text.
+      const results = await relay.query([{ kinds: [0], search: "alice@ex" }]);
+      assert.equal(results.length, 1);
+      assert.equal(results[0].id, profile.id);
+    });
   });
 
   describe("buildTagsMap validation", () => {

@@ -14,6 +14,7 @@ import Sentiment from "sentiment";
 import { detect as detectLanguage } from "tinyld";
 
 import type { AnalyzeRequest, AnalyzeResult } from "./analyze-pool.ts";
+import { buildAutocompleteText } from "./autocomplete-text.ts";
 import { detectMedia } from "./media.ts";
 import { buildSearchText } from "./search-text.ts";
 
@@ -401,6 +402,12 @@ function analyzeOne(
   // Step 2: Build search text (used by language/sentiment detection below)
   const searchText = buildSearchText(nostrEvent);
   if (searchText) out.search_text = searchText;
+
+  // Step 2b: Build autocomplete text (short name/title-shaped surface used
+  // by the NIP-50 `autocomplete:true` extension token; see
+  // src/autocomplete-text.ts).
+  const autocompleteText = buildAutocompleteText(nostrEvent);
+  if (autocompleteText) out.autocomplete_text = autocompleteText;
 
   // Step 3: Detect language and sentiment, but only for kinds whose content
   // is natural-language text. Encrypted payloads, NIP-51 lists, reposts,
