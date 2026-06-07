@@ -222,7 +222,7 @@ export class Config {
     // maxFilterValues
     const maxFilterValuesValue = env.get("RELAY_MAX_FILTER_VALUES");
     if (!maxFilterValuesValue) {
-      this.maxFilterValues = 5000;
+      this.maxFilterValues = 20_000;
     } else {
       const n = parseInt(maxFilterValuesValue, 10);
       if (Number.isNaN(n) || n <= 0) {
