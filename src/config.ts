@@ -89,6 +89,12 @@ export class Config {
    * connections. Default: 32.
    */
   readonly maxInflightPerConn: number;
+  /**
+   * Set of banned hashtags (lowercased `t` tag values). Events containing any
+   * `t` tag whose value matches an entry are rejected at ingestion.
+   * Comma-separated, case-insensitive. Default: empty (no hashtags banned).
+   */
+  readonly bannedHashtags: Set<string>;
   readonly nostrSigner: NostrSigner;
 
   constructor(env: { get(key: string): string | undefined }) {
@@ -297,6 +303,18 @@ export class Config {
         );
       }
       this.maxInflightPerConn = n;
+    }
+
+    // bannedHashtags
+    const bannedHashtagsValue = env.get("BANNED_HASHTAGS");
+    if (!bannedHashtagsValue) {
+      this.bannedHashtags = new Set();
+    } else {
+      const tags = bannedHashtagsValue
+        .split(",")
+        .map((s) => s.trim().toLowerCase())
+        .filter((s) => s.length > 0);
+      this.bannedHashtags = new Set(tags);
     }
 
     // nostrSigner

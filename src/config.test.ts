@@ -226,6 +226,37 @@ describe("Config", () => {
     });
   });
 
+  describe("bannedHashtags", () => {
+    it("should default to an empty set when not set", () => {
+      const config = new Config(baseEnv());
+      assert.deepEqual(config.bannedHashtags, new Set());
+    });
+
+    it("should parse comma-separated hashtags", () => {
+      const config = new Config(
+        baseEnv([["BANNED_HASHTAGS", "spam,nsfw,scam"]]),
+      );
+      assert.deepEqual(config.bannedHashtags, new Set(["spam", "nsfw", "scam"]));
+    });
+
+    it("should lowercase hashtags", () => {
+      const config = new Config(baseEnv([["BANNED_HASHTAGS", "Spam,NSFW"]]));
+      assert.deepEqual(config.bannedHashtags, new Set(["spam", "nsfw"]));
+    });
+
+    it("should trim whitespace and drop empty entries", () => {
+      const config = new Config(
+        baseEnv([["BANNED_HASHTAGS", " spam , , nsfw "]]),
+      );
+      assert.deepEqual(config.bannedHashtags, new Set(["spam", "nsfw"]));
+    });
+
+    it("should return empty set for empty string", () => {
+      const config = new Config(baseEnv([["BANNED_HASHTAGS", ""]]));
+      assert.deepEqual(config.bannedHashtags, new Set());
+    });
+  });
+
   describe("maxMessageLength", () => {
     it("should default to 4_000_000 when not set", () => {
       const config = new Config(baseEnv());

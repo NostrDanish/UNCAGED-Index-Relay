@@ -57,6 +57,7 @@ const relay = new Relay(opensearchRelay, {
   maxFilterValues: config.maxFilterValues,
   maxEventTags: config.tagValueMaxCountPerName,
   maxInflightPerConn: config.maxInflightPerConn,
+  bannedHashtags: config.bannedHashtags,
   relayInfo: {
     pubkey: config.relayPubkey,
     contact: config.relayContact,

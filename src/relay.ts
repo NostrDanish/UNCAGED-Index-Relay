@@ -161,6 +161,8 @@ export class Relay {
   private authKinds: Set<number>;
   /** Maximum number of entries allowed in any single filter array field. */
   private maxFilterValues: number;
+  /** Lowercased `t` tag values that cause an event to be rejected at ingestion. */
+  private bannedHashtags: Set<string>;
 
   /** All open WebSocket connections. */
   private connections = new Set<ServerWebSocket<WebSocketData>>();
@@ -241,6 +243,11 @@ export class Relay {
        * Default: 32.
        */
       maxInflightPerConn?: number;
+      /**
+       * Set of lowercased `t` tag values that cause an event to be rejected at
+       * ingestion. Matching is case-insensitive. Default: empty (none banned).
+       */
+      bannedHashtags?: Set<string>;
     },
   ) {
     this.storage = storage;
@@ -249,6 +256,7 @@ export class Relay {
     this.authKinds = opts.authKinds ?? new Set();
     this.maxFilterValues = opts.maxFilterValues ?? 5000;
     this.maxInflightPerConn = opts.maxInflightPerConn ?? 32;
+    this.bannedHashtags = opts.bannedHashtags ?? new Set();
     this.relayInfo = {
       name: "Ditto Relay",
       description: "A Nostr relay backed by OpenSearch",
@@ -531,6 +539,20 @@ export class Relay {
   }
 
   /**
+   * Check if an event contains any banned hashtag (NIP-12 `t` tag).
+   * Matching is case-insensitive. Returns false when no hashtags are banned.
+   */
+  private hasBannedHashtag(event: NostrEvent): boolean {
+    if (this.bannedHashtags.size === 0) return false;
+    return event.tags.some(
+      (tag) =>
+        tag[0] === "t" &&
+        tag.length >= 2 &&
+        this.bannedHashtags.has(tag[1].toLowerCase()),
+    );
+  }
+
+  /**
    * Handle an EVENT message according to NIP-01
    */
   private async handleEventMessage(
@@ -587,6 +609,15 @@ export class Relay {
         eventId: event.id,
         accepted: false,
         message: "invalid: event has expired",
+      };
+    }
+
+    // Reject events containing a banned hashtag (relay policy)
+    if (this.hasBannedHashtag(event)) {
+      return {
+        eventId: event.id,
+        accepted: false,
+        message: "blocked: event contains a banned hashtag",
       };
     }
 

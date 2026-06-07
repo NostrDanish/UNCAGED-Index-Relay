@@ -570,6 +570,111 @@ describe("Relay", () => {
     });
   });
 
+  describe("banned hashtags", () => {
+    it("should reject an event containing a banned hashtag", async () => {
+      let storageEventCalled = false;
+      const storage = {
+        ...mockStorage,
+        event: async () => {
+          storageEventCalled = true;
+        },
+      } as unknown as AnalyzableRelay;
+      const bannedRelay = new Relay(storage, {
+        relayUrl: "wss://relay.test/",
+        bannedHashtags: new Set(["spam"]),
+      });
+
+      const sk = generateSecretKey();
+      const event = finalizeEvent(
+        {
+          kind: 1,
+          created_at: Math.floor(Date.now() / 1000),
+          tags: [["t", "spam"]],
+          content: "buy now",
+        },
+        sk,
+      );
+
+      await bannedRelay.handleEvent(mockWs, event);
+
+      assert.equal(sentMessages.length, 1);
+      assert.deepEqual(sentMessages[0], [
+        "OK",
+        event.id,
+        false,
+        "blocked: event contains a banned hashtag",
+      ]);
+      assert.equal(storageEventCalled, false);
+    });
+
+    it("should match banned hashtags case-insensitively", async () => {
+      const bannedRelay = new Relay(mockStorage, {
+        relayUrl: "wss://relay.test/",
+        bannedHashtags: new Set(["spam"]),
+      });
+
+      const sk = generateSecretKey();
+      const event = finalizeEvent(
+        {
+          kind: 1,
+          created_at: Math.floor(Date.now() / 1000),
+          tags: [["t", "SPAM"]],
+          content: "buy now",
+        },
+        sk,
+      );
+
+      await bannedRelay.handleEvent(mockWs, event);
+
+      assert.equal(sentMessages[0][2], false);
+      assert.equal(
+        sentMessages[0][3],
+        "blocked: event contains a banned hashtag",
+      );
+    });
+
+    it("should accept an event with a non-banned hashtag", async () => {
+      const bannedRelay = new Relay(mockStorage, {
+        relayUrl: "wss://relay.test/",
+        bannedHashtags: new Set(["spam"]),
+      });
+
+      const sk = generateSecretKey();
+      const event = finalizeEvent(
+        {
+          kind: 1,
+          created_at: Math.floor(Date.now() / 1000),
+          tags: [["t", "nostr"]],
+          content: "hello",
+        },
+        sk,
+      );
+
+      await bannedRelay.handleEvent(mockWs, event);
+      bannedRelay.flushBroadcasts();
+
+      assert.deepEqual(sentMessages[0], ["OK", event.id, true, ""]);
+    });
+
+    it("should accept any event when no hashtags are banned", async () => {
+      const sk = generateSecretKey();
+      const event = finalizeEvent(
+        {
+          kind: 1,
+          created_at: Math.floor(Date.now() / 1000),
+          tags: [["t", "spam"]],
+          content: "hello",
+        },
+        sk,
+      );
+
+      await relay.handleEvent(mockWs, event);
+      relay.flushBroadcasts();
+
+      assert.deepEqual(sentMessages[0], ["OK", event.id, true, ""]);
+    });
+  });
+
   describe("handleReq", () => {
     it("should accept valid REQ and send events with EOSE", async () => {
       const sk = generateSecretKey();
