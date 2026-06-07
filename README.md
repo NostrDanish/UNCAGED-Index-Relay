@@ -98,6 +98,8 @@ The following NIP-50 search extensions are supported:
 - `media:true` / `media:false` — Filter by presence of media attachments
 - `video:true` / `video:false` — Filter by whether all attachments are video
 - `protocol:<value>` — Filter by protocol (NIP-48), e.g. `protocol:activitypub`
+- `client:<address>` — Filter by NIP-89 client address (the third value of a
+  `client` tag), e.g. `client:31990:<pubkey>:ditto`
 - `sort:<mode>` — Sort results: `top`, `hot`, `controversial`, `rising`, `zaps`
 - `distinct:author` — Return at most one event per author
 

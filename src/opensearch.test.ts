@@ -4439,11 +4439,10 @@ describe("OpenSearchRelay", () => {
 
       // The must clauses should include a multi_match against search_text,
       // NOT a match against autocomplete_text.
-      const must = (
-        (capturedQuery?.bool as Record<string, unknown>)?.must as Array<
+      const must =
+        ((capturedQuery?.bool as Record<string, unknown>)?.must as Array<
           Record<string, unknown>
-        >
-      ) || [];
+        >) || [];
       const hasSearchTextMultiMatch = must.some((clause) => {
         const mm = clause.multi_match as { fields?: string[] } | undefined;
         return mm?.fields?.includes("search_text");
@@ -4486,11 +4485,10 @@ describe("OpenSearchRelay", () => {
 
       await relay.query([{ kinds: [40], search: "gen autocomplete:true" }]);
 
-      const must = (
-        (capturedQuery?.bool as Record<string, unknown>)?.must as Array<
+      const must =
+        ((capturedQuery?.bool as Record<string, unknown>)?.must as Array<
           Record<string, unknown>
-        >
-      ) || [];
+        >) || [];
       const hasAutocompleteMatch = must.some(
         (clause) =>
           (clause.match as Record<string, unknown> | undefined)
@@ -5218,6 +5216,231 @@ describe("OpenSearchRelay", () => {
       ]);
       assert.equal(results.length, 1);
       assert.equal(results[0].id, event.id);
+    });
+  });
+
+  describe("NIP-89 client address filter (NIP-50 extension)", () => {
+    // Mock client with client address field support
+    const createClientMockClient = () => {
+      const documents = new Map<string, unknown>();
+
+      return {
+        documents,
+        client: {
+          search: async ({ body }: { body: Record<string, unknown> }) => {
+            const results: unknown[] = [];
+            const queryMust = (
+              (body.query as Record<string, unknown>)?.bool as Record<
+                string,
+                unknown
+              >
+            )?.must as Array<Record<string, unknown>> | undefined;
+
+            // Extract client filter if present
+            let clientFilter: string | undefined;
+            for (const clause of queryMust || []) {
+              if ((clause.term as Record<string, unknown>)?.client) {
+                clientFilter = (clause.term as Record<string, unknown>)
+                  .client as string;
+              }
+            }
+
+            for (const [_id, doc] of documents.entries()) {
+              const docTyped = doc as NostrEvent & {
+                deleted?: boolean;
+                client?: string;
+              };
+
+              if (docTyped.deleted) continue;
+
+              if (clientFilter && docTyped.client !== clientFilter) continue;
+
+              results.push({ _source: doc });
+            }
+
+            return {
+              body: {
+                hits: { hits: results },
+              },
+            };
+          },
+          bulk: async ({ body }: { body: unknown[] }) => {
+            const items: Array<Record<string, unknown>> = [];
+            for (let i = 0; i < body.length; i += 2) {
+              const action = body[i] as {
+                index?: { _id: string };
+                update?: { _id: string };
+              };
+              const payload = body[i + 1] as Record<string, unknown>;
+
+              if (action.index) {
+                documents.set(action.index._id, payload);
+                items.push({ index: {} });
+              } else if (action.update) {
+                if (payload.upsert) {
+                  if (!documents.has(action.update._id)) {
+                    documents.set(action.update._id, payload.upsert);
+                  }
+                }
+                items.push({ update: {} });
+              }
+            }
+            return {
+              body: {
+                errors: false,
+                items,
+              },
+            };
+          },
+          mget: async ({ body }: { body: { ids: string[] } }) => {
+            const docs = body.ids.map((id) => {
+              const doc = documents.get(id);
+              if (doc) return { found: true, _id: id, _source: doc };
+              return { found: false, _id: id };
+            });
+            return { body: { docs } };
+          },
+          count: async () => {
+            const nonDeleted = Array.from(documents.values()).filter(
+              (doc) => !(doc as { deleted?: boolean }).deleted,
+            );
+            return { body: { count: nonDeleted.length } };
+          },
+          updateByQuery: async () => ({ body: { updated: 0 } }),
+          msearch: async (requests: unknown[]) => ({
+            body: {
+              responses: requests.map(() => ({ hits: { hits: [] } })),
+            },
+          }),
+          indices: {
+            exists: async () => ({ body: true }),
+            create: async () => ({ body: {} }),
+          },
+          close: async () => {},
+        },
+      };
+    };
+
+    const dittoAddress =
+      "31990:781a1527055f74c1f70230f10384609b34548f8ab6a0a6caa74025827f9fdae5:ditto";
+
+    it("should index the client address from the client tag's third value", async () => {
+      const { client, documents } = createClientMockClient();
+      const relay = new OpenSearchRelay(client as unknown as Client, {
+        indexName: "test-index",
+        bulkMaxSize: 1,
+        refreshDelayMs: 0,
+      });
+
+      const sk = generateSecretKey();
+      const now = Math.floor(Date.now() / 1000);
+
+      const event = finalizeEvent(
+        {
+          kind: 1,
+          created_at: now,
+          tags: [["client", "Ditto", dittoAddress, "wss://relay.example.com/"]],
+          content: "posted from Ditto",
+        },
+        sk,
+      );
+
+      await relay.event(event);
+
+      const doc = documents.get(event.id) as { client?: string };
+      assert.equal(doc.client, dittoAddress);
+    });
+
+    it("should not set client when the client tag has no third value", async () => {
+      const { client, documents } = createClientMockClient();
+      const relay = new OpenSearchRelay(client as unknown as Client, {
+        indexName: "test-index",
+        bulkMaxSize: 1,
+        refreshDelayMs: 0,
+      });
+
+      const sk = generateSecretKey();
+      const now = Math.floor(Date.now() / 1000);
+
+      const event = finalizeEvent(
+        {
+          kind: 1,
+          created_at: now,
+          tags: [["client", "Ditto"]],
+          content: "client name only",
+        },
+        sk,
+      );
+
+      await relay.event(event);
+
+      const doc = documents.get(event.id) as { client?: string };
+      assert.equal(doc.client, undefined);
+    });
+
+    it("should filter events by client address using search extension", async () => {
+      const { client } = createClientMockClient();
+      const relay = new OpenSearchRelay(client as unknown as Client, {
+        indexName: "test-index",
+        bulkMaxSize: 1,
+        refreshDelayMs: 0,
+      });
+
+      const sk = generateSecretKey();
+      const now = Math.floor(Date.now() / 1000);
+
+      const dittoEvent = finalizeEvent(
+        {
+          kind: 1,
+          created_at: now,
+          tags: [["client", "Ditto", dittoAddress]],
+          content: "from Ditto",
+        },
+        sk,
+      );
+
+      const otherAddress = "31990:abc:other";
+      const otherEvent = finalizeEvent(
+        {
+          kind: 1,
+          created_at: now - 10,
+          tags: [["client", "Other", otherAddress]],
+          content: "from Other",
+        },
+        sk,
+      );
+
+      const nativeEvent = finalizeEvent(
+        {
+          kind: 1,
+          created_at: now - 20,
+          tags: [],
+          content: "no client tag",
+        },
+        sk,
+      );
+
+      await relay.event(dittoEvent);
+      await relay.event(otherEvent);
+      await relay.event(nativeEvent);
+
+      // Filter by the Ditto client address
+      const dittoResults = await relay.query([
+        { kinds: [1], search: `client:${dittoAddress}` },
+      ]);
+      assert.equal(dittoResults.length, 1);
+      assert.equal(dittoResults[0].id, dittoEvent.id);
+
+      // Filter by the other client address
+      const otherResults = await relay.query([
+        { kinds: [1], search: `client:${otherAddress}` },
+      ]);
+      assert.equal(otherResults.length, 1);
+      assert.equal(otherResults[0].id, otherEvent.id);
+
+      // Query without a client filter returns all events
+      const all = await relay.query([{ kinds: [1] }]);
+      assert.equal(all.length, 3);
     });
   });
 

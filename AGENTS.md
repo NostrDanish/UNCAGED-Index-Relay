@@ -33,6 +33,7 @@
 │   └── trends.test.ts      # Trends tests
 ├── scripts/
 │   ├── backfill-autocomplete.ts   # Backfill autocomplete_text field for existing events
+│   ├── backfill-client-address.ts # Backfill client field (NIP-89 client address) for existing events
 │   ├── backfill-language.ts       # Backfill language field for existing events
 │   ├── backfill-media.ts          # Backfill media/video fields for existing events
 │   ├── backfill-protocol.ts       # Backfill protocol field for NIP-48 events

@@ -92,6 +92,28 @@ export function buildAutocompleteTextPainlessScript(): string {
 }
 
 /**
+ * Generate the Painless snippet that sets `ctx._source.client` from the
+ * NIP-89 `client` tag's third value (the addressable handler coordinate,
+ * `<kind>:<pubkey>:<d-tag>`), mirroring the extraction in
+ * {@link OpenSearchRelay.eventToDocument}. Removes any stale field when no
+ * qualifying client tag is present. Queried by NIP-50 `client:<address>`.
+ */
+export function buildClientAddressPainlessScript(): string {
+  return `
+    // --- Extract NIP-89 client address ---
+    ctx._source.remove('client');
+    if (ctx._source.tags != null) {
+      for (def tag : ctx._source.tags) {
+        if (tag != null && tag.size() >= 3 && tag[0] == 'client'
+            && tag[2] != null && tag[2].toString().length() > 0) {
+          ctx._source.client = tag[2].toString();
+          break;
+        }
+      }
+    }`;
+}
+
+/**
  * Generate the Painless script snippet that rebuilds `tags_map` from
  * `ctx._source.tags`, mirroring the `buildTagsMap` / `isIndexableTagName`
  * logic. Used by reindex and update-by-query scripts so the filtering
@@ -156,6 +178,7 @@ export function buildTagsMapPainlessScript(
  *    `repost_count` → `repost_cnt`
  * 3. Builds `search_text` from event content and tags
  * 4. Builds `autocomplete_text` from event content and tags
+ * 5. Extracts the NIP-89 `client` address from the client tag's third value
  *
  * @param maxCount propagated to {@link buildTagsMapPainlessScript}.
  *
@@ -166,6 +189,7 @@ export function buildReindexPainlessScript(
 ): string {
   const tagsMapScript = buildTagsMapPainlessScript(maxCount);
   const autocompleteScript = buildAutocompleteTextPainlessScript();
+  const clientAddressScript = buildClientAddressPainlessScript();
 
   return `
     ${tagsMapScript}
@@ -304,5 +328,7 @@ export function buildReindexPainlessScript(
     ctx._source.search_text = result;
 
     ${autocompleteScript}
+
+    ${clientAddressScript}
     `;
 }

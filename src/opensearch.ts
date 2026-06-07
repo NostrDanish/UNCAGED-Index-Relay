@@ -75,6 +75,13 @@ interface NostrEventDocument extends NostrEvent {
   /** Whether this document is a historical version replaced by a newer event. */
   replaced?: boolean;
   protocol?: string;
+  /**
+   * NIP-89 client address from the third value of a `client` tag.
+   * Format: `<kind>:<pubkey>:<d-tag>` (e.g. `31990:<pubkey>:ditto`).
+   * Queried by NIP-50 `client:<address>`. Distinct from `tags_map.client`,
+   * which holds the human-readable client name (the tag's second value).
+   */
+  client?: string;
   amount_msats?: number;
   language?: string;
   sentiment?: string;
@@ -626,6 +633,15 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     );
     const protocol = proxyTag?.[2];
 
+    // Extract client address from the NIP-89 client tag (NIP-50 client:).
+    // Format: ["client", <name>, <kind>:<pubkey>:<d-tag>, <relay>?]
+    // The third value is the addressable handler coordinate; we index it as
+    // a keyword distinct from tags_map.client (which holds the name).
+    const clientTag = event.tags.find(
+      (tag) => tag[0] === "client" && tag.length >= 3,
+    );
+    const client = clientTag?.[2];
+
     // Extract zap amount from bolt11 for kind 9735 (zap receipts),
     // or from the `amount` tag (sats) for kind 8333 (onchain zaps).
     let amount_msats: number | undefined;
@@ -666,6 +682,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
       deleted: false,
       replaced: false,
       ...(protocol && { protocol }),
+      ...(client && { client }),
       ...(amount_msats !== undefined && { amount_msats }),
       ...(language && { language }),
       ...(sentiment && { sentiment }),
@@ -1449,6 +1466,18 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
             term: { protocol: protocolToken.value },
           });
         }
+      }
+
+      // Handle client: extension (NIP-50 + NIP-89)
+      // Filters by the client address (third value of a client tag),
+      // eg "client:31990:<pubkey>:ditto".
+      const clientToken = tokens.find(
+        (t) => typeof t === "object" && t.key === "client",
+      );
+      if (clientToken && typeof clientToken === "object") {
+        must.push({
+          term: { client: clientToken.value },
+        });
       }
 
       // Handle language: extension (NIP-50)
@@ -2593,6 +2622,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     deleted: { type: "boolean" },
     replaced: { type: "boolean" },
     protocol: { type: "keyword" },
+    client: { type: "keyword" },
     amount_msats: { type: "long" },
     language: { type: "keyword" },
     sentiment: { type: "keyword" },
