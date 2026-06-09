@@ -741,10 +741,15 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
         : null;
     }
 
-    // If no extension tokens are provided at all, default to sort:top.
-    // Any extension token (eg sort:new, language:en) prevents this default.
-    const hasExtensionTokens = tokens.some((t) => typeof t === "object");
-    if (!hasExtensionTokens) {
+    // If no sort-suppressing extension tokens are provided, default to
+    // sort:top. Most extension tokens (eg sort:new, language:en) prevent
+    // this default, but `autocomplete` is exempt: account autocomplete
+    // (`autocomplete:true`) still wants follower-ranked results, not raw
+    // recency ordering.
+    const hasSuppressingToken = tokens.some(
+      (t) => typeof t === "object" && t.key !== "autocomplete",
+    );
+    if (!hasSuppressingToken) {
       return "top";
     }
 

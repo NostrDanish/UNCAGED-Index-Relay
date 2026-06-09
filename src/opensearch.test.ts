@@ -3945,6 +3945,58 @@ describe("OpenSearchRelay", () => {
       assert.equal(results[1].id, profile2.id); // jackson
     });
 
+    it("should still default to sort:top when only the autocomplete token is present", async () => {
+      const { client, setScore } = createKind0SortMockClient();
+      const relay = new OpenSearchRelay(client as unknown as Client, {
+        indexName: "test-index",
+        bulkMaxSize: 1,
+        refreshDelayMs: 0,
+      });
+
+      const sk1 = generateSecretKey();
+      const sk2 = generateSecretKey();
+      const now = Math.floor(Date.now() / 1000);
+
+      // profile1 (jack) is older but has far more followers. If the
+      // autocomplete token suppressed the sort:top default, we'd fall back
+      // to created_at desc and profile2 (jackson) would sort first.
+      const profile1 = finalizeEvent(
+        {
+          kind: 0,
+          created_at: now - 100,
+          tags: [],
+          content: JSON.stringify({ name: "jack" }),
+        },
+        sk1,
+      );
+
+      const profile2 = finalizeEvent(
+        {
+          kind: 0,
+          created_at: now,
+          tags: [],
+          content: JSON.stringify({ name: "jackson" }),
+        },
+        sk2,
+      );
+
+      await relay.event(profile1);
+      await relay.event(profile2);
+
+      setScore(profile1.id, { followers: 50000 }); // jack — most followed
+      setScore(profile2.id, { followers: 200 }); // jackson — newer, fewer
+
+      const results = await relay.query([
+        { kinds: [0], search: "jac autocomplete:true" },
+      ]);
+
+      // Follower-ranked order proves sort:top was applied despite the
+      // autocomplete:true extension token being present.
+      assert.equal(results.length, 2);
+      assert.equal(results[0].id, profile1.id); // jack (most followers)
+      assert.equal(results[1].id, profile2.id); // jackson
+    });
+
     it("should sort kind 0 by controversial (two-step author lookup)", async () => {
       const { client, setScore } = createKind0SortMockClient();
       const relay = new OpenSearchRelay(client as unknown as Client, {
