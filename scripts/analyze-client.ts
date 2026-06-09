@@ -13,16 +13,21 @@
  *   - Join-month cohorts (first event per user)
  *   - Top event kinds posted with this client
  *
+ * Multiple client names can be passed and are analyzed together as a single
+ * client. This is useful for clients that publish under more than one tag
+ * (e.g. "Primal Android" and "Primal Web").
+ *
  * Optionally writes a per-user TSV (pubkey, first, last, count) for further
  * analysis (e.g. splitting into active/inactive lists, encoding to npub).
  *
  * Usage:
- *   bun run scripts/analyze-client.ts <client-name> [options]
+ *   bun run scripts/analyze-client.ts <client-name>... [options]
  *
  * Examples:
  *   bun run scripts/analyze-client.ts Ditto
  *   bun run scripts/analyze-client.ts "Damus" --active-days 7
  *   bun run scripts/analyze-client.ts Amethyst --out /tmp/amethyst-users.tsv
+ *   bun run scripts/analyze-client.ts "Primal Android" "Primal Web"
  *
  * Options:
  *   --active-days <n>   Days since last event to count as "active" (default: 30)
@@ -48,15 +53,15 @@ interface UserStats {
 }
 
 interface Options {
-  client: string;
+  clients: string[];
   activeDays: number;
   out: string | undefined;
   topKinds: number;
 }
 
-/** Parse CLI arguments. The first positional arg is the client name. */
+/** Parse CLI arguments. Positional args are client name(s). */
 function parseArgs(argv: string[]): Options {
-  let client: string | undefined;
+  const clients: string[] = [];
   let activeDays = 30;
   let out: string | undefined;
   let topKinds = 15;
@@ -74,20 +79,18 @@ function parseArgs(argv: string[]): Options {
         topKinds = Number(argv[++i]);
         break;
       default:
-        if (client === undefined) {
-          client = arg;
-        } else {
-          console.error(`Unexpected argument: ${arg}`);
-          process.exit(1);
-        }
+        clients.push(arg);
     }
   }
 
-  if (!client) {
+  if (clients.length === 0) {
     console.error(
-      "Usage: bun run scripts/analyze-client.ts <client-name> [--active-days <n>] [--out <path>] [--kinds <n>]",
+      "Usage: bun run scripts/analyze-client.ts <client-name>... [--active-days <n>] [--out <path>] [--kinds <n>]",
     );
     console.error("Example: bun run scripts/analyze-client.ts Ditto");
+    console.error(
+      'Example: bun run scripts/analyze-client.ts "Primal Android" "Primal Web"',
+    );
     process.exit(1);
   }
 
@@ -100,16 +103,17 @@ function parseArgs(argv: string[]): Options {
     process.exit(1);
   }
 
-  return { client, activeDays, out, topKinds };
+  return { clients, activeDays, out, topKinds };
 }
 
 /**
- * Match events for this client. The relay indexes the human-readable client
- * name (second value of the NIP-89 `client` tag) into `tags_map.client`,
- * which is a `keyword` so it matches exactly.
+ * Match events for these client(s). The relay indexes the human-readable
+ * client name (second value of the NIP-89 `client` tag) into
+ * `tags_map.client`, which is a `keyword` so it matches exactly. Multiple
+ * names are matched with a `terms` query and treated as one combined client.
  */
-function clientQuery(client: string): Record<string, unknown> {
-  return { term: { "tags_map.client": client } };
+function clientQuery(clients: string[]): Record<string, unknown> {
+  return { terms: { "tags_map.client": clients } };
 }
 
 /**
@@ -119,7 +123,7 @@ function clientQuery(client: string): Record<string, unknown> {
 async function collectUsers(
   client: OpenSearchClient,
   index: string,
-  clientName: string,
+  clientNames: string[],
 ): Promise<UserStats[]> {
   const users: UserStats[] = [];
   let after: Record<string, string> | undefined;
@@ -135,7 +139,7 @@ async function collectUsers(
       index,
       body: {
         size: 0,
-        query: clientQuery(clientName),
+        query: clientQuery(clientNames),
         aggs: {
           users: {
             composite,
@@ -183,14 +187,14 @@ async function collectUsers(
 async function topKinds(
   client: OpenSearchClient,
   index: string,
-  clientName: string,
+  clientNames: string[],
   size: number,
 ): Promise<Array<{ kind: number; count: number }>> {
   const response = await client.search({
     index,
     body: {
       size: 0,
-      query: clientQuery(clientName),
+      query: clientQuery(clientNames),
       aggs: { kinds: { terms: { field: "kind", size } } },
     },
   });
@@ -256,7 +260,7 @@ async function main() {
   });
 
   const index = config.opensearchIndex;
-  console.log(`Client analysis: "${opts.client}"`);
+  console.log(`Client analysis: "${opts.clients.join('", "')}"`);
   console.log(`OpenSearch Node: ${config.opensearchNode}`);
   console.log(`Index: ${index}`);
   console.log(`Active threshold: last event within ${opts.activeDays} days\n`);
@@ -274,10 +278,12 @@ async function main() {
     const now = Math.floor(Date.now() / 1000);
 
     console.log("Collecting users...");
-    const users = await collectUsers(client, index, opts.client);
+    const users = await collectUsers(client, index, opts.clients);
 
     if (users.length === 0) {
-      console.log(`\nNo users found for client "${opts.client}".`);
+      console.log(
+        `\nNo users found for client "${opts.clients.join('", "')}".`,
+      );
       console.log(
         "Check the exact client name (case-sensitive). Example names: Ditto, Damus, Amethyst, Primal.",
       );
@@ -358,7 +364,7 @@ async function main() {
 
     // Top event kinds
     console.log(`\n=== Top ${opts.topKinds} event kinds (this client) ===`);
-    const kinds = await topKinds(client, index, opts.client, opts.topKinds);
+    const kinds = await topKinds(client, index, opts.clients, opts.topKinds);
     const kindTotal = kinds.reduce((a, k) => a + k.count, 0);
     for (const k of kinds) {
       const pct =
