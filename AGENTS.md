@@ -32,6 +32,7 @@
 │   ├── trends.ts           # Trending tag computation and publishing
 │   └── trends.test.ts      # Trends tests
 ├── scripts/
+│   ├── analyze-client.ts          # Analyze a client's users (active/inactive, engagement, cohorts)
 │   ├── backfill-autocomplete.ts   # Backfill autocomplete_text field for existing events
 │   ├── backfill-client-address.ts # Backfill client field (NIP-89 client address) for existing events
 │   ├── backfill-language.ts       # Backfill language field for existing events
