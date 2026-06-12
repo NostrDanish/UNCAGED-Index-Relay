@@ -2402,14 +2402,17 @@ describe("OpenSearchRelay", () => {
               | undefined;
 
             if (sort && sort.length > 0) {
-              const [sortField, sortOpts] = Object.entries(sort[0])[0];
-              const desc = (sortOpts as { order: string }).order === "desc";
               results.sort((a, b) => {
-                // biome-ignore lint/suspicious/noExplicitAny: test mock
-                const aVal = (a._source as any)[sortField] ?? 0;
-                // biome-ignore lint/suspicious/noExplicitAny: test mock
-                const bVal = (b._source as any)[sortField] ?? 0;
-                return desc ? bVal - aVal : aVal - bVal;
+                for (const sortClause of sort) {
+                  const [sortField, sortOpts] = Object.entries(sortClause)[0];
+                  const desc = (sortOpts as { order: string }).order === "desc";
+                  // biome-ignore lint/suspicious/noExplicitAny: test mock
+                  const aVal = (a._source as any)[sortField] ?? 0;
+                  // biome-ignore lint/suspicious/noExplicitAny: test mock
+                  const bVal = (b._source as any)[sortField] ?? 0;
+                  if (aVal !== bVal) return desc ? bVal - aVal : aVal - bVal;
+                }
+                return 0;
               });
             } else if (results.length > 0 && results[0]._score !== undefined) {
               // Sort by script score descending
@@ -2892,7 +2895,7 @@ describe("OpenSearchRelay", () => {
       assert.equal(results[1].id, event1.id);
     });
 
-    it("should exclude events with no zaps from sort:zaps results", async () => {
+    it("should include events with no zaps in sort:zaps results, ranked last", async () => {
       const { client, setScore } = createSortMockClient();
       const relay = new OpenSearchRelay(client as unknown as Client, {
         indexName: "test-index",
@@ -2931,12 +2934,13 @@ describe("OpenSearchRelay", () => {
 
       const results = await relay.query([{ kinds: [1], search: "sort:zaps" }]);
 
-      // Only the zapped event should be returned
-      assert.equal(results.length, 1);
+      // Both events are returned; the zapped event ranks first.
+      assert.equal(results.length, 2);
       assert.equal(results[0].id, zappedEvent.id);
+      assert.equal(results[1].id, unzappedEvent.id);
     });
 
-    it("should return empty results when no events have zaps", async () => {
+    it("should still return events when none have zaps", async () => {
       const { client } = createSortMockClient();
       const relay = new OpenSearchRelay(client as unknown as Client, {
         indexName: "test-index",
@@ -2947,16 +2951,16 @@ describe("OpenSearchRelay", () => {
       const sk = generateSecretKey();
       const now = Math.floor(Date.now() / 1000);
 
-      await relay.event(
-        finalizeEvent(
-          { kind: 1, created_at: now - 100, tags: [], content: "No zaps" },
-          sk,
-        ),
+      const event = finalizeEvent(
+        { kind: 1, created_at: now - 100, tags: [], content: "No zaps" },
+        sk,
       );
+      await relay.event(event);
 
       const results = await relay.query([{ kinds: [1], search: "sort:zaps" }]);
 
-      assert.equal(results.length, 0);
+      assert.equal(results.length, 1);
+      assert.equal(results[0].id, event.id);
     });
 
     it("should combine distinct:author with sort:zaps", async () => {
@@ -3728,14 +3732,17 @@ describe("OpenSearchRelay", () => {
               | undefined;
 
             if (sort && sort.length > 0) {
-              const [sortField, sortOpts] = Object.entries(sort[0])[0];
-              const desc = (sortOpts as { order: string }).order === "desc";
               results.sort((a, b) => {
-                // biome-ignore lint/suspicious/noExplicitAny: test mock
-                const aVal = (a._source as any)[sortField] ?? 0;
-                // biome-ignore lint/suspicious/noExplicitAny: test mock
-                const bVal = (b._source as any)[sortField] ?? 0;
-                return desc ? bVal - aVal : aVal - bVal;
+                for (const sortClause of sort) {
+                  const [sortField, sortOpts] = Object.entries(sortClause)[0];
+                  const desc = (sortOpts as { order: string }).order === "desc";
+                  // biome-ignore lint/suspicious/noExplicitAny: test mock
+                  const aVal = (a._source as any)[sortField] ?? 0;
+                  // biome-ignore lint/suspicious/noExplicitAny: test mock
+                  const bVal = (b._source as any)[sortField] ?? 0;
+                  if (aVal !== bVal) return desc ? bVal - aVal : aVal - bVal;
+                }
+                return 0;
               });
             } else if (results.length > 0 && results[0]._score !== undefined) {
               results.sort((a, b) => (b._score ?? 0) - (a._score ?? 0));
@@ -4311,9 +4318,11 @@ describe("OpenSearchRelay", () => {
         { kinds: [0, 1], search: "sort:top" },
       ]);
 
-      // Only the post has engagers > 0, profile has 0
-      assert.equal(results.length, 1);
+      // Multi-kind query uses the regular sort path (by engagers), so the
+      // post (engagers: 10) ranks ahead of the profile (engagers: 0).
+      assert.equal(results.length, 2);
       assert.equal(results[0].id, post.id);
+      assert.equal(results[1].id, profile.id);
     });
 
     it("should match kind 0 profiles by partial name prefix", async () => {

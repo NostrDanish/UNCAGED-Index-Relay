@@ -914,14 +914,16 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     const query = this.buildQuery(filter) as {
       bool: { must: Record<string, unknown>[] };
     };
-    query.bool.must.push({ range: { engagers: { gt: 0 } } });
 
     const response = await this.client.search({
       index: this.indexName,
       body: {
         _source: NOSTR_EVENT_FIELDS,
         query,
-        sort: [{ engagers: { order: "desc" as const } }],
+        sort: [
+          { engagers: { order: "desc" as const } },
+          { created_at: { order: "desc" as const } },
+        ],
         size: limit,
       },
     });
@@ -942,7 +944,6 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     const query = this.buildQuery(filter) as {
       bool: { must: Record<string, unknown>[] };
     };
-    query.bool.must.push({ range: { engagers: { gt: 0 } } });
 
     const response = await this.client.search({
       index: this.indexName,
@@ -979,9 +980,6 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     const query = this.buildQuery(filter) as {
       bool: { must: Record<string, unknown>[] };
     };
-    // Require at least one comment AND one reaction for controversy
-    query.bool.must.push({ range: { comment_cnt: { gt: 0 } } });
-    query.bool.must.push({ range: { reaction_cnt: { gt: 0 } } });
 
     const response = await this.client.search({
       index: this.indexName,
@@ -1020,7 +1018,6 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     const query = this.buildQuery(filter) as {
       bool: { must: Record<string, unknown>[] };
     };
-    query.bool.must.push({ range: { engagers: { gt: 0 } } });
 
     const response = await this.client.search({
       index: this.indexName,
@@ -1056,14 +1053,16 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     const query = this.buildQuery(filter) as {
       bool: { must: Record<string, unknown>[] };
     };
-    query.bool.must.push({ range: { zap_amount_msats: { gt: 0 } } });
 
     const response = await this.client.search({
       index: this.indexName,
       body: {
         _source: NOSTR_EVENT_FIELDS,
         query,
-        sort: [{ zap_amount_msats: { order: "desc" as const } }],
+        sort: [
+          { zap_amount_msats: { order: "desc" as const } },
+          { created_at: { order: "desc" as const } },
+        ],
         size: limit,
       },
     });
@@ -1091,14 +1090,16 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     const query = this.buildQuery(filter) as {
       bool: { must: Record<string, unknown>[] };
     };
-    query.bool.must.push({ range: { followers: { gt: 0 } } });
 
     const response = await this.client.search({
       index: this.indexName,
       body: {
         _source: NOSTR_EVENT_FIELDS,
         query,
-        sort: [{ followers: { order: "desc" as const } }],
+        sort: [
+          { followers: { order: "desc" as const } },
+          { created_at: { order: "desc" as const } },
+        ],
         size: limit,
       },
     });
@@ -1118,7 +1119,6 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     const query = this.buildQuery(filter) as {
       bool: { must: Record<string, unknown>[] };
     };
-    query.bool.must.push({ range: { followers: { gt: 0 } } });
 
     const response = await this.client.search({
       index: this.indexName,
