@@ -288,6 +288,12 @@ export const relayConnectionsGauge = new Gauge({
   help: "Active relay connections",
 });
 
+/** Active NIP-77 Negentropy sync sessions across all connections. */
+export const relayNegentropySessionsGauge = new Gauge({
+  name: "ditto_relay_negentropy_sessions",
+  help: "Active NIP-77 Negentropy sync sessions",
+});
+
 // ---------------------------------------------------------------------------
 // OpenSearch metrics
 // ---------------------------------------------------------------------------

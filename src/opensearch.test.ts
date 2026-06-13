@@ -6978,4 +6978,181 @@ describe("OpenSearchRelay", () => {
       void p2;
     });
   });
+
+  describe("queryItems (NIP-77 sync)", () => {
+    /** Dataset of (created_at, id) docs sorted ascending by (created_at, id). */
+    const makeDataset = (count: number): Array<[number, string]> => {
+      const docs: Array<[number, string]> = [];
+      for (let i = 0; i < count; i++) {
+        // Repeat timestamps to exercise the id tiebreaker.
+        const createdAt = 1000 + Math.floor(i / 3);
+        const id = `${String(i).padStart(4, "0")}${"0".repeat(60)}`;
+        docs.push([createdAt, id]);
+      }
+      docs.sort((a, b) => (a[0] !== b[0] ? a[0] - b[0] : a[1] < b[1] ? -1 : 1));
+      return docs;
+    };
+    /**
+     * Mock client whose `search` honors (created_at, id) sort in either
+     * direction, `search_after`, and `size` — enough to exercise pagination.
+     */
+    const createItemsMockClient = (docs: Array<[number, string]>) => {
+      const requests: Array<Record<string, unknown>> = [];
+      const client = {
+        search: async ({ body }: { body: Record<string, unknown> }) => {
+          requests.push(body);
+
+          const sort = body.sort as Array<Record<string, { order: string }>>;
+          const order = sort[0].created_at.order;
+          assert.deepEqual(sort, [
+            { created_at: { order } },
+            { id: { order } },
+          ]);
+
+          const size = body.size as number;
+          const after = body.search_after as [number, string] | undefined;
+
+          let ordered = docs;
+          if (order === "desc") {
+            ordered = [...docs].reverse();
+          }
+
+          let filtered = ordered;
+          if (after) {
+            filtered = ordered.filter(([ts, id]) =>
+              order === "asc"
+                ? ts > after[0] || (ts === after[0] && id > after[1])
+                : ts < after[0] || (ts === after[0] && id < after[1]),
+            );
+          }
+
+          const page = filtered.slice(0, size);
+          return {
+            body: {
+              hits: {
+                hits: page.map(([created_at, id]) => ({
+                  _source: { created_at, id },
+                  sort: [created_at, id],
+                })),
+              },
+            },
+          };
+        },
+      };
+      return { client, requests };
+    };
+
+    it("returns all items in ascending (created_at, id) order across pages", async () => {
+      const docs = makeDataset(25);
+      const { client, requests } = createItemsMockClient(docs);
+      const relay = new OpenSearchRelay(client as unknown as Client);
+
+      const items = await relay.queryItems({ kinds: [1] }, { pageSize: 10 });
+
+      assert.equal(items.length, 25);
+      assert.deepEqual(
+        items.map((i) => [i.created_at, i.id]),
+        docs,
+      );
+      // 25 docs at 10 per page = 3 requests (last page is short).
+      assert.equal(requests.length, 3);
+      // Subsequent requests paginate with search_after from the previous tail.
+      assert.deepEqual(requests[1].search_after, docs[9]);
+      assert.deepEqual(requests[2].search_after, docs[19]);
+    });
+
+    it("stops at maxItems", async () => {
+      const docs = makeDataset(30);
+      const { client } = createItemsMockClient(docs);
+      const relay = new OpenSearchRelay(client as unknown as Client);
+
+      const items = await relay.queryItems(
+        { kinds: [1] },
+        { maxItems: 12, pageSize: 10 },
+      );
+
+      assert.equal(items.length, 12);
+      assert.deepEqual(
+        items.map((i) => [i.created_at, i.id]),
+        docs.slice(0, 12),
+      );
+    });
+
+    it("returns an empty array when nothing matches", async () => {
+      const { client, requests } = createItemsMockClient([]);
+      const relay = new OpenSearchRelay(client as unknown as Client);
+
+      const items = await relay.queryItems({ kinds: [1] });
+
+      assert.deepEqual(items, []);
+      assert.equal(requests.length, 1);
+    });
+
+    it("honors limit by returning the N newest items in ascending order", async () => {
+      const docs = makeDataset(30);
+      const { client, requests } = createItemsMockClient(docs);
+      const relay = new OpenSearchRelay(client as unknown as Client);
+
+      const items = await relay.queryItems(
+        { kinds: [1], limit: 12 },
+        { pageSize: 10 },
+      );
+
+      // The 12 newest docs, flipped back to ascending order.
+      assert.equal(items.length, 12);
+      assert.deepEqual(
+        items.map((i) => [i.created_at, i.id]),
+        docs.slice(-12),
+      );
+      // Limited queries iterate descending.
+      const sort = requests[0].sort as Array<Record<string, { order: string }>>;
+      assert.equal(sort[0].created_at.order, "desc");
+      // 12 items at 10 per page = 2 requests.
+      assert.equal(requests.length, 2);
+    });
+
+    it("returns no items when limit is 0", async () => {
+      const docs = makeDataset(5);
+      const { client, requests } = createItemsMockClient(docs);
+      const relay = new OpenSearchRelay(client as unknown as Client);
+
+      const items = await relay.queryItems({ kinds: [1], limit: 0 });
+
+      assert.deepEqual(items, []);
+      assert.equal(requests.length, 0);
+    });
+
+    it("excludes deleted/replaced docs and fetches only sync fields", async () => {
+      const { client, requests } = createItemsMockClient([]);
+      const relay = new OpenSearchRelay(client as unknown as Client);
+
+      await relay.queryItems({ kinds: [1] });
+
+      const body = requests[0];
+      assert.equal(body.size, 10_000);
+      // Only the sync fields are fetched.
+      assert.deepEqual(body._source, ["created_at", "id"]);
+
+      const query = body.query as {
+        bool: {
+          must: Array<Record<string, unknown>>;
+          must_not?: Array<Record<string, unknown>>;
+        };
+      };
+      assert.ok(
+        query.bool.must.some(
+          (clause) =>
+            (clause.term as { deleted?: boolean } | undefined)?.deleted ===
+            false,
+        ),
+      );
+      assert.ok(
+        query.bool.must_not?.some(
+          (clause) =>
+            (clause.term as { replaced?: boolean } | undefined)?.replaced ===
+            true,
+        ),
+      );
+    });
+  });
 });

@@ -25,6 +25,8 @@
 │   ├── analyze-pool.test.ts # Analysis pool tests
 │   ├── analyze-worker.ts   # Worker thread for event analysis
 │   ├── media.ts            # Media/video detection from imeta tags and URLs
+│   ├── negentropy.ts       # NIP-77 Negentropy protocol codec (set reconciliation)
+│   ├── negentropy.test.ts  # Negentropy tests
 │   ├── search-text.ts      # Shared buildSearchText for full-text search indexing
 │   ├── search-text.test.ts # Search text tests
 │   ├── autocomplete-text.ts      # Shared buildAutocompleteText for edge-ngram autocomplete indexing

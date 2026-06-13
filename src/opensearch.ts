@@ -148,6 +148,16 @@ interface BulkEntry {
 }
 
 /**
+ * A `(created_at, id)` record returned by {@link OpenSearchRelay.queryItems}
+ * for NIP-77 Negentropy set reconciliation.
+ */
+export interface SyncItem {
+  created_at: number;
+  /** Lowercase 64-char hex event ID. */
+  id: string;
+}
+
+/**
  * OpenSearch-backed Nostr relay implementation
  * Handles event storage and querying with full-text search support (NIP-50)
  */
@@ -2348,6 +2358,108 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     }
 
     return allEvents;
+  }
+
+  /**
+   * Fetch the `(created_at, id)` pairs of events matching a filter, sorted
+   * ascending by `created_at` with ties broken by `id` bytes ascending —
+   * exactly the record ordering required by NIP-77 Negentropy set
+   * reconciliation. (`id` is a keyword field holding lowercase hex, so its
+   * lexical order equals byte order.)
+   *
+   * Uses `search_after` pagination so result sets are not bounded by
+   * `index.max_result_window`.
+   *
+   * A NIP-01 `limit` on the filter bounds the set to the N *newest*
+   * matching events (matching strfry's NIP-77 semantics): pages are
+   * fetched descending and the result is reversed back to ascending.
+   * Without a `limit`, the full matching set is returned, bounded only by
+   * `opts.maxItems` (the relay layer enforces its own record cap and
+   * returns `NEG-ERR blocked:` when exceeded).
+   *
+   * Deleted, replaced, and expired documents are excluded, and
+   * auth-protected kinds are excluded from filters that don't explicitly
+   * request them — the same visibility rules as REQ queries.
+   */
+  async queryItems(
+    filter: NostrFilter,
+    opts?: { maxItems?: number; pageSize?: number; signal?: AbortSignal },
+  ): Promise<SyncItem[]> {
+    const limit = typeof filter.limit === "number" ? filter.limit : undefined;
+    const maxItems = Math.min(
+      opts?.maxItems ?? 1_000_000,
+      limit ?? Number.POSITIVE_INFINITY,
+    );
+    const pageSize = opts?.pageSize ?? 10_000;
+    // With a limit we want the newest N, so iterate descending and reverse
+    // at the end; otherwise iterate ascending directly.
+    const order = limit === undefined ? ("asc" as const) : ("desc" as const);
+    const query = this.buildQuery(filter);
+    const items: SyncItem[] = [];
+
+    opensearchQueriesCounter.inc({ type: "sync" });
+    const end = opensearchQueryDurationHistogram.startTimer({ type: "sync" });
+
+    try {
+      let searchAfter: [number, string] | undefined;
+
+      while (items.length < maxItems) {
+        if (opts?.signal?.aborted) break;
+
+        const size = Math.min(pageSize, maxItems - items.length);
+        const body: Record<string, unknown> = {
+          _source: ["created_at", "id"],
+          query,
+          sort: [{ created_at: { order } }, { id: { order } }],
+          size,
+          track_total_hits: false,
+        };
+        if (searchAfter) {
+          body.search_after = searchAfter;
+        }
+
+        const response = await this.client.search({
+          index: this.indexName,
+          body,
+        });
+
+        const hits = (
+          response.body as unknown as {
+            hits: {
+              hits: Array<{
+                _source?: { created_at: number; id: string };
+                sort?: [number, string];
+              }>;
+            };
+          }
+        ).hits.hits;
+
+        if (hits.length === 0) break;
+
+        for (const hit of hits) {
+          if (hit._source) {
+            items.push({
+              created_at: hit._source.created_at,
+              id: hit._source.id,
+            });
+          }
+        }
+
+        if (hits.length < size) break; // Last page.
+        searchAfter = hits[hits.length - 1].sort;
+        if (!searchAfter) break; // Defensive: cannot paginate without sort values.
+      }
+
+      end();
+      // Descending (limited) iteration must be flipped back to the
+      // ascending order Negentropy requires.
+      if (order === "desc") items.reverse();
+      return items;
+    } catch (error) {
+      end();
+      console.error("OpenSearch sync items query failed:", error);
+      throw error;
+    }
   }
 
   /**

@@ -13,9 +13,16 @@ import {
   relayConnectionsGauge,
   relayEventsCounter,
   relayMessagesCounter,
+  relayNegentropySessionsGauge,
   relayOverloadCounter,
   relayReqDurationHistogram,
 } from "./metrics.ts";
+import {
+  bytesToHex,
+  hexToBytes,
+  Negentropy,
+  NegentropyStorageVector,
+} from "./negentropy.ts";
 
 /**
  * Cached zod schemas. NSchema.event() and NSchema.filter() construct a fresh
@@ -98,6 +105,27 @@ export interface AnalyzableRelay extends NRelay {
   ): Promise<void>;
 }
 
+/**
+ * Optional storage capability required for NIP-77 Negentropy sync: fetch the
+ * `(created_at, id)` pairs of events matching a filter, sorted ascending by
+ * `created_at` with ties broken by `id` bytes ascending. A NIP-01 `limit`
+ * on the filter bounds the set to the N newest matching events (still
+ * returned in ascending order), matching strfry's NIP-77 semantics.
+ */
+export interface SyncableStorage {
+  queryItems(
+    filter: Filter,
+    opts?: { maxItems?: number; signal?: AbortSignal },
+  ): Promise<Array<{ created_at: number; id: string }>>;
+}
+
+/** Runtime check for the {@link SyncableStorage} capability. */
+function isSyncable(storage: unknown): storage is SyncableStorage {
+  return (
+    typeof (storage as { queryItems?: unknown })?.queryItems === "function"
+  );
+}
+
 /** Function that analyzes a Nostr event off the main thread (verify, detect language/sentiment). */
 export type AnalyzeFn = (
   event: NostrEvent,
@@ -132,6 +160,13 @@ export function clampUntil(filter: Filter, fuzz = 0): Filter {
 export interface Subscription {
   id: string;
   filters: Filter[];
+}
+
+/** A stateful NIP-77 Negentropy sync session (one per NEG-OPEN subscription). */
+interface NegentropySession {
+  neg: Negentropy;
+  /** `Date.now()` of the last NEG-OPEN/NEG-MSG activity, for idle timeout. */
+  lastActive: number;
 }
 
 export interface WebSocketData {
@@ -199,6 +234,37 @@ export class Relay {
   >();
 
   /**
+   * NIP-77 Negentropy sync sessions, keyed by connection then subscription
+   * ID. Each session holds a sealed in-memory vector of `(created_at, id)`
+   * records (~40 bytes per record), so the per-session record count is
+   * capped by {@link negentropyMaxRecords} and stale sessions are evicted
+   * by an idle sweep.
+   */
+  private negSessions = new Map<
+    ServerWebSocket<WebSocketData>,
+    Map<string, NegentropySession>
+  >();
+  /** Total active Negentropy sessions across all connections. */
+  private negSessionCount = 0;
+  /** Idle-sweep timer, running only while sessions exist. */
+  private negSweepTimer: ReturnType<typeof setInterval> | null = null;
+  /** Maximum records a single NEG-OPEN may materialize. */
+  private negentropyMaxRecords: number;
+
+  /** Maximum total Negentropy sessions across all connections. */
+  private static NEG_MAX_SESSIONS = 64;
+  /** Sessions idle longer than this are closed with `NEG-ERR closed:`. */
+  private static NEG_IDLE_TIMEOUT_MS = 5 * 60_000;
+  /** How often the idle sweep runs while sessions exist. */
+  private static NEG_SWEEP_INTERVAL_MS = 60_000;
+  /**
+   * Maximum size (bytes) of a binary Negentropy message produced by the
+   * relay. Hex encoding doubles this on the wire, keeping NEG-MSG frames
+   * well under the 4 MB default max_message_length.
+   */
+  private static NEG_FRAME_SIZE_LIMIT = 60_000;
+
+  /**
    * Chunk size for the REQ EOSE send loop. Yields the event loop every
    * this-many events so a large REQ (up to `max_limit` 5000) doesn't pin
    * the main thread for tens of milliseconds.
@@ -248,6 +314,12 @@ export class Relay {
        * ingestion. Matching is case-insensitive. Default: empty (none banned).
        */
       bannedHashtags?: Set<string>;
+      /**
+       * Maximum number of records a single NIP-77 NEG-OPEN may materialize.
+       * Larger queries are rejected with `NEG-ERR blocked:` (the cap is
+       * included as the message's 4th element per NIP-77). Default: 1_000_000.
+       */
+      negentropyMaxRecords?: number;
     },
   ) {
     this.storage = storage;
@@ -257,10 +329,11 @@ export class Relay {
     this.maxFilterValues = opts.maxFilterValues ?? 5000;
     this.maxInflightPerConn = opts.maxInflightPerConn ?? 32;
     this.bannedHashtags = opts.bannedHashtags ?? new Set();
+    this.negentropyMaxRecords = opts.negentropyMaxRecords ?? 1_000_000;
     this.relayInfo = {
       name: "Ditto Relay",
       description: "A Nostr relay backed by OpenSearch",
-      supported_nips: [1, 9, 11, 40, 42, 45, 50, 62, 70],
+      supported_nips: [1, 9, 11, 40, 42, 45, 50, 62, 70, 77],
       software: "https://gitlab.com/soapbox-pub/ditto-relay",
       version: "0.1.0",
       limitation: {
@@ -1251,6 +1324,332 @@ export class Relay {
     this.removeFromIndex(ws, subscriptionId);
   }
 
+  // -------------------------------------------------------------------------
+  // NIP-77 Negentropy sync
+  // -------------------------------------------------------------------------
+
+  /**
+   * Send a NEG-ERR. Per NIP-77 the reason starts with a machine-readable
+   * prefix (`blocked:` / `closed:` / NIP-01 prefixes); for `blocked:` reasons
+   * the relay's record cap may be included as the 4th element.
+   */
+  private sendNegErr(
+    ws: ServerWebSocket<WebSocketData>,
+    subscriptionId: string,
+    reason: string,
+    maxRecords?: number,
+  ): void {
+    const message: unknown[] = ["NEG-ERR", subscriptionId, reason];
+    if (maxRecords !== undefined) {
+      message.push(maxRecords);
+    }
+    this.sendMessage(ws, message);
+  }
+
+  /** Store a Negentropy session, replacing any existing one for the same subscription ID. */
+  private setNegSession(
+    ws: ServerWebSocket<WebSocketData>,
+    subscriptionId: string,
+    session: NegentropySession,
+  ): void {
+    let sessions = this.negSessions.get(ws);
+    if (!sessions) {
+      sessions = new Map();
+      this.negSessions.set(ws, sessions);
+    }
+    if (!sessions.has(subscriptionId)) {
+      this.negSessionCount++;
+    }
+    sessions.set(subscriptionId, session);
+    relayNegentropySessionsGauge.set(this.negSessionCount);
+    this.ensureNegSweep();
+  }
+
+  /** Delete a single Negentropy session. Returns whether it existed. */
+  private deleteNegSession(
+    ws: ServerWebSocket<WebSocketData>,
+    subscriptionId: string,
+  ): boolean {
+    const sessions = this.negSessions.get(ws);
+    if (!sessions?.delete(subscriptionId)) return false;
+    this.negSessionCount--;
+    if (sessions.size === 0) {
+      this.negSessions.delete(ws);
+    }
+    relayNegentropySessionsGauge.set(this.negSessionCount);
+    this.stopNegSweepIfIdle();
+    return true;
+  }
+
+  /** Delete all Negentropy sessions for a connection (on close). */
+  private clearNegSessions(ws: ServerWebSocket<WebSocketData>): void {
+    const sessions = this.negSessions.get(ws);
+    if (!sessions) return;
+    this.negSessionCount -= sessions.size;
+    this.negSessions.delete(ws);
+    relayNegentropySessionsGauge.set(this.negSessionCount);
+    this.stopNegSweepIfIdle();
+  }
+
+  /** Start the idle sweep while sessions exist. The timer is unref'd so it
+   *  never keeps the process alive on its own. */
+  private ensureNegSweep(): void {
+    if (this.negSweepTimer) return;
+    this.negSweepTimer = setInterval(
+      () => this.sweepNegSessions(),
+      Relay.NEG_SWEEP_INTERVAL_MS,
+    );
+    (this.negSweepTimer as { unref?: () => void }).unref?.();
+  }
+
+  private stopNegSweepIfIdle(): void {
+    if (this.negSessionCount === 0 && this.negSweepTimer) {
+      clearInterval(this.negSweepTimer);
+      this.negSweepTimer = null;
+    }
+  }
+
+  /** Close sessions that have been idle longer than the timeout. */
+  private sweepNegSessions(): void {
+    const cutoff = Date.now() - Relay.NEG_IDLE_TIMEOUT_MS;
+    for (const [ws, sessions] of this.negSessions) {
+      for (const [subscriptionId, session] of sessions) {
+        if (session.lastActive < cutoff) {
+          this.deleteNegSession(ws, subscriptionId);
+          this.sendNegErr(ws, subscriptionId, "closed: sync session timed out");
+        }
+      }
+    }
+  }
+
+  /**
+   * Handle a NEG-OPEN message (NIP-77): materialize the `(created_at, id)`
+   * records matching the filter into a sealed in-memory vector, run the
+   * first reconciliation round against the client's initial message, and
+   * store the session for subsequent NEG-MSG rounds.
+   */
+  async handleNegOpen(
+    ws: ServerWebSocket<WebSocketData>,
+    subscriptionId: string,
+    rawFilter: unknown,
+    initialMessageHex: unknown,
+  ): Promise<void> {
+    const maxSubIdLength = this.relayInfo.limitation?.max_subid_length || 100;
+
+    if (
+      typeof subscriptionId !== "string" ||
+      !subscriptionId ||
+      subscriptionId.length > maxSubIdLength
+    ) {
+      this.sendNegErr(
+        ws,
+        typeof subscriptionId === "string" ? subscriptionId : "",
+        "invalid: subscription ID too long or empty",
+      );
+      return;
+    }
+
+    // Validate the filter exactly like REQ does.
+    const parsed = FILTER_SCHEMA.safeParse(rawFilter);
+    if (!parsed.success) {
+      this.sendNegErr(
+        ws,
+        subscriptionId,
+        "invalid: filter failed schema validation",
+      );
+      return;
+    }
+    let filter = parsed.data as Filter;
+
+    const over = this.exceedsFilterValueCap(filter);
+    if (over !== null) {
+      this.sendNegErr(
+        ws,
+        subscriptionId,
+        `invalid: filter field "${over}" exceeds max_filter_values (${this.maxFilterValues})`,
+      );
+      return;
+    }
+
+    // Guard auth-protected kinds with the same rules as REQ/COUNT.
+    const authCheck = this.checkAuthKinds(ws, subscriptionId, [filter]);
+    if (!authCheck.ok) {
+      this.sendNegErr(ws, subscriptionId, authCheck.error.message);
+      return;
+    }
+    filter = authCheck.filters[0];
+
+    let initialMessage: Uint8Array;
+    try {
+      if (typeof initialMessageHex !== "string") throw new Error("not hex");
+      initialMessage = hexToBytes(initialMessageHex);
+    } catch {
+      this.sendNegErr(
+        ws,
+        subscriptionId,
+        "invalid: initial message is not valid hex",
+      );
+      return;
+    }
+
+    if (!isSyncable(this.storage)) {
+      this.sendNegErr(
+        ws,
+        subscriptionId,
+        "blocked: sync is not supported by this relay",
+      );
+      return;
+    }
+
+    // Session caps. Re-opening an existing subscription ID replaces it
+    // (NIP-77), so it doesn't count against the caps.
+    const connSessions = this.negSessions.get(ws);
+    const replacing = connSessions?.has(subscriptionId) ?? false;
+    if (!replacing) {
+      const maxSubscriptions =
+        this.relayInfo.limitation?.max_subscriptions || 20;
+      if ((connSessions?.size ?? 0) >= maxSubscriptions) {
+        this.sendNegErr(
+          ws,
+          subscriptionId,
+          "blocked: too many concurrent sync subscriptions",
+        );
+        return;
+      }
+      if (this.negSessionCount >= Relay.NEG_MAX_SESSIONS) {
+        this.sendNegErr(
+          ws,
+          subscriptionId,
+          "blocked: relay sync capacity reached, try again later",
+        );
+        return;
+      }
+    }
+
+    // Hide future-dated events (same as REQ). A filter `limit` bounds the
+    // sync set to the N newest matching events (matching strfry's NIP-77
+    // semantics); without one, the sync covers the full matching set,
+    // bounded by negentropyMaxRecords.
+    const syncFilter = clampUntil(filter);
+    const limited =
+      typeof syncFilter.limit === "number" &&
+      syncFilter.limit <= this.negentropyMaxRecords;
+
+    try {
+      // Cheap pre-check via COUNT so oversized queries are rejected before
+      // streaming any records. Skipped when `limit` already bounds the set
+      // below the record cap.
+      if (!limited && this.storage.count) {
+        const { count } = await this.storage.count([syncFilter]);
+        if (count > this.negentropyMaxRecords) {
+          this.sendNegErr(
+            ws,
+            subscriptionId,
+            `blocked: query matches too many records (${count} > ${this.negentropyMaxRecords})`,
+            this.negentropyMaxRecords,
+          );
+          return;
+        }
+      }
+
+      const items = await this.storage.queryItems(syncFilter, {
+        maxItems: this.negentropyMaxRecords + 1,
+      });
+      // COUNT can be approximate — re-check the real size.
+      if (items.length > this.negentropyMaxRecords) {
+        this.sendNegErr(
+          ws,
+          subscriptionId,
+          `blocked: query matches too many records (> ${this.negentropyMaxRecords})`,
+          this.negentropyMaxRecords,
+        );
+        return;
+      }
+
+      const vector = new NegentropyStorageVector();
+      for (const item of items) {
+        vector.insertHex(item.created_at, item.id);
+      }
+      vector.seal();
+
+      const neg = new Negentropy(vector, Relay.NEG_FRAME_SIZE_LIMIT);
+
+      let response: Uint8Array | null;
+      try {
+        ({ message: response } = neg.reconcile(initialMessage));
+      } catch (error) {
+        this.sendNegErr(
+          ws,
+          subscriptionId,
+          `invalid: ${error instanceof Error ? error.message : String(error)}`,
+        );
+        return;
+      }
+
+      // The server role always produces a message; null is initiator-only.
+      if (response === null) {
+        this.sendNegErr(ws, subscriptionId, "error: reconciliation failed");
+        return;
+      }
+
+      this.setNegSession(ws, subscriptionId, {
+        neg,
+        lastActive: Date.now(),
+      });
+
+      this.sendMessage(ws, ["NEG-MSG", subscriptionId, bytesToHex(response)]);
+    } catch (error) {
+      console.error("Error handling NEG-OPEN:", error);
+      this.deleteNegSession(ws, subscriptionId);
+      const message = error instanceof Error ? error.message : String(error);
+      this.sendNegErr(ws, subscriptionId, `error: ${message}`);
+    }
+  }
+
+  /** Handle a NEG-MSG reconciliation round against an open session. */
+  handleNegMsg(
+    ws: ServerWebSocket<WebSocketData>,
+    subscriptionId: string,
+    messageHex: unknown,
+  ): void {
+    const session = this.negSessions
+      .get(ws)
+      ?.get(typeof subscriptionId === "string" ? subscriptionId : "");
+    if (!session || typeof subscriptionId !== "string") {
+      this.sendNegErr(
+        ws,
+        typeof subscriptionId === "string" ? subscriptionId : "",
+        "closed: unknown subscription ID",
+      );
+      return;
+    }
+
+    try {
+      if (typeof messageHex !== "string") throw new Error("not hex");
+      const message = hexToBytes(messageHex);
+      const { message: response } = session.neg.reconcile(message);
+      if (response === null) {
+        throw new Error("reconciliation produced no response");
+      }
+      session.lastActive = Date.now();
+      this.sendMessage(ws, ["NEG-MSG", subscriptionId, bytesToHex(response)]);
+    } catch (error) {
+      // Per NIP-77, the subscription is considered closed after a NEG-ERR.
+      this.deleteNegSession(ws, subscriptionId);
+      const message = error instanceof Error ? error.message : String(error);
+      this.sendNegErr(ws, subscriptionId, `invalid: ${message}`);
+    }
+  }
+
+  /** Handle NEG-CLOSE: release the session's resources. */
+  handleNegClose(
+    ws: ServerWebSocket<WebSocketData>,
+    subscriptionId: string,
+  ): void {
+    if (typeof subscriptionId !== "string") return;
+    this.deleteNegSession(ws, subscriptionId);
+  }
+
   /** Generate a random challenge string for NIP-42 AUTH. */
   private generateChallenge(): string {
     return randomBytes(32).toString("hex");
@@ -1578,6 +1977,47 @@ export class Relay {
           this.handleClose(ws, params[0] as string);
           break;
 
+        case "NEG-OPEN":
+          relayMessagesCounter.inc({ verb: "NEG-OPEN" });
+          if (params.length !== 3) {
+            this.sendMessage(ws, [
+              "NOTICE",
+              "invalid: NEG-OPEN message must have subscription ID, filter, and initial message",
+            ]);
+            return;
+          }
+          await this.handleNegOpen(
+            ws,
+            params[0] as string,
+            params[1],
+            params[2],
+          );
+          break;
+
+        case "NEG-MSG":
+          relayMessagesCounter.inc({ verb: "NEG-MSG" });
+          if (params.length !== 2) {
+            this.sendMessage(ws, [
+              "NOTICE",
+              "invalid: NEG-MSG message must have subscription ID and message",
+            ]);
+            return;
+          }
+          this.handleNegMsg(ws, params[0] as string, params[1]);
+          break;
+
+        case "NEG-CLOSE":
+          relayMessagesCounter.inc({ verb: "NEG-CLOSE" });
+          if (params.length !== 1) {
+            this.sendMessage(ws, [
+              "NOTICE",
+              "invalid: NEG-CLOSE message must have exactly 1 parameter",
+            ]);
+            return;
+          }
+          this.handleNegClose(ws, params[0] as string);
+          break;
+
         default:
           this.sendMessage(ws, [
             "NOTICE",
@@ -1619,6 +2059,7 @@ export class Relay {
     this.connections.delete(ws);
     relayConnectionsGauge.set(this.connections.size);
     this.removeFromIndex(ws);
+    this.clearNegSessions(ws);
     ws.data?.subscriptions.clear();
   }
 }

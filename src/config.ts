@@ -95,6 +95,13 @@ export class Config {
    * Comma-separated, case-insensitive. Default: empty (no hashtags banned).
    */
   readonly bannedHashtags: Set<string>;
+  /**
+   * Maximum number of records a single NIP-77 NEG-OPEN sync may cover.
+   * Queries matching more records are rejected with `NEG-ERR blocked:`.
+   * Each record costs ~40 bytes of session memory while the sync is open.
+   * Default: 1_000_000.
+   */
+  readonly negentropyMaxRecords: number;
   readonly nostrSigner: NostrSigner;
 
   constructor(env: { get(key: string): string | undefined }) {
@@ -315,6 +322,20 @@ export class Config {
         .map((s) => s.trim().toLowerCase())
         .filter((s) => s.length > 0);
       this.bannedHashtags = new Set(tags);
+    }
+
+    // negentropyMaxRecords
+    const negentropyMaxRecordsValue = env.get("RELAY_NEGENTROPY_MAX_RECORDS");
+    if (!negentropyMaxRecordsValue) {
+      this.negentropyMaxRecords = 1_000_000;
+    } else {
+      const n = parseInt(negentropyMaxRecordsValue, 10);
+      if (Number.isNaN(n) || n <= 0) {
+        throw new Error(
+          "RELAY_NEGENTROPY_MAX_RECORDS must be a positive integer.",
+        );
+      }
+      this.negentropyMaxRecords = n;
     }
 
     // nostrSigner

@@ -168,6 +168,9 @@ This relay implements NIP-01 (Basic protocol flow) via WebSocket at `/`.
 - `["CLOSE", <subscription_id>]` - Close a subscription
 - `["COUNT", <subscription_id>, <filter>, ...]` - Count matching events (NIP-45)
 - `["AUTH", <event>]` - Authenticate with the relay (NIP-42)
+- `["NEG-OPEN", <subscription_id>, <filter>, <hex_message>]` - Start a Negentropy sync (NIP-77)
+- `["NEG-MSG", <subscription_id>, <hex_message>]` - Continue a Negentropy sync (NIP-77)
+- `["NEG-CLOSE", <subscription_id>]` - End a Negentropy sync (NIP-77)
 
 ### Relay-to-Client Messages
 
@@ -178,6 +181,8 @@ This relay implements NIP-01 (Basic protocol flow) via WebSocket at `/`.
 - `["NOTICE", <message>]` - Human-readable notice
 - `["COUNT", <subscription_id>, <count>]` - Event count response (NIP-45)
 - `["AUTH", <challenge>]` - Authentication challenge (NIP-42)
+- `["NEG-MSG", <subscription_id>, <hex_message>]` - Negentropy sync response (NIP-77)
+- `["NEG-ERR", <subscription_id>, <reason>]` - Negentropy sync error (NIP-77)
 
 ### NIP-11 Relay Information
 
@@ -239,6 +244,7 @@ The relay is designed to scale horizontally:
 - [x] NIP-45: Event counting
 - [x] NIP-50: Full-text search (with extensions)
 - [x] NIP-70: Protected events
+- [x] NIP-77: Negentropy syncing
 
 ## License
 

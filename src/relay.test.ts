@@ -1,10 +1,17 @@
 import { strict as assert } from "node:assert";
 import { Buffer } from "node:buffer";
+import { createHash } from "node:crypto";
 import { afterEach, beforeEach, describe, it } from "node:test";
 import type { ServerWebSocket } from "bun";
 import type { Filter, NostrEvent } from "nostr-tools";
 import { finalizeEvent, generateSecretKey } from "nostr-tools";
 import { AnalyzePoolOverloaded, StorageOverloaded } from "./errors.ts";
+import {
+  bytesToHex,
+  hexToBytes,
+  Negentropy,
+  NegentropyStorageVector,
+} from "./negentropy.ts";
 import {
   type AnalyzableRelay,
   clampUntil,
@@ -64,7 +71,10 @@ describe("Relay", () => {
       assert.equal(info.name, "Ditto Relay");
       assert.equal(info.software, "https://gitlab.com/soapbox-pub/ditto-relay");
       assert.equal(info.version, "0.1.0");
-      assert.deepEqual(info.supported_nips, [1, 9, 11, 40, 42, 45, 50, 62, 70]);
+      assert.deepEqual(
+        info.supported_nips,
+        [1, 9, 11, 40, 42, 45, 50, 62, 70, 77],
+      );
     });
 
     it("should allow customizing relay info", () => {
@@ -2849,6 +2859,408 @@ describe("Relay", () => {
       assert.ok(
         (okMsg[3] as string).includes("ephemeral event is in the future"),
       );
+    });
+  });
+
+  describe("NIP-77 Negentropy sync", () => {
+    /** Deterministic 64-char hex ID from a seed. */
+    const syncId = (seed: string): string =>
+      createHash("sha256").update(seed).digest("hex");
+
+    /** A storage record for the mock syncable backend. */
+    interface MockItem {
+      created_at: number;
+      id: string;
+    }
+
+    /** Attach queryItems/count to the mock storage. */
+    const makeSyncable = (items: MockItem[]): { queryItemsCalls: Filter[] } => {
+      const calls: Filter[] = [];
+      const storage = mockStorage as AnalyzableRelay & {
+        queryItems?: (
+          filter: Filter,
+          opts?: { maxItems?: number },
+        ) => Promise<MockItem[]>;
+      };
+      storage.queryItems = async (filter, opts) => {
+        calls.push(filter);
+        const sorted = [...items].sort((a, b) =>
+          a.created_at !== b.created_at
+            ? a.created_at - b.created_at
+            : a.id < b.id
+              ? -1
+              : 1,
+        );
+        // A limit selects the N newest (still returned ascending),
+        // mirroring OpenSearchRelay.queryItems.
+        const limited =
+          typeof filter.limit === "number"
+            ? sorted.slice(Math.max(0, sorted.length - filter.limit))
+            : sorted;
+        return limited.slice(0, opts?.maxItems ?? limited.length);
+      };
+      storage.count = async () => ({ count: items.length });
+      return { queryItemsCalls: calls };
+    };
+
+    /** Build an initiator over a set of mock items. */
+    const makeInitiator = (items: MockItem[]): Negentropy => {
+      const vector = new NegentropyStorageVector();
+      for (const item of items) {
+        vector.insertHex(item.created_at, item.id);
+      }
+      vector.seal();
+      return new Negentropy(vector);
+    };
+
+    /** Last message sent to the mock socket. */
+    const lastMessage = (): unknown[] =>
+      sentMessages[sentMessages.length - 1] as unknown[];
+
+    it("should complete a full sync round-trip over NEG-OPEN/NEG-MSG", async () => {
+      const shared = Array.from({ length: 100 }, (_, i) => ({
+        created_at: 1000 + i,
+        id: syncId(`shared-${i}`),
+      }));
+      const serverOnly = Array.from({ length: 10 }, (_, i) => ({
+        created_at: 2000 + i,
+        id: syncId(`server-${i}`),
+      }));
+      const clientOnly = Array.from({ length: 10 }, (_, i) => ({
+        created_at: 3000 + i,
+        id: syncId(`client-${i}`),
+      }));
+
+      makeSyncable([...shared, ...serverOnly]);
+      const client = makeInitiator([...shared, ...clientOnly]);
+
+      await relay.handleMessage(
+        mockWs,
+        JSON.stringify([
+          "NEG-OPEN",
+          "neg1",
+          { kinds: [1] },
+          bytesToHex(client.initiate()),
+        ]),
+      );
+
+      let response = lastMessage();
+      assert.equal(response[0], "NEG-MSG");
+      assert.equal(response[1], "neg1");
+
+      let haveIds: string[] = [];
+      let needIds: string[] = [];
+      let rounds = 0;
+      while (true) {
+        rounds++;
+        assert.ok(rounds < 50, "sync did not converge");
+        const result = client.reconcile(hexToBytes(response[2] as string));
+        haveIds = result.haveIds;
+        needIds = result.needIds;
+        if (result.message === null) break;
+        await relay.handleMessage(
+          mockWs,
+          JSON.stringify(["NEG-MSG", "neg1", bytesToHex(result.message)]),
+        );
+        response = lastMessage();
+        assert.equal(response[0], "NEG-MSG");
+      }
+
+      assert.deepEqual([...haveIds].sort(), clientOnly.map((i) => i.id).sort());
+      assert.deepEqual([...needIds].sort(), serverOnly.map((i) => i.id).sort());
+    });
+
+    it("should pass limit through and clamp until on the sync filter", async () => {
+      const { queryItemsCalls } = makeSyncable([]);
+      const client = makeInitiator([]);
+
+      await relay.handleMessage(
+        mockWs,
+        JSON.stringify([
+          "NEG-OPEN",
+          "neg1",
+          { kinds: [1], limit: 10 },
+          bytesToHex(client.initiate()),
+        ]),
+      );
+
+      assert.equal(queryItemsCalls.length, 1);
+      assert.equal(queryItemsCalls[0].limit, 10);
+      assert.ok(typeof queryItemsCalls[0].until === "number");
+    });
+
+    it("should sync only the N newest events when the filter has a limit", async () => {
+      const serverItems = Array.from({ length: 50 }, (_, i) => ({
+        created_at: 1000 + i,
+        id: syncId(`limited-${i}`),
+      }));
+      makeSyncable(serverItems);
+      // The count pre-check must be skipped when limit bounds the set:
+      // a huge total count must not block the sync.
+      mockStorage.count = async () => ({ count: 5_000_000 });
+
+      const client = makeInitiator([]);
+      await relay.handleMessage(
+        mockWs,
+        JSON.stringify([
+          "NEG-OPEN",
+          "neg1",
+          { kinds: [1], limit: 10 },
+          bytesToHex(client.initiate()),
+        ]),
+      );
+
+      const response = lastMessage();
+      assert.equal(response[0], "NEG-MSG");
+
+      const result = client.reconcile(hexToBytes(response[2] as string));
+      assert.equal(result.message, null);
+      assert.deepEqual(
+        [...result.needIds].sort(),
+        serverItems
+          .slice(-10)
+          .map((i) => i.id)
+          .sort(),
+      );
+    });
+
+    it("should reply NEG-ERR blocked when storage is not syncable", async () => {
+      const client = makeInitiator([]);
+      await relay.handleMessage(
+        mockWs,
+        JSON.stringify([
+          "NEG-OPEN",
+          "neg1",
+          { kinds: [1] },
+          bytesToHex(client.initiate()),
+        ]),
+      );
+
+      const msg = lastMessage();
+      assert.equal(msg[0], "NEG-ERR");
+      assert.equal(msg[1], "neg1");
+      assert.ok((msg[2] as string).startsWith("blocked:"));
+    });
+
+    it("should reply NEG-ERR invalid on a malformed filter", async () => {
+      makeSyncable([]);
+      await relay.handleMessage(
+        mockWs,
+        JSON.stringify(["NEG-OPEN", "neg1", { kinds: "bogus" }, "61"]),
+      );
+
+      const msg = lastMessage();
+      assert.equal(msg[0], "NEG-ERR");
+      assert.ok((msg[2] as string).startsWith("invalid:"));
+    });
+
+    it("should reply NEG-ERR invalid on non-hex initial message", async () => {
+      makeSyncable([]);
+      await relay.handleMessage(
+        mockWs,
+        JSON.stringify(["NEG-OPEN", "neg1", { kinds: [1] }, "zznothex"]),
+      );
+
+      const msg = lastMessage();
+      assert.equal(msg[0], "NEG-ERR");
+      assert.ok((msg[2] as string).startsWith("invalid:"));
+    });
+
+    it("should reply NEG-ERR blocked with the cap when the query is too big", async () => {
+      makeSyncable([]);
+      mockStorage.count = async () => ({ count: 50 });
+
+      const cappedRelay = new Relay(mockStorage, {
+        relayUrl: "wss://relay.test/",
+        negentropyMaxRecords: 10,
+      });
+      const client = makeInitiator([]);
+
+      await cappedRelay.handleMessage(
+        mockWs,
+        JSON.stringify([
+          "NEG-OPEN",
+          "neg1",
+          { kinds: [1] },
+          bytesToHex(client.initiate()),
+        ]),
+      );
+
+      const msg = lastMessage();
+      assert.equal(msg[0], "NEG-ERR");
+      assert.ok((msg[2] as string).startsWith("blocked:"));
+      assert.equal(msg[3], 10);
+    });
+
+    it("should reply NEG-ERR closed for NEG-MSG on an unknown subscription", async () => {
+      await relay.handleMessage(
+        mockWs,
+        JSON.stringify(["NEG-MSG", "nope", "61"]),
+      );
+
+      const msg = lastMessage();
+      assert.equal(msg[0], "NEG-ERR");
+      assert.equal(msg[1], "nope");
+      assert.ok((msg[2] as string).startsWith("closed:"));
+    });
+
+    it("should release the session on NEG-CLOSE", async () => {
+      makeSyncable([{ created_at: 1000, id: syncId("a") }]);
+      const client = makeInitiator([]);
+
+      await relay.handleMessage(
+        mockWs,
+        JSON.stringify([
+          "NEG-OPEN",
+          "neg1",
+          { kinds: [1] },
+          bytesToHex(client.initiate()),
+        ]),
+      );
+      assert.equal(lastMessage()[0], "NEG-MSG");
+
+      await relay.handleMessage(mockWs, JSON.stringify(["NEG-CLOSE", "neg1"]));
+      await relay.handleMessage(
+        mockWs,
+        JSON.stringify(["NEG-MSG", "neg1", "61"]),
+      );
+
+      const msg = lastMessage();
+      assert.equal(msg[0], "NEG-ERR");
+      assert.ok((msg[2] as string).startsWith("closed:"));
+    });
+
+    it("should release sessions when the connection closes", async () => {
+      makeSyncable([{ created_at: 1000, id: syncId("a") }]);
+      const client = makeInitiator([]);
+
+      await relay.handleMessage(
+        mockWs,
+        JSON.stringify([
+          "NEG-OPEN",
+          "neg1",
+          { kinds: [1] },
+          bytesToHex(client.initiate()),
+        ]),
+      );
+      assert.equal(lastMessage()[0], "NEG-MSG");
+
+      relay.handleCloseConnection(mockWs);
+
+      await relay.handleMessage(
+        mockWs,
+        JSON.stringify(["NEG-MSG", "neg1", "61"]),
+      );
+      const msg = lastMessage();
+      assert.equal(msg[0], "NEG-ERR");
+      assert.ok((msg[2] as string).startsWith("closed:"));
+    });
+
+    it("should replace an existing session when NEG-OPEN reuses the subscription ID", async () => {
+      makeSyncable([{ created_at: 1000, id: syncId("a") }]);
+
+      for (let i = 0; i < 2; i++) {
+        const client = makeInitiator([]);
+        await relay.handleMessage(
+          mockWs,
+          JSON.stringify([
+            "NEG-OPEN",
+            "neg1",
+            { kinds: [1] },
+            bytesToHex(client.initiate()),
+          ]),
+        );
+        assert.equal(lastMessage()[0], "NEG-MSG");
+      }
+    });
+
+    it("should reject sync of auth-protected kinds without authentication", async () => {
+      makeSyncable([]);
+      const authRelay = new Relay(mockStorage, {
+        relayUrl: "wss://relay.test/",
+        authKinds: new Set([4]),
+      });
+      const client = makeInitiator([]);
+
+      await authRelay.handleMessage(
+        mockWs,
+        JSON.stringify([
+          "NEG-OPEN",
+          "neg1",
+          { kinds: [4] },
+          bytesToHex(client.initiate()),
+        ]),
+      );
+
+      const msg = lastMessage();
+      assert.equal(msg[0], "NEG-ERR");
+      assert.ok((msg[2] as string).startsWith("auth-required:"));
+    });
+
+    it("should enforce the per-connection sync session cap", async () => {
+      makeSyncable([]);
+
+      for (let i = 0; i < 20; i++) {
+        const client = makeInitiator([]);
+        await relay.handleMessage(
+          mockWs,
+          JSON.stringify([
+            "NEG-OPEN",
+            `neg${i}`,
+            { kinds: [1] },
+            bytesToHex(client.initiate()),
+          ]),
+        );
+        assert.equal(lastMessage()[0], "NEG-MSG");
+      }
+
+      const client = makeInitiator([]);
+      await relay.handleMessage(
+        mockWs,
+        JSON.stringify([
+          "NEG-OPEN",
+          "neg20",
+          { kinds: [1] },
+          bytesToHex(client.initiate()),
+        ]),
+      );
+
+      const msg = lastMessage();
+      assert.equal(msg[0], "NEG-ERR");
+      assert.ok((msg[2] as string).startsWith("blocked:"));
+    });
+
+    it("should reply NEG-ERR and drop the session on a malformed NEG-MSG", async () => {
+      makeSyncable([{ created_at: 1000, id: syncId("a") }]);
+      const client = makeInitiator([]);
+
+      await relay.handleMessage(
+        mockWs,
+        JSON.stringify([
+          "NEG-OPEN",
+          "neg1",
+          { kinds: [1] },
+          bytesToHex(client.initiate()),
+        ]),
+      );
+      assert.equal(lastMessage()[0], "NEG-MSG");
+
+      await relay.handleMessage(
+        mockWs,
+        JSON.stringify(["NEG-MSG", "neg1", "nothex"]),
+      );
+      let msg = lastMessage();
+      assert.equal(msg[0], "NEG-ERR");
+      assert.ok((msg[2] as string).startsWith("invalid:"));
+
+      // Session is gone now.
+      await relay.handleMessage(
+        mockWs,
+        JSON.stringify(["NEG-MSG", "neg1", "61"]),
+      );
+      msg = lastMessage();
+      assert.equal(msg[0], "NEG-ERR");
+      assert.ok((msg[2] as string).startsWith("closed:"));
     });
   });
 });

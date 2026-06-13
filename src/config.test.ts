@@ -236,7 +236,10 @@ describe("Config", () => {
       const config = new Config(
         baseEnv([["BANNED_HASHTAGS", "spam,nsfw,scam"]]),
       );
-      assert.deepEqual(config.bannedHashtags, new Set(["spam", "nsfw", "scam"]));
+      assert.deepEqual(
+        config.bannedHashtags,
+        new Set(["spam", "nsfw", "scam"]),
+      );
     });
 
     it("should lowercase hashtags", () => {
@@ -499,6 +502,41 @@ describe("Config", () => {
       assert.throws(
         () => new Config(baseEnv([["RELAY_MAX_INFLIGHT_PER_CONN", "lots"]])),
         /RELAY_MAX_INFLIGHT_PER_CONN/,
+      );
+    });
+  });
+
+  describe("negentropyMaxRecords", () => {
+    it("should default to 1000000", () => {
+      const config = new Config(baseEnv());
+      assert.equal(config.negentropyMaxRecords, 1_000_000);
+    });
+
+    it("should parse a positive integer", () => {
+      const config = new Config(
+        baseEnv([["RELAY_NEGENTROPY_MAX_RECORDS", "50000"]]),
+      );
+      assert.equal(config.negentropyMaxRecords, 50_000);
+    });
+
+    it("should throw when zero", () => {
+      assert.throws(
+        () => new Config(baseEnv([["RELAY_NEGENTROPY_MAX_RECORDS", "0"]])),
+        /RELAY_NEGENTROPY_MAX_RECORDS/,
+      );
+    });
+
+    it("should throw when negative", () => {
+      assert.throws(
+        () => new Config(baseEnv([["RELAY_NEGENTROPY_MAX_RECORDS", "-1"]])),
+        /RELAY_NEGENTROPY_MAX_RECORDS/,
+      );
+    });
+
+    it("should throw when not a number", () => {
+      assert.throws(
+        () => new Config(baseEnv([["RELAY_NEGENTROPY_MAX_RECORDS", "lots"]])),
+        /RELAY_NEGENTROPY_MAX_RECORDS/,
       );
     });
   });
