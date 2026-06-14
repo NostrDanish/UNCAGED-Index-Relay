@@ -6510,6 +6510,260 @@ describe("OpenSearchRelay", () => {
     });
   });
 
+  describe("NIP-50 tag existence filter (tag:/-tag:)", () => {
+    // Mock client that interprets `exists` clauses on tags_map.* fields by
+    // inspecting the stored document's tags_map. Mirrors how OpenSearch's
+    // `_field_names`-backed exists query behaves: a field "exists" when the
+    // tags_map has a non-empty array for that tag name.
+    const createTagExistsMockClient = () => {
+      const documents = new Map<string, unknown>();
+
+      const collectExistsFields = (
+        clauses: Array<Record<string, unknown>> | undefined,
+      ): string[] => {
+        const fields: string[] = [];
+        for (const clause of clauses || []) {
+          const field = (clause.exists as Record<string, unknown>)?.field as
+            | string
+            | undefined;
+          if (field?.startsWith("tags_map.")) {
+            fields.push(field.slice("tags_map.".length));
+          }
+        }
+        return fields;
+      };
+
+      const hasTag = (
+        doc: { tags_map?: Record<string, string[]> },
+        name: string,
+      ): boolean => {
+        const values = doc.tags_map?.[name];
+        return Array.isArray(values) && values.length > 0;
+      };
+
+      return {
+        documents,
+        client: {
+          search: async ({ body }: { body: Record<string, unknown> }) => {
+            const results: unknown[] = [];
+            const queryBool = (body.query as Record<string, unknown>)
+              ?.bool as Record<string, unknown>;
+            const queryMust = queryBool?.must as
+              | Array<Record<string, unknown>>
+              | undefined;
+            const queryMustNot = queryBool?.must_not as
+              | Array<Record<string, unknown>>
+              | undefined;
+
+            const requiredTags = collectExistsFields(queryMust);
+            const excludedTags = collectExistsFields(queryMustNot);
+
+            for (const [_id, doc] of documents.entries()) {
+              const docTyped = doc as NostrEvent & {
+                deleted?: boolean;
+                tags_map?: Record<string, string[]>;
+              };
+
+              if (docTyped.deleted) continue;
+
+              // tag:<name> — must have the tag
+              if (requiredTags.some((name) => !hasTag(docTyped, name))) {
+                continue;
+              }
+              // -tag:<name> — must not have the tag
+              if (excludedTags.some((name) => hasTag(docTyped, name))) {
+                continue;
+              }
+
+              results.push({ _source: doc });
+            }
+
+            return { body: { hits: { hits: results } } };
+          },
+          bulk: async ({ body }: { body: unknown[] }) => {
+            const items: Array<Record<string, unknown>> = [];
+            for (let i = 0; i < body.length; i += 2) {
+              const action = body[i] as {
+                index?: { _id: string };
+                update?: { _id: string };
+              };
+              const payload = body[i + 1] as Record<string, unknown>;
+
+              if (action.index) {
+                documents.set(action.index._id, payload);
+                items.push({ index: {} });
+              } else if (action.update) {
+                if (payload.upsert) {
+                  if (!documents.has(action.update._id)) {
+                    documents.set(action.update._id, payload.upsert);
+                  }
+                }
+                items.push({ update: {} });
+              }
+            }
+            return { body: { errors: false, items } };
+          },
+          mget: async ({ body }: { body: { ids: string[] } }) => {
+            const docs = body.ids.map((id) => {
+              const doc = documents.get(id);
+              if (doc) return { found: true, _id: id, _source: doc };
+              return { found: false, _id: id };
+            });
+            return { body: { docs } };
+          },
+          count: async () => ({ body: { count: documents.size } }),
+          updateByQuery: async () => ({ body: { updated: 0 } }),
+          msearch: async (requests: unknown[]) => ({
+            body: { responses: requests.map(() => ({ hits: { hits: [] } })) },
+          }),
+          indices: {
+            exists: async () => ({ body: true }),
+            create: async () => ({ body: {} }),
+          },
+          close: async () => {},
+        },
+      };
+    };
+
+    const setupRelay = () => {
+      const { client } = createTagExistsMockClient();
+      const relay = new OpenSearchRelay(client as unknown as Client, {
+        indexName: "test-index",
+        bulkMaxSize: 1,
+        refreshDelayMs: 0,
+      });
+      return relay;
+    };
+
+    it("tag:e returns only events that have an e tag", async () => {
+      const relay = setupRelay();
+      const sk = generateSecretKey();
+      const now = Math.floor(Date.now() / 1000);
+
+      const withE = finalizeEvent(
+        {
+          kind: 1,
+          created_at: now,
+          tags: [["e", "f".repeat(64)]],
+          content: "has e tag",
+        },
+        sk,
+      );
+      const withoutE = finalizeEvent(
+        {
+          kind: 1,
+          created_at: now - 1,
+          tags: [["p", "a".repeat(64)]],
+          content: "no e tag",
+        },
+        sk,
+      );
+
+      await relay.event(withE);
+      await relay.event(withoutE);
+
+      const results = await relay.query([{ kinds: [1], search: "tag:e" }]);
+      assert.equal(results.length, 1);
+      assert.equal(results[0].id, withE.id);
+    });
+
+    it("-tag:e returns only events that lack an e tag", async () => {
+      const relay = setupRelay();
+      const sk = generateSecretKey();
+      const now = Math.floor(Date.now() / 1000);
+
+      const withE = finalizeEvent(
+        {
+          kind: 1,
+          created_at: now,
+          tags: [["e", "f".repeat(64)]],
+          content: "has e tag",
+        },
+        sk,
+      );
+      const withoutE = finalizeEvent(
+        {
+          kind: 1,
+          created_at: now - 1,
+          tags: [["p", "a".repeat(64)]],
+          content: "no e tag",
+        },
+        sk,
+      );
+
+      await relay.event(withE);
+      await relay.event(withoutE);
+
+      const results = await relay.query([{ kinds: [1], search: "-tag:e" }]);
+      assert.equal(results.length, 1);
+      assert.equal(results[0].id, withoutE.id);
+    });
+
+    it("combines tag: and -tag: in a single search", async () => {
+      const relay = setupRelay();
+      const sk = generateSecretKey();
+      const now = Math.floor(Date.now() / 1000);
+
+      // has e, no p
+      const eOnly = finalizeEvent(
+        {
+          kind: 1,
+          created_at: now,
+          tags: [["e", "f".repeat(64)]],
+          content: "e only",
+        },
+        sk,
+      );
+      // has e and p
+      const eAndP = finalizeEvent(
+        {
+          kind: 1,
+          created_at: now - 1,
+          tags: [
+            ["e", "f".repeat(64)],
+            ["p", "a".repeat(64)],
+          ],
+          content: "e and p",
+        },
+        sk,
+      );
+
+      await relay.event(eOnly);
+      await relay.event(eAndP);
+
+      // Want events with an e tag but without a p tag.
+      const results = await relay.query([
+        { kinds: [1], search: "tag:e -tag:p" },
+      ]);
+      assert.equal(results.length, 1);
+      assert.equal(results[0].id, eOnly.id);
+    });
+
+    it("ignores tag: on non-indexable tag names", async () => {
+      const relay = setupRelay();
+      const sk = generateSecretKey();
+      const now = Math.floor(Date.now() / 1000);
+
+      // "title" is not in the multi-letter whitelist, so it is never indexed
+      // in tags_map. tag:title must therefore be a no-op (not filter to zero).
+      const event = finalizeEvent(
+        {
+          kind: 1,
+          created_at: now,
+          tags: [["title", "Hello"]],
+          content: "titled",
+        },
+        sk,
+      );
+
+      await relay.event(event);
+
+      const results = await relay.query([{ kinds: [1], search: "tag:title" }]);
+      assert.equal(results.length, 1);
+      assert.equal(results[0].id, event.id);
+    });
+  });
+
   describe("detectMedia", () => {
     it("should detect media from imeta tags", () => {
       const event = {

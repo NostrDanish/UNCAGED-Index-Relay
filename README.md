@@ -100,6 +100,10 @@ The following NIP-50 search extensions are supported:
 - `protocol:<value>` — Filter by protocol (NIP-48), e.g. `protocol:activitypub`
 - `client:<address>` — Filter by NIP-89 client address (the third value of a
   `client` tag), e.g. `client:31990:<pubkey>:ditto`
+- `tag:<name>` / `-tag:<name>` — Filter by tag existence: `tag:e` returns only
+  events that have at least one `e` tag, `-tag:e` returns only events with no
+  `e` tag. Only indexable tag names are considered (single-character names and
+  the whitelisted multi-letter names); other names are ignored.
 - `sort:<mode>` — Sort results: `top`, `hot`, `controversial`, `rising`, `zaps`
 - `distinct:author` — Return at most one event per author
 

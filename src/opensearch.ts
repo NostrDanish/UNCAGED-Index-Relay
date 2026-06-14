@@ -1538,6 +1538,25 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
           mustNot.push({ term: { video: true } });
         }
       }
+
+      // Handle tag:/-tag: extensions (NIP-50).
+      // `tag:<name>` matches events that have at least one indexed value for
+      // the given tag name; `-tag:<name>` matches events with no such tag.
+      // Only tag names that are actually indexed in tags_map are meaningful —
+      // non-indexable names (see isIndexableTagName) never produce a tags_map
+      // field, so `tag:` on them matches nothing and `-tag:` matches everything.
+      for (const token of tokens) {
+        if (typeof token !== "object") continue;
+        if (token.key !== "tag" && token.key !== "-tag") continue;
+        if (!OpenSearchRelay.isIndexableTagName(token.value)) continue;
+
+        const clause = { exists: { field: `tags_map.${token.value}` } };
+        if (token.key === "tag") {
+          must.push(clause);
+        } else {
+          mustNot.push(clause);
+        }
+      }
     }
 
     const bool: Record<string, unknown> = { must };
