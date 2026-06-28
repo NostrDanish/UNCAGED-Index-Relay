@@ -198,6 +198,8 @@ export class Relay {
   private maxFilterValues: number;
   /** Lowercased `t` tag values that cause an event to be rejected at ingestion. */
   private bannedHashtags: Set<string>;
+  /** Kind numbers that are rejected at ingestion regardless of other policy. */
+  private rejectedKinds: Set<number>;
 
   /** All open WebSocket connections. */
   private connections = new Set<ServerWebSocket<WebSocketData>>();
@@ -315,6 +317,12 @@ export class Relay {
        */
       bannedHashtags?: Set<string>;
       /**
+       * Set of kind numbers that are rejected at ingestion regardless of any
+       * other policy. Events matching these kinds get an `OK: false` reply
+       * with a `blocked:` message and are never stored. Default: empty.
+       */
+      rejectedKinds?: Set<number>;
+      /**
        * Maximum number of records a single NIP-77 NEG-OPEN may materialize.
        * Larger queries are rejected with `NEG-ERR blocked:` (the cap is
        * included as the message's 4th element per NIP-77). Default: 1_000_000.
@@ -329,6 +337,7 @@ export class Relay {
     this.maxFilterValues = opts.maxFilterValues ?? 5000;
     this.maxInflightPerConn = opts.maxInflightPerConn ?? 32;
     this.bannedHashtags = opts.bannedHashtags ?? new Set();
+    this.rejectedKinds = opts.rejectedKinds ?? new Set();
     this.negentropyMaxRecords = opts.negentropyMaxRecords ?? 1_000_000;
     this.relayInfo = {
       name: "Ditto Relay",
@@ -682,6 +691,17 @@ export class Relay {
         eventId: event.id,
         accepted: false,
         message: "invalid: event has expired",
+      };
+    }
+
+    // Reject events whose kind is on the relay's rejected-kinds list.
+    // NIP-59 seals (kind 13) are rejected by default: they are never meant
+    // to be published on their own, only wrapped inside a gift wrap.
+    if (this.rejectedKinds.has(event.kind)) {
+      return {
+        eventId: event.id,
+        accepted: false,
+        message: `blocked: kind ${event.kind} is not accepted by this relay`,
       };
     }
 

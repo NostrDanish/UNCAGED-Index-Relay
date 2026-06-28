@@ -96,6 +96,25 @@ export class Config {
    */
   readonly bannedHashtags: Set<string>;
   /**
+   * Set of kind numbers that are rejected at ingestion regardless of any
+   * other policy. Events matching these kinds get an `OK: false` reply with
+   * a `blocked:` message and are never stored. Comma-separated.
+   *
+   * Default: signed artifacts that are never meant to be published to a relay
+   * as standalone events:
+   *   - 13    NIP-59 seal (inner layer, only valid wrapped in a gift wrap)
+   *   - 9734  NIP-57 zap request (sent to the LNURL callback, not relays)
+   *   - 22242 NIP-42 client auth (carried only in `["AUTH", ...]` frames)
+   *   - 24242 Blossom (NIP-B7) blob auth (HTTP `Authorization` header artifact)
+   *   - 27235 NIP-98 HTTP auth (HTTP `Authorization` header artifact)
+   *
+   * Note: NWC (23194/23195, NIP-47) and Nostr Connect (24133, NIP-46) look
+   * similar but intentionally use a relay as a transport channel, so they are
+   * NOT rejected. Likewise the 9735 zap receipt and 1059 gift wrap ARE meant
+   * to be published and are not rejected.
+   */
+  readonly rejectedKinds: Set<number>;
+  /**
    * Maximum number of records a single NIP-77 NEG-OPEN sync may cover.
    * Queries matching more records are rejected with `NEG-ERR blocked:`.
    * Each record costs ~40 bytes of session memory while the sync is open.
@@ -322,6 +341,18 @@ export class Config {
         .map((s) => s.trim().toLowerCase())
         .filter((s) => s.length > 0);
       this.bannedHashtags = new Set(tags);
+    }
+
+    // rejectedKinds
+    const rejectedKindsValue = env.get("REJECTED_KINDS");
+    if (rejectedKindsValue === undefined) {
+      this.rejectedKinds = new Set([13, 9734, 22242, 24242, 27235]);
+    } else {
+      const kinds = rejectedKindsValue
+        .split(",")
+        .map((s) => parseInt(s.trim(), 10))
+        .filter((n) => !Number.isNaN(n));
+      this.rejectedKinds = new Set(kinds);
     }
 
     // negentropyMaxRecords

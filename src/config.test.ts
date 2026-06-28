@@ -260,6 +260,36 @@ describe("Config", () => {
     });
   });
 
+  describe("rejectedKinds", () => {
+    it("should default to seal/auth/zap-request artifact kinds", () => {
+      const config = new Config(baseEnv());
+      assert.deepEqual(
+        config.rejectedKinds,
+        new Set([13, 9734, 22242, 24242, 27235]),
+      );
+    });
+
+    it("should parse comma-separated kind numbers", () => {
+      const config = new Config(baseEnv([["REJECTED_KINDS", "13,3,7"]]));
+      assert.deepEqual(config.rejectedKinds, new Set([13, 3, 7]));
+    });
+
+    it("should return empty set for empty string", () => {
+      const config = new Config(baseEnv([["REJECTED_KINDS", ""]]));
+      assert.deepEqual(config.rejectedKinds, new Set());
+    });
+
+    it("should handle whitespace", () => {
+      const config = new Config(baseEnv([["REJECTED_KINDS", " 13 , 3 "]]));
+      assert.deepEqual(config.rejectedKinds, new Set([13, 3]));
+    });
+
+    it("should filter out non-numbers", () => {
+      const config = new Config(baseEnv([["REJECTED_KINDS", "13,abc,3"]]));
+      assert.deepEqual(config.rejectedKinds, new Set([13, 3]));
+    });
+  });
+
   describe("maxMessageLength", () => {
     it("should default to 4_000_000 when not set", () => {
       const config = new Config(baseEnv());

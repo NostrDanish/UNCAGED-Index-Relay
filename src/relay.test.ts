@@ -685,6 +685,128 @@ describe("Relay", () => {
     });
   });
 
+  describe("rejected kinds", () => {
+    it("should reject an event whose kind is on the rejected list", async () => {
+      let storageEventCalled = false;
+      const storage = {
+        ...mockStorage,
+        event: async () => {
+          storageEventCalled = true;
+        },
+      } as unknown as AnalyzableRelay;
+      const rejectRelay = new Relay(storage, {
+        relayUrl: "wss://relay.test/",
+        rejectedKinds: new Set([13]),
+      });
+
+      const sk = generateSecretKey();
+      const event = finalizeEvent(
+        {
+          kind: 13,
+          created_at: Math.floor(Date.now() / 1000),
+          tags: [],
+          content: "sealed",
+        },
+        sk,
+      );
+
+      await rejectRelay.handleEvent(mockWs, event);
+
+      assert.equal(sentMessages.length, 1);
+      assert.deepEqual(sentMessages[0], [
+        "OK",
+        event.id,
+        false,
+        "blocked: kind 13 is not accepted by this relay",
+      ]);
+      assert.equal(storageEventCalled, false);
+    });
+
+    it("should accept an event whose kind is not on the rejected list", async () => {
+      const rejectRelay = new Relay(mockStorage, {
+        relayUrl: "wss://relay.test/",
+        rejectedKinds: new Set([13]),
+      });
+
+      const sk = generateSecretKey();
+      const event = finalizeEvent(
+        {
+          kind: 1,
+          created_at: Math.floor(Date.now() / 1000),
+          tags: [],
+          content: "hello",
+        },
+        sk,
+      );
+
+      await rejectRelay.handleEvent(mockWs, event);
+      rejectRelay.flushBroadcasts();
+
+      assert.deepEqual(sentMessages[0], ["OK", event.id, true, ""]);
+    });
+
+    it("should accept any kind when no kinds are rejected", async () => {
+      const sk = generateSecretKey();
+      const event = finalizeEvent(
+        {
+          kind: 13,
+          created_at: Math.floor(Date.now() / 1000),
+          tags: [],
+          content: "sealed",
+        },
+        sk,
+      );
+
+      await relay.handleEvent(mockWs, event);
+      relay.flushBroadcasts();
+
+      assert.deepEqual(sentMessages[0], ["OK", event.id, true, ""]);
+    });
+
+    it("should accept zap receipts (9735) while rejecting zap requests (9734)", async () => {
+      const rejectRelay = new Relay(mockStorage, {
+        relayUrl: "wss://relay.test/",
+        rejectedKinds: new Set([13, 9734, 22242, 24242, 27235]),
+      });
+
+      const sk = generateSecretKey();
+
+      // 9734 zap request is rejected (never meant to be published).
+      const zapRequest = finalizeEvent(
+        {
+          kind: 9734,
+          created_at: Math.floor(Date.now() / 1000),
+          tags: [["p", "00".repeat(32)]],
+          content: "",
+        },
+        sk,
+      );
+      await rejectRelay.handleEvent(mockWs, zapRequest);
+      assert.deepEqual(sentMessages[0], [
+        "OK",
+        zapRequest.id,
+        false,
+        "blocked: kind 9734 is not accepted by this relay",
+      ]);
+
+      sentMessages.length = 0;
+
+      // 9735 zap receipt IS published and stored.
+      const zapReceipt = finalizeEvent(
+        {
+          kind: 9735,
+          created_at: Math.floor(Date.now() / 1000),
+          tags: [["p", "00".repeat(32)]],
+          content: "",
+        },
+        sk,
+      );
+      await rejectRelay.handleEvent(mockWs, zapReceipt);
+      rejectRelay.flushBroadcasts();
+      assert.deepEqual(sentMessages[0], ["OK", zapReceipt.id, true, ""]);
+    });
+  });
+
   describe("handleReq", () => {
     it("should accept valid REQ and send events with EOSE", async () => {
       const sk = generateSecretKey();
