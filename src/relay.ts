@@ -756,6 +756,17 @@ export class Relay {
             ids: eTagValues,
             authors: [event.pubkey], // Only delete own events
           });
+
+          // NIP-59: Gift wraps (kind 1059) are signed by random one-time keys,
+          // so they can never match `authors: [event.pubkey]`. Relays SHOULD
+          // delete kind 1059 events whose p-tag matches the signer of a NIP-09
+          // deletion. Scope by the e-tagged IDs and the deleter's pubkey so a
+          // recipient can only delete gift wraps addressed to them.
+          filters.push({
+            ids: eTagValues,
+            kinds: [1059],
+            "#p": [event.pubkey],
+          });
         }
 
         // Add addressable event filters

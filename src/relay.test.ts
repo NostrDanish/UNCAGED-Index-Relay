@@ -236,6 +236,47 @@ describe("Relay", () => {
       assert.deepEqual(removeFilters[0]["#d"], ["my-article"]);
     });
 
+    it("should allow p-tagged recipient to delete gift wraps via e-tag (NIP-59)", async () => {
+      const sk = generateSecretKey();
+      const myPubkey = finalizeEvent(
+        { kind: 1, created_at: 0, tags: [], content: "" },
+        sk,
+      ).pubkey;
+
+      let removeFilters: Filter[] = [];
+      mockStorage.remove = async (filters: Filter[]) => {
+        removeFilters = filters;
+      };
+
+      const deletionEvent = finalizeEvent(
+        {
+          kind: 5,
+          created_at: Math.floor(Date.now() / 1000),
+          tags: [["e", "giftwrap123"]],
+          content: "",
+        },
+        sk,
+      );
+
+      await relay.handleEvent(mockWs, deletionEvent);
+      relay.flushBroadcasts();
+
+      assert.equal(sentMessages.length, 1);
+      assert.deepEqual(sentMessages[0], ["OK", deletionEvent.id, true, ""]);
+
+      // Two filters: own events by ID, plus gift wraps p-tagged to the deleter.
+      assert.equal(removeFilters.length, 2);
+      assert.deepEqual(removeFilters[0], {
+        ids: ["giftwrap123"],
+        authors: [myPubkey],
+      });
+      assert.deepEqual(removeFilters[1], {
+        ids: ["giftwrap123"],
+        kinds: [1059],
+        "#p": [myPubkey],
+      });
+    });
+
     it("should handle vanish request targeting this relay (kind 62, NIP-62)", async () => {
       const sk = generateSecretKey();
       const myPubkey = finalizeEvent(
