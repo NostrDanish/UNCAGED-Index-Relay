@@ -750,23 +750,30 @@ export class Relay {
 
         const filters: Filter[] = [];
 
-        // Filter for event IDs
+        // Resolve e-tagged events and authorize each deletion in code. A
+        // single id-keyed query covers both cases: the deleter's own events
+        // (regular NIP-09 deletion) and gift wraps addressed to the deleter.
         if (eTagValues.length > 0) {
-          filters.push({
-            ids: eTagValues,
-            authors: [event.pubkey], // Only delete own events
-          });
+          const matched = await this.storage.query([{ ids: eTagValues }]);
+          const deletableIds = matched
+            .filter((e) => {
+              // NIP-59: A gift wrap (kind 1059) may only be deleted by the
+              // p-tagged recipient — never by its author/signer (which may now
+              // be a deterministic conversation key, see
+              // nostr-protocol/nips#2396) nor by the shared key.
+              if (e.kind === 1059) {
+                return e.tags.some(
+                  (tag) => tag[0] === "p" && tag[1] === event.pubkey,
+                );
+              }
+              // NIP-09: every other kind may only be deleted by its author.
+              return e.pubkey === event.pubkey;
+            })
+            .map((e) => e.id);
 
-          // NIP-59: Gift wraps (kind 1059) are signed by random one-time keys,
-          // so they can never match `authors: [event.pubkey]`. Relays SHOULD
-          // delete kind 1059 events whose p-tag matches the signer of a NIP-09
-          // deletion. Scope by the e-tagged IDs and the deleter's pubkey so a
-          // recipient can only delete gift wraps addressed to them.
-          filters.push({
-            ids: eTagValues,
-            kinds: [1059],
-            "#p": [event.pubkey],
-          });
+          if (deletableIds.length > 0) {
+            filters.push({ ids: deletableIds });
+          }
         }
 
         // Add addressable event filters

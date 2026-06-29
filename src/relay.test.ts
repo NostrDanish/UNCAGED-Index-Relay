@@ -243,6 +243,23 @@ describe("Relay", () => {
         sk,
       ).pubkey;
 
+      // The gift wrap is p-tagged to the deleter, so it may be deleted.
+      const giftWrap: NostrEvent = {
+        id: "giftwrap123",
+        pubkey: "deadbeef".repeat(8),
+        kind: 1059,
+        created_at: 0,
+        tags: [["p", myPubkey]],
+        content: "",
+        sig: "",
+      };
+
+      let queryFilters: Filter[] = [];
+      mockStorage.query = async (filters: Filter[]) => {
+        queryFilters = filters;
+        return [giftWrap];
+      };
+
       let removeFilters: Filter[] = [];
       mockStorage.remove = async (filters: Filter[]) => {
         removeFilters = filters;
@@ -264,17 +281,70 @@ describe("Relay", () => {
       assert.equal(sentMessages.length, 1);
       assert.deepEqual(sentMessages[0], ["OK", deletionEvent.id, true, ""]);
 
-      // Two filters: own events by ID, plus gift wraps p-tagged to the deleter.
-      assert.equal(removeFilters.length, 2);
-      assert.deepEqual(removeFilters[0], {
-        ids: ["giftwrap123"],
-        authors: [myPubkey],
-      });
-      assert.deepEqual(removeFilters[1], {
-        ids: ["giftwrap123"],
-        kinds: [1059],
-        "#p": [myPubkey],
-      });
+      // The deletion resolves the e-tagged ids with a single id-keyed query.
+      assert.equal(queryFilters.length, 1);
+      assert.deepEqual(queryFilters[0], { ids: ["giftwrap123"] });
+
+      // The gift wrap is p-tagged to the deleter, so it is removed by id.
+      assert.equal(removeFilters.length, 1);
+      assert.deepEqual(removeFilters[0], { ids: ["giftwrap123"] });
+    });
+
+    it("should not let a gift wrap author delete it via e-tag (NIP-59)", async () => {
+      // Regression for nostr-protocol/nips#2396: with conversation-key-signed
+      // gift wraps the author/signer is deterministic, but only the p-tagged
+      // recipient may delete a kind 1059 wrap — never its author.
+      const sk = generateSecretKey();
+      const authorPubkey = finalizeEvent(
+        { kind: 1, created_at: 0, tags: [], content: "" },
+        sk,
+      ).pubkey;
+      const recipientPubkey = finalizeEvent(
+        { kind: 1, created_at: 0, tags: [], content: "" },
+        generateSecretKey(),
+      ).pubkey;
+
+      // The gift wrap is authored by the deleter but p-tagged to someone else.
+      const giftWrap: NostrEvent = {
+        id: "giftwrap123",
+        pubkey: authorPubkey,
+        kind: 1059,
+        created_at: 0,
+        tags: [["p", recipientPubkey]],
+        content: "",
+        sig: "",
+      };
+
+      mockStorage.query = async () => [giftWrap];
+
+      let removeCalled = false;
+      let removeFilters: Filter[] = [];
+      mockStorage.remove = async (filters: Filter[]) => {
+        removeCalled = true;
+        removeFilters = filters;
+      };
+
+      const deletionEvent = finalizeEvent(
+        {
+          kind: 5,
+          created_at: Math.floor(Date.now() / 1000),
+          tags: [["e", "giftwrap123"]],
+          content: "",
+        },
+        sk,
+      );
+
+      await relay.handleEvent(mockWs, deletionEvent);
+      relay.flushBroadcasts();
+
+      // Deletion event is still accepted and stored.
+      assert.equal(sentMessages.length, 1);
+      assert.deepEqual(sentMessages[0], ["OK", deletionEvent.id, true, ""]);
+
+      // But the gift wrap must NOT be removed: the author is not the recipient.
+      if (removeCalled) {
+        assert.equal(removeFilters.length, 0);
+      }
     });
 
     it("should handle vanish request targeting this relay (kind 62, NIP-62)", async () => {
