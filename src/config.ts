@@ -346,7 +346,7 @@ export class Config {
     // rejectedKinds
     const rejectedKindsValue = env.get("REJECTED_KINDS");
     if (rejectedKindsValue === undefined) {
-      this.rejectedKinds = new Set([13, 9734, 22242, 24242, 27235]);
+      this.rejectedKinds = new Set([13, 9734, 20013, 22242, 24242, 27235]);
     } else {
       const kinds = rejectedKindsValue
         .split(",")

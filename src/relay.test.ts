@@ -877,7 +877,7 @@ describe("Relay", () => {
     it("should accept zap receipts (9735) while rejecting zap requests (9734)", async () => {
       const rejectRelay = new Relay(mockStorage, {
         relayUrl: "wss://relay.test/",
-        rejectedKinds: new Set([13, 9734, 22242, 24242, 27235]),
+        rejectedKinds: new Set([13, 9734, 20013, 22242, 24242, 27235]),
       });
 
       const sk = generateSecretKey();
