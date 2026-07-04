@@ -50,7 +50,7 @@ export class Config {
   /**
    * Maximum number of entries in any single filter array (`ids`, `authors`,
    * `kinds`, or any `#<tag>`). Caps the fan-out of per-filter OpenSearch
-   * `terms` clauses. Default: 5000.
+   * `terms` clauses. Default: 20000.
    */
   readonly maxFilterValues: number;
   /**

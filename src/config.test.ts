@@ -326,9 +326,9 @@ describe("Config", () => {
   });
 
   describe("maxFilterValues", () => {
-    it("should default to 5000 when not set", () => {
+    it("should default to 20000 when not set", () => {
       const config = new Config(baseEnv());
-      assert.equal(config.maxFilterValues, 5000);
+      assert.equal(config.maxFilterValues, 20_000);
     });
 
     it("should parse from environment", () => {
