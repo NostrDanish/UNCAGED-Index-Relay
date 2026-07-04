@@ -104,6 +104,9 @@ export class Config {
    * as standalone events:
    *   - 13    NIP-59 seal (inner layer, only valid wrapped in a gift wrap)
    *   - 9734  NIP-57 zap request (sent to the LNURL callback, not relays)
+   *   - 20013 ephemeral seal (inner layer, only valid wrapped in a gift wrap)
+   *   - 20014 plaintext gift wrap seal (inner layer, only valid wrapped in a
+   *           gift wrap)
    *   - 22242 NIP-42 client auth (carried only in `["AUTH", ...]` frames)
    *   - 24242 Blossom (NIP-B7) blob auth (HTTP `Authorization` header artifact)
    *   - 27235 NIP-98 HTTP auth (HTTP `Authorization` header artifact)
@@ -346,7 +349,9 @@ export class Config {
     // rejectedKinds
     const rejectedKindsValue = env.get("REJECTED_KINDS");
     if (rejectedKindsValue === undefined) {
-      this.rejectedKinds = new Set([13, 9734, 20013, 22242, 24242, 27235]);
+      this.rejectedKinds = new Set([
+        13, 9734, 20013, 20014, 22242, 24242, 27235,
+      ]);
     } else {
       const kinds = rejectedKindsValue
         .split(",")

@@ -265,7 +265,7 @@ describe("Config", () => {
       const config = new Config(baseEnv());
       assert.deepEqual(
         config.rejectedKinds,
-        new Set([13, 9734, 20013, 22242, 24242, 27235]),
+        new Set([13, 9734, 20013, 20014, 22242, 24242, 27235]),
       );
     });
 
