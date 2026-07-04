@@ -104,9 +104,10 @@ export class Config {
    * as standalone events:
    *   - 13    NIP-59 seal (inner layer, only valid wrapped in a gift wrap)
    *   - 9734  NIP-57 zap request (sent to the LNURL callback, not relays)
-   *   - 20013 ephemeral seal (inner layer, only valid wrapped in a gift wrap)
-   *   - 20014 plaintext gift wrap seal (inner layer, only valid wrapped in a
-   *           gift wrap)
+   *   - 20013 Concord encrypted seal (inner layer, only valid wrapped in a
+   *           gift wrap; CORD-01)
+   *   - 20014 Concord plaintext seal (inner layer, only valid wrapped in a
+   *           gift wrap; CORD-01)
    *   - 22242 NIP-42 client auth (carried only in `["AUTH", ...]` frames)
    *   - 24242 Blossom (NIP-B7) blob auth (HTTP `Authorization` header artifact)
    *   - 27235 NIP-98 HTTP auth (HTTP `Authorization` header artifact)
