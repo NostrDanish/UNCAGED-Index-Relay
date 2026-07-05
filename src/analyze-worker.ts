@@ -29,6 +29,11 @@ const sentimentAnalyzer = new Sentiment();
 detectLanguage("warmup text for language detection");
 sentimentAnalyzer.analyze("warmup text for sentiment analysis");
 
+// Signal the pool that module evaluation is complete. Terminating a worker
+// while it is still initializing (loading tinyld's n-gram tables, wasm, etc.)
+// can segfault Bun, so the pool waits for this message before terminating.
+self.postMessage("ready");
+
 /** Minimum text length (in characters) required to attempt language detection. */
 const MIN_LANGUAGE_DETECT_LENGTH = 10;
 

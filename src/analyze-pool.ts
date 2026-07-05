@@ -61,6 +61,12 @@ export interface AnalyzeRequest {
  */
 export class AnalyzePool {
   private workers: Worker[];
+  /**
+   * Per-worker promise that resolves once the worker has finished module
+   * evaluation (posts "ready") or failed to start. Terminating a worker
+   * mid-initialization can segfault Bun, so dispose() waits on these.
+   */
+  private workerReady: Promise<void>[];
   private pending: Map<number, PendingRequest> = new Map();
 
   /**
@@ -98,11 +104,22 @@ export class AnalyzePool {
 
     const workerUrl = new URL("analyze-worker.ts", import.meta.url).href;
 
+    this.workerReady = [];
     this.workers = Array.from({ length: poolSize }, (_, workerIndex) => {
       const worker = new Worker(workerUrl, { smol: true });
+      let markReady = () => {};
+      this.workerReady.push(
+        new Promise<void>((resolve) => {
+          markReady = resolve;
+        }),
+      );
       worker.onmessage = (
-        event: MessageEvent<({ reqId: number } & AnalyzeResult)[]>,
+        event: MessageEvent<"ready" | ({ reqId: number } & AnalyzeResult)[]>,
       ) => {
+        if (event.data === "ready") {
+          markReady();
+          return;
+        }
         const results = event.data;
         for (const result of results) {
           // Destructure reqId off and resolve with the rest — the worker
@@ -124,6 +141,8 @@ export class AnalyzePool {
       };
       worker.onerror = (error) => {
         console.error("Analyze worker error:", error);
+        // Never leave dispose() waiting on a worker that failed to start.
+        markReady();
       };
       return worker;
     });
@@ -227,17 +246,26 @@ export class AnalyzePool {
     analyzePendingGauge.set(this.pending.size);
   }
 
-  /** Terminate all workers. */
-  dispose(): void {
-    for (const worker of this.workers) {
-      worker.terminate();
-    }
+  /**
+   * Terminate all workers and reject any pending requests.
+   *
+   * Waits for each worker to finish initializing before terminating it, and
+   * awaits the terminations: tearing down a worker mid-module-evaluation (or
+   * exiting the process mid-teardown) can segfault Bun, which manifested as
+   * flaky `bun test` crashes in CI.
+   */
+  async dispose(): Promise<void> {
+    const workers = this.workers;
+    const workerReady = this.workerReady;
     this.workers = [];
+    this.workerReady = [];
     // Reject any pending requests
     for (const [, request] of this.pending) {
       request.reject(new Error("Analyze pool disposed"));
     }
     this.pending.clear();
     analyzePendingGauge.set(0);
+    await Promise.all(workerReady);
+    await Promise.all(workers.map((worker) => worker.terminate()));
   }
 }

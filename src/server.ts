@@ -278,10 +278,10 @@ const server = serve<WebSocketData>({
 console.log(`Nostr relay listening on ws://localhost:${server.port}`);
 
 // Graceful shutdown on SIGINT/SIGTERM — also ensures CPU profiles are written.
-function shutdown() {
+async function shutdown() {
   console.log("Shutting down...");
   server.stop();
-  bgWorker?.terminate();
+  await Promise.all([analyzePool.dispose(), bgWorker?.terminate()]);
   process.exit(0);
 }
 

@@ -16,8 +16,8 @@ describe("AnalyzePool", () => {
     console.error = originalError;
   });
 
-  afterEach(() => {
-    pool?.dispose();
+  afterEach(async () => {
+    await pool?.dispose();
   });
 
   /** Create a valid signed event. */
@@ -359,12 +359,14 @@ describe("AnalyzePool", () => {
     const event = createValidEvent();
     const promise = pool.analyze(event);
 
-    // Dispose before the worker can respond
-    pool.dispose();
+    // Dispose before the worker can respond. Pending requests are rejected
+    // synchronously; only worker termination is awaited.
+    const disposed = pool.dispose();
 
     await assert.rejects(promise, {
       message: "Analyze pool disposed",
     });
+    await disposed;
   });
 
   it("should work with pool size of 1", async () => {
