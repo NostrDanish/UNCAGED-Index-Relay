@@ -281,7 +281,11 @@ console.log(`Nostr relay listening on ws://localhost:${server.port}`);
 async function shutdown() {
   console.log("Shutting down...");
   server.stop();
-  await Promise.all([analyzePool.dispose(), bgWorker?.terminate()]);
+  // Bounded cleanup: waiting on worker teardown keeps the exit clean, but a
+  // wedged worker must never be able to hang the shutdown path.
+  const cleanup = Promise.all([analyzePool.dispose(), bgWorker?.terminate()]);
+  const timeout = new Promise((resolve) => setTimeout(resolve, 5_000));
+  await Promise.race([cleanup, timeout]);
   process.exit(0);
 }
 
