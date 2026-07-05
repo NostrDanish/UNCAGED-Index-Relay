@@ -1,0 +1,32 @@
+image: oven/bun:1
+
+stages:
+  - test
+
+default:
+  interruptible: true
+  before_script:
+    - bun install --frozen-lockfile
+
+lint:
+  stage: test
+  timeout: 5m
+  script:
+    # --error-on-warnings makes the pipeline fail on lint warnings, not just errors.
+    - bunx biome ci --error-on-warnings .
+
+test:
+  stage: test
+  timeout: 5m
+  script:
+    - bun test
+
+# Type checking has pre-existing errors (aggregation typings in nip85.ts and
+# opensearch.ts). Non-blocking until those are cleaned up, then remove
+# allow_failure to enforce it.
+typecheck:
+  stage: test
+  timeout: 5m
+  script:
+    - bun run typecheck
+  allow_failure: true
