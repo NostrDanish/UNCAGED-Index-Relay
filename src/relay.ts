@@ -495,7 +495,8 @@ export class Relay {
    */
   flushBroadcasts(): void {
     while (this.broadcastQueue.length > 0) {
-      const event = this.broadcastQueue.shift()!;
+      const event = this.broadcastQueue.shift();
+      if (event === undefined) break;
       this.broadcastOne(event);
     }
     this.drainingBroadcasts = false;
@@ -516,7 +517,8 @@ export class Relay {
     let count = 0;
 
     while (this.broadcastQueue.length > 0) {
-      const event = this.broadcastQueue.shift()!;
+      const event = this.broadcastQueue.shift();
+      if (event === undefined) break;
       this.broadcastOne(event);
       count++;
 
@@ -567,8 +569,7 @@ export class Relay {
       // Exclude auth-protected kinds from subscriptions that didn't explicitly request them,
       // and verify the subscriber is a party to the event (author or p-tagged).
       if (this.authKinds.has(event.kind)) {
-        const hasKind =
-          entry.filter.kinds && entry.filter.kinds.includes(event.kind);
+        const hasKind = entry.filter.kinds?.includes(event.kind);
         if (!hasKind) return;
         if (!this.isAuthorizedForEvent(entry.ws, event)) return;
       }
@@ -951,7 +952,7 @@ export class Relay {
       }
 
       // Check if any requested kind is an auth kind.
-      const hasAuthKind = filter.kinds!.some((k) => this.authKinds.has(k));
+      const hasAuthKind = filter.kinds?.some((k) => this.authKinds.has(k));
 
       if (!hasAuthKind) {
         // No auth kinds in this filter — pass through.

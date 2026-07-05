@@ -12,11 +12,10 @@
 
 import process from "node:process";
 import type { NostrEvent } from "nostr-tools";
-
-import { Client as OpenSearchClient } from "./opensearch-client.ts";
 import { Config } from "./config.ts";
 import { Nip85 } from "./nip85.ts";
 import { OpenSearchRelay } from "./opensearch.ts";
+import { Client as OpenSearchClient } from "./opensearch-client.ts";
 import { Trends } from "./trends.ts";
 
 declare var self: Worker;
@@ -189,18 +188,20 @@ setInterval(() => {
 // ---------------------------------------------------------------------------
 
 if (trends && trendsIntervalMs > 0) {
+  // Narrowed const so the closure below doesn't need non-null assertions.
+  const t = trends;
   const relayUrl = config.relayUrl;
   const preferredLanguages = config.preferredLanguages;
 
   const updateAllTrends = async () => {
     console.log("[bg-worker] Updating trends...");
-    await trends!.updateTrendingHashtags(signer);
-    await trends!.updateTrendingLinks(signer);
-    await trends!.updateTrendingPubkeys(signer, relayUrl);
-    await trends!.updateTrendingEvents(signer, relayUrl);
-    await trends!.updateTrendingZappedEvents(signer, relayUrl);
+    await t.updateTrendingHashtags(signer);
+    await t.updateTrendingLinks(signer);
+    await t.updateTrendingPubkeys(signer, relayUrl);
+    await t.updateTrendingEvents(signer, relayUrl);
+    await t.updateTrendingZappedEvents(signer, relayUrl);
     if (preferredLanguages.length > 0) {
-      await trends!.updateTrendingEventsByLanguage(
+      await t.updateTrendingEventsByLanguage(
         signer,
         relayUrl,
         preferredLanguages,

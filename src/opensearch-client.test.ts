@@ -124,7 +124,7 @@ describe("Client", () => {
         ]);
 
         const headers = capturedInit?.headers as Record<string, string>;
-        assert.equal(headers["Authorization"], `Basic ${btoa("admin:secret")}`);
+        assert.equal(headers.Authorization, `Basic ${btoa("admin:secret")}`);
       } finally {
         globalThis.fetch = originalFetch;
       }

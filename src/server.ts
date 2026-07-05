@@ -77,18 +77,20 @@ const relay = new Relay(opensearchRelay, {
 let bgWorker: Worker | undefined;
 
 if (config.statsEnabled) {
-  bgWorker = new Worker(new URL("background-worker.ts", import.meta.url).href, {
-    smol: true,
-  });
+  const worker = new Worker(
+    new URL("background-worker.ts", import.meta.url).href,
+    { smol: true },
+  );
+  bgWorker = worker;
 
-  bgWorker.onmessage = (event: MessageEvent) => {
+  worker.onmessage = (event: MessageEvent) => {
     const msg = event.data;
     if (msg.type === "broadcast") {
       relay.broadcast(msg.event);
     }
   };
 
-  bgWorker.onerror = (error) => {
+  worker.onerror = (error) => {
     console.error("Background worker error:", error);
   };
 
@@ -121,7 +123,7 @@ if (config.statsEnabled) {
       return;
     }
 
-    bgWorker!.postMessage({
+    worker.postMessage({
       type: "dirty",
       ids: dirty.ids,
       pubkeys: dirty.pubkeys,

@@ -511,7 +511,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     // We reference the original `tags` array rather than the clipped tagsMap
     // because the last e tag might have been dropped above when the event has
     // more than `tagValueMaxCountPerName` e-tags.
-    if (kind === 7 && tagsMap["e"]?.length) {
+    if (kind === 7 && tagsMap.e?.length) {
       for (let i = tags.length - 1; i >= 0; i--) {
         const t = tags[i];
         if (
@@ -519,7 +519,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
           t[0] === "e" &&
           t[1].length <= OpenSearchRelay.TAG_VALUE_MAX_LENGTH
         ) {
-          tagsMap["e"] = [t[1]];
+          tagsMap.e = [t[1]];
           break;
         }
       }
@@ -2905,7 +2905,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
    * Designed to be called periodically (e.g. via setInterval).
    * Returns the computed scores so callers (e.g. NIP-85) can publish them.
    */
-  async recomputeScores(batchSize = 5000): Promise<RecomputeResult> {
+  async recomputeScores(): Promise<RecomputeResult> {
     // Phase 1: Drain in-memory pending dirty sets and fetch the
     // corresponding events from OpenSearch. By now these documents have
     // been through multiple natural refresh cycles and are searchable.
@@ -2939,7 +2939,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
           })
           .then((r) => {
             const hits = r.body.hits.hits as Array<{ _source?: DirtyHit }>;
-            return hits.filter((h) => h._source?.id).map((h) => h._source!);
+            return hits.flatMap((h) => (h._source?.id ? [h._source] : []));
           }),
       );
     }
@@ -2966,7 +2966,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
           })
           .then((r) => {
             const hits = r.body.hits.hits as Array<{ _source?: DirtyHit }>;
-            return hits.filter((h) => h._source?.id).map((h) => h._source!);
+            return hits.flatMap((h) => (h._source?.id ? [h._source] : []));
           }),
       );
     }

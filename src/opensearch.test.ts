@@ -619,7 +619,7 @@ describe("OpenSearchRelay", () => {
       if (filters.kindFilter && !filters.kindFilter.includes(d.kind))
         return false;
       if (filters.idFilter && !filters.idFilter.includes(d.id)) return false;
-      if (filters.excludeIds && filters.excludeIds.includes(d.id)) return false;
+      if (filters.excludeIds?.includes(d.id)) return false;
       if (filters.untilFilter && d.created_at > filters.untilFilter)
         return false;
 
@@ -648,7 +648,7 @@ describe("OpenSearchRelay", () => {
       const mustNot = (bool.must_not ?? []) as Array<Record<string, unknown>>;
       for (const clause of mustNot) {
         const ids = (clause.ids as { values?: string[] } | undefined)?.values;
-        if (ids && ids.includes(d.id)) return false;
+        if (ids?.includes(d.id)) return false;
       }
 
       // should: [{ bool: {...} }, ...] with minimum_should_match: 1 means at
@@ -857,12 +857,12 @@ describe("OpenSearchRelay", () => {
       assert.ok(historyDoc, "Should have a history document");
       assert.ok(currentDoc, "Should have a current document");
       assert.equal(
-        historyDoc!.id,
+        historyDoc?.id,
         event1.id,
         "History should be the old event",
       );
       assert.equal(
-        currentDoc!.id,
+        currentDoc?.id,
         event2.id,
         "Current should be the new event",
       );
@@ -910,8 +910,8 @@ describe("OpenSearchRelay", () => {
       const currentDoc = docs.find((d) => !d.replaced);
 
       assert.ok(historyDoc, "Should have a history document");
-      assert.equal(historyDoc!.id, event1.id);
-      assert.equal(currentDoc!.id, event2.id);
+      assert.equal(historyDoc?.id, event1.id);
+      assert.equal(currentDoc?.id, event2.id);
     });
 
     it("should mark older incoming event as replaced", async () => {
@@ -960,8 +960,8 @@ describe("OpenSearchRelay", () => {
 
       assert.ok(current, "Should have a current event");
       assert.ok(replaced, "Should have a replaced event");
-      assert.equal(current!.id, event1.id, "Newer event should be current");
-      assert.equal(replaced!.id, event2.id, "Older event should be replaced");
+      assert.equal(current?.id, event1.id, "Newer event should be current");
+      assert.equal(replaced?.id, event2.id, "Older event should be replaced");
     });
 
     it("should not archive a duplicate event", async () => {
@@ -1040,12 +1040,12 @@ describe("OpenSearchRelay", () => {
 
       assert.ok(historyDoc, "Should have a history document");
       assert.equal(
-        historyDoc!.followers,
+        historyDoc?.followers,
         0,
         "followers should be zeroed on history",
       );
       assert.equal(
-        historyDoc!.engagers,
+        historyDoc?.engagers,
         0,
         "engagers should be zeroed on history",
       );
@@ -1158,7 +1158,7 @@ describe("OpenSearchRelay", () => {
       const currentDoc = docs.find((d) => !d.replaced);
 
       assert.equal(historyDocs.length, 2, "Should have 2 history documents");
-      assert.equal(currentDoc!.id, event3.id, "Current should be V3");
+      assert.equal(currentDoc?.id, event3.id, "Current should be V3");
 
       const historyIds = historyDocs.map((d) => d.id).sort();
       const expectedIds = [event1.id, event2.id].sort();
@@ -1312,7 +1312,7 @@ describe("OpenSearchRelay", () => {
     });
 
     it("should auto-include history for naddr-shaped filters (replaceable)", async () => {
-      const { client, documents } = createHistoryMockClient();
+      const { client } = createHistoryMockClient();
       const relay = new OpenSearchRelay(client as unknown as Client, {
         indexName: "test-index",
         bulkMaxSize: 1,
@@ -1353,7 +1353,7 @@ describe("OpenSearchRelay", () => {
     });
 
     it("should auto-include history for naddr-shaped filters (addressable)", async () => {
-      const { client, documents } = createHistoryMockClient();
+      const { client } = createHistoryMockClient();
       const relay = new OpenSearchRelay(client as unknown as Client, {
         indexName: "test-index",
         bulkMaxSize: 1,
@@ -1394,7 +1394,7 @@ describe("OpenSearchRelay", () => {
     });
 
     it("should NOT include history for multi-author filters", async () => {
-      const { client, documents } = createHistoryMockClient();
+      const { client } = createHistoryMockClient();
       const relay = new OpenSearchRelay(client as unknown as Client, {
         indexName: "test-index",
         bulkMaxSize: 1,
@@ -1439,7 +1439,7 @@ describe("OpenSearchRelay", () => {
     });
 
     it("should return history docs when queried by ID", async () => {
-      const { client, documents } = createHistoryMockClient();
+      const { client } = createHistoryMockClient();
       const relay = new OpenSearchRelay(client as unknown as Client, {
         indexName: "test-index",
         bulkMaxSize: 1,
@@ -2049,7 +2049,7 @@ describe("OpenSearchRelay", () => {
     });
 
     it("should mark kind 0 pubkey as dirty for score recomputation on replacement", async () => {
-      const { client, documents } = createHistoryMockClient();
+      const { client } = createHistoryMockClient();
       const relay = new OpenSearchRelay(client as unknown as Client, {
         indexName: "test-index",
         bulkMaxSize: 1,
@@ -4772,7 +4772,7 @@ describe("OpenSearchRelay", () => {
       ]);
 
       assert.deepEqual(tagsMap["-"], [""]);
-      assert.deepEqual(tagsMap["_"], ["value"]);
+      assert.deepEqual(tagsMap._, ["value"]);
     });
 
     it("should reject multi-letter tag names not in whitelist", async () => {
@@ -7080,7 +7080,7 @@ describe("OpenSearchRelay", () => {
 
     it("returns msats (sats × 1000) from the `amount` tag", () => {
       const evt = makeEvt([
-        ["i", "bitcoin:tx:" + "f".repeat(64)],
+        ["i", `bitcoin:tx:${"f".repeat(64)}`],
         ["p", "b".repeat(64)],
         ["amount", "25000"],
       ]);
@@ -7145,7 +7145,7 @@ describe("OpenSearchRelay", () => {
         (c) => (c.terms as Record<string, unknown>)?.kind,
       );
       assert.ok(kindExclusion, "should exclude auth kinds");
-      const excludedKinds = (kindExclusion!.terms as Record<string, number[]>)
+      const excludedKinds = (kindExclusion?.terms as Record<string, number[]>)
         .kind;
       assert.ok(excludedKinds.includes(4));
       assert.ok(excludedKinds.includes(1059));
@@ -7166,7 +7166,7 @@ describe("OpenSearchRelay", () => {
         authKinds: new Set([4, 1059]),
       });
 
-      await relay.query([{ ids: ["abc".repeat(20) + "abcd"] }]);
+      await relay.query([{ ids: [`${"abc".repeat(20)}abcd`] }]);
 
       assert.ok(capturedBody);
       const boolQuery = (capturedBody.query as Record<string, unknown>)

@@ -15,8 +15,8 @@
  */
 
 import type { NostrEvent, NostrSigner, NRelay } from "@nostrify/nostrify";
-import type { Client } from "./opensearch-client.ts";
 import type { EventScores } from "./opensearch.ts";
+import type { Client } from "./opensearch-client.ts";
 
 /** Options for constructing a {@link Nip85} instance. */
 export interface Nip85Opts {

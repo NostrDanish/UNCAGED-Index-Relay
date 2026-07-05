@@ -1795,7 +1795,8 @@ describe("Relay", () => {
 
       // Release the first batch. Each release lets the next waiter through.
       while (releaseFns.length > 0) {
-        const next = releaseFns.shift()!;
+        const next = releaseFns.shift();
+        if (!next) break;
         next();
         await new Promise((resolve) => setImmediate(resolve));
         await new Promise((resolve) => setImmediate(resolve));
@@ -2920,18 +2921,20 @@ describe("Relay", () => {
       const before = Math.floor(Date.now() / 1000);
       const result = clampUntil({ kinds: [1] });
       const after = Math.floor(Date.now() / 1000);
-      assert.ok(result.until !== undefined);
-      assert.ok(result.until! >= before);
-      assert.ok(result.until! <= after);
+      const { until } = result;
+      assert.ok(until !== undefined);
+      assert.ok(until >= before);
+      assert.ok(until <= after);
     });
 
     it("should add fuzz to until when provided", () => {
       const before = Math.floor(Date.now() / 1000);
       const result = clampUntil({ kinds: [1] }, 60);
       const after = Math.floor(Date.now() / 1000);
-      assert.ok(result.until !== undefined);
-      assert.ok(result.until! >= before + 60);
-      assert.ok(result.until! <= after + 60);
+      const { until } = result;
+      assert.ok(until !== undefined);
+      assert.ok(until >= before + 60);
+      assert.ok(until <= after + 60);
     });
 
     it("should not override an explicit until", () => {
@@ -2953,9 +2956,10 @@ describe("Relay", () => {
       const filter = { kinds: [1], since: past };
       const result = clampUntil(filter);
       const after = Math.floor(Date.now() / 1000);
-      assert.ok(result.until !== undefined);
-      assert.ok(result.until! >= before);
-      assert.ok(result.until! <= after);
+      const { until } = result;
+      assert.ok(until !== undefined);
+      assert.ok(until >= before);
+      assert.ok(until <= after);
     });
 
     it("should not mutate the original filter", () => {
@@ -2981,8 +2985,9 @@ describe("Relay", () => {
       // Mock storage returns the future event
       mockStorage.query = async (filters: Filter[]) => {
         // Verify that the filter has until set to approximately now
-        assert.ok(filters[0].until !== undefined);
-        assert.ok(filters[0].until! <= Math.floor(Date.now() / 1000) + 1);
+        const { until } = filters[0];
+        assert.ok(until !== undefined);
+        assert.ok(until <= Math.floor(Date.now() / 1000) + 1);
         return [futureEvent];
       };
 
@@ -4182,10 +4187,6 @@ describe("Relay with authKinds", () => {
 
     it("should not broadcast auth-kind event to subscriber who is not a party", async () => {
       const authorSk = generateSecretKey();
-      const authorPk = finalizeEvent(
-        { kind: 1, created_at: 0, tags: [], content: "" },
-        authorSk,
-      ).pubkey;
 
       // Subscriber is authenticated as a different pubkey
       const subscriberSk = generateSecretKey();

@@ -191,8 +191,11 @@ export class Histogram {
       key = "";
       v = labelsOrValue;
     } else {
+      if (value === undefined) {
+        throw new TypeError("observe(labels, value) requires a value");
+      }
       key = labelKey(labelsOrValue);
-      v = value!;
+      v = value;
     }
     const d = this.getOrCreate(key);
     d.sum += v;
@@ -258,7 +261,7 @@ class Registry {
   }
 
   async metrics(): Promise<string> {
-    return this.collectors.map((c) => c.serialize()).join("\n\n") + "\n";
+    return `${this.collectors.map((c) => c.serialize()).join("\n\n")}\n`;
   }
 }
 

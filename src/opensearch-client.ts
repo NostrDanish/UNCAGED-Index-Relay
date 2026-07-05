@@ -144,7 +144,7 @@ export class Client {
     }
 
     const headers: Record<string, string> = {};
-    if (this.authHeader) headers["Authorization"] = this.authHeader;
+    if (this.authHeader) headers.Authorization = this.authHeader;
 
     const init: RequestInit = { method, headers };
 
@@ -203,14 +203,14 @@ export class Client {
       lines.push(JSON.stringify({ index: s.index }));
       lines.push(typeof s.body === "string" ? s.body : JSON.stringify(s.body));
     }
-    const ndjson = lines.join("\n") + "\n";
+    const ndjson = `${lines.join("\n")}\n`;
 
     const url = `${this.baseUrl}/_msearch`;
 
     const headers: Record<string, string> = {
       "Content-Type": "application/x-ndjson",
     };
-    if (this.authHeader) headers["Authorization"] = this.authHeader;
+    if (this.authHeader) headers.Authorization = this.authHeader;
 
     const res = await fetch(url, {
       method: "POST",
@@ -256,12 +256,11 @@ export class Client {
     signal?: AbortSignal;
   }): Promise<ApiResponse<{ errors: boolean; items: unknown[] }>> {
     // Build NDJSON payload.
-    const ndjson =
-      params.body.map((obj) => JSON.stringify(obj)).join("\n") + "\n";
+    const ndjson = `${params.body.map((obj) => JSON.stringify(obj)).join("\n")}\n`;
 
     const query: Record<string, string> = {};
     if (params.refresh !== undefined) {
-      query["refresh"] = String(params.refresh);
+      query.refresh = String(params.refresh);
     }
 
     let url = `${this.baseUrl}/_bulk`;
@@ -271,7 +270,7 @@ export class Client {
     const headers: Record<string, string> = {
       "Content-Type": "application/x-ndjson",
     };
-    if (this.authHeader) headers["Authorization"] = this.authHeader;
+    if (this.authHeader) headers.Authorization = this.authHeader;
 
     const init: RequestInit = {
       method: "POST",
@@ -304,10 +303,10 @@ export class Client {
     wait_for_completion?: boolean;
   }): Promise<ApiResponse<unknown>> {
     const query: Record<string, string> = {};
-    if (params.refresh !== undefined) query["refresh"] = String(params.refresh);
-    if (params.conflicts !== undefined) query["conflicts"] = params.conflicts;
+    if (params.refresh !== undefined) query.refresh = String(params.refresh);
+    if (params.conflicts !== undefined) query.conflicts = params.conflicts;
     if (params.wait_for_completion !== undefined) {
-      query["wait_for_completion"] = String(params.wait_for_completion);
+      query.wait_for_completion = String(params.wait_for_completion);
     }
 
     const res = await this._request(
@@ -328,10 +327,10 @@ export class Client {
     wait_for_completion?: boolean;
   }): Promise<ApiResponse<unknown>> {
     const query: Record<string, string> = {};
-    if (params.refresh !== undefined) query["refresh"] = String(params.refresh);
-    if (params.conflicts !== undefined) query["conflicts"] = params.conflicts;
+    if (params.refresh !== undefined) query.refresh = String(params.refresh);
+    if (params.conflicts !== undefined) query.conflicts = params.conflicts;
     if (params.wait_for_completion !== undefined) {
-      query["wait_for_completion"] = String(params.wait_for_completion);
+      query.wait_for_completion = String(params.wait_for_completion);
     }
 
     const res = await this._request(
