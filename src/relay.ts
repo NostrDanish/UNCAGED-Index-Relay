@@ -909,13 +909,18 @@ export class Relay {
    *
    * Rules:
    * 1. If a filter's `kinds` includes any auth kind, the filter MUST also have
-   *    `authors` or `#p` where ALL entries are authenticated pubkeys.
+   *    `authors` or `#p`, and ALL entries of at least ONE of those lists must
+   *    be authenticated pubkeys. The filter is a conjunction — every matching
+   *    event is authored by one of `authors` AND p-tags one of `#p` — so being
+   *    authenticated as every listed author OR every listed recipient covers
+   *    all possible results. This also permits the classic conversation-scoped
+   *    DM query, eg `{kinds:[4], authors:[me], "#p":[them]}`.
    *    - If `authors`/`#p` are both absent and client is unauthenticated →
    *      CLOSED with "auth-required" and send the AUTH challenge.
    *    - If `authors`/`#p` are both absent and client is authenticated →
    *      CLOSED with "restricted".
-   *    - If present but contain unauthenticated pubkeys → CLOSED with
-   *      "auth-required" and send the AUTH challenge.
+   *    - If neither list is fully authenticated → CLOSED with "auth-required"
+   *      and send the AUTH challenge.
    * 2. Filters without explicit `kinds` (catch-all) pass through; the storage
    *    backend is responsible for excluding auth-protected kinds.
    * 3. Filters with explicit `kinds` that don't include any auth kind pass through.
@@ -986,36 +991,30 @@ export class Relay {
         };
       }
 
-      // At least one of authors / #p is present.
-      // ALL entries in whichever is provided must be auth'd pubkeys.
+      // At least one of authors / #p is present. The filter is a conjunction,
+      // so authenticating as ALL entries of EITHER list is sufficient to see
+      // anything the filter can match.
       const authed = ws.data.authedPubkeys;
 
-      if (authors && authors.length > 0) {
-        const allAuthed = authors.every((pk) => authed.has(pk));
-        if (!allAuthed) {
-          this.ensureChallengeSent(ws);
-          return {
-            ok: false,
-            error: {
-              subscriptionId,
-              message: "auth-required: all authors must be authenticated",
-            },
-          };
-        }
-      }
+      const authorsAuthed =
+        authors !== undefined &&
+        authors.length > 0 &&
+        authors.every((pk) => authed.has(pk));
+      const pTagsAuthed =
+        pTags !== undefined &&
+        pTags.length > 0 &&
+        pTags.every((pk) => authed.has(pk));
 
-      if (pTags && pTags.length > 0) {
-        const allAuthed = pTags.every((pk) => authed.has(pk));
-        if (!allAuthed) {
-          this.ensureChallengeSent(ws);
-          return {
-            ok: false,
-            error: {
-              subscriptionId,
-              message: "auth-required: all #p tags must be authenticated",
-            },
-          };
-        }
+      if (!authorsAuthed && !pTagsAuthed) {
+        this.ensureChallengeSent(ws);
+        return {
+          ok: false,
+          error: {
+            subscriptionId,
+            message:
+              "auth-required: all authors or all #p tags must be authenticated",
+          },
+        };
       }
 
       // Passed auth checks — include filter.

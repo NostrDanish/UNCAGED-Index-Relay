@@ -3660,6 +3660,88 @@ describe("Relay with authKinds", () => {
       assert.ok((closed[2] as string).startsWith("auth-required:"));
     });
 
+    it("should allow combined authors+#p filter when authenticated as all authors", async () => {
+      const skMe = generateSecretKey();
+      const me = finalizeEvent(
+        { kind: 1, created_at: 0, tags: [], content: "" },
+        skMe,
+      ).pubkey;
+      const skThem = generateSecretKey();
+      const them = finalizeEvent(
+        { kind: 1, created_at: 0, tags: [], content: "" },
+        skThem,
+      ).pubkey;
+
+      // Conversation-scoped DM query: messages I sent to them.
+      mockWs.data.authedPubkeys.add(me);
+
+      mockStorage.query = async () => [];
+      await relay.handleReq(mockWs, "sub1", [
+        { kinds: [4], authors: [me], "#p": [them] },
+      ]);
+
+      const eose = sentMessages.find((m) => m[0] === "EOSE");
+      assert.ok(eose);
+      assert.ok(!sentMessages.find((m) => m[0] === "CLOSED"));
+    });
+
+    it("should allow combined authors+#p filter when authenticated as all #p recipients", async () => {
+      const skMe = generateSecretKey();
+      const me = finalizeEvent(
+        { kind: 1, created_at: 0, tags: [], content: "" },
+        skMe,
+      ).pubkey;
+      const skThem = generateSecretKey();
+      const them = finalizeEvent(
+        { kind: 1, created_at: 0, tags: [], content: "" },
+        skThem,
+      ).pubkey;
+
+      // Conversation-scoped DM query: messages they sent to me.
+      mockWs.data.authedPubkeys.add(me);
+
+      mockStorage.query = async () => [];
+      await relay.handleReq(mockWs, "sub1", [
+        { kinds: [4], authors: [them], "#p": [me] },
+      ]);
+
+      const eose = sentMessages.find((m) => m[0] === "EOSE");
+      assert.ok(eose);
+      assert.ok(!sentMessages.find((m) => m[0] === "CLOSED"));
+    });
+
+    it("should reject combined authors+#p filter when neither list is fully authenticated", async () => {
+      const skMe = generateSecretKey();
+      const me = finalizeEvent(
+        { kind: 1, created_at: 0, tags: [], content: "" },
+        skMe,
+      ).pubkey;
+      const skA = generateSecretKey();
+      const pkA = finalizeEvent(
+        { kind: 1, created_at: 0, tags: [], content: "" },
+        skA,
+      ).pubkey;
+      const skB = generateSecretKey();
+      const pkB = finalizeEvent(
+        { kind: 1, created_at: 0, tags: [], content: "" },
+        skB,
+      ).pubkey;
+
+      // Authed as `me`, but authors is [me, pkA] (not fully authed) and
+      // #p is [pkB] (not authed at all).
+      mockWs.data.authedPubkeys.add(me);
+
+      mockStorage.query = async () => [];
+      await relay.handleReq(mockWs, "sub1", [
+        { kinds: [4], authors: [me, pkA], "#p": [pkB] },
+      ]);
+
+      assert.equal(sentMessages.length, 2); // AUTH challenge + CLOSED
+      assert.equal(sentMessages[0][0], "AUTH");
+      assert.equal(sentMessages[1][0], "CLOSED");
+      assert.ok((sentMessages[1][2] as string).startsWith("auth-required:"));
+    });
+
     it("should allow non-auth kinds without authentication", async () => {
       mockStorage.query = async () => [];
       await relay.handleReq(mockWs, "sub1", [{ kinds: [1] }]);
