@@ -20,7 +20,11 @@ import {
   opensearchQueryDurationHistogram,
   opensearchSlotDeepHistoryCounter,
 } from "./metrics.ts";
-import type { ClientOptions } from "./opensearch-client.ts";
+import type {
+  ClientOptions,
+  MsearchResponseItem,
+  SearchResponseBody,
+} from "./opensearch-client.ts";
 import {
   type Client,
   Client as OpenSearchClient,
@@ -902,14 +906,12 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
   /**
    * Extract hits from an OpenSearch response as NostrEvent[].
    */
-  private hitsToEvents(
-    // biome-ignore lint/suspicious/noExplicitAny: OpenSearch response typing
-    response: any,
-  ): NostrEvent[] {
-    const hits = response.body.hits.hits;
-    return hits
-      .filter((hit: { _source?: NostrEvent }) => hit._source !== undefined)
-      .map((hit: { _source: NostrEvent }) => hit._source);
+  private hitsToEvents(response: {
+    body: SearchResponseBody<NostrEvent>;
+  }): NostrEvent[] {
+    return response.body.hits.hits.flatMap((hit) =>
+      hit._source !== undefined ? [hit._source] : [],
+    );
   }
 
   /**
@@ -925,7 +927,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
       bool: { must: Record<string, unknown>[] };
     };
 
-    const response = await this.client.search({
+    const response = await this.client.search<NostrEvent>({
       index: this.indexName,
       body: {
         _source: NOSTR_EVENT_FIELDS,
@@ -955,7 +957,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
       bool: { must: Record<string, unknown>[] };
     };
 
-    const response = await this.client.search({
+    const response = await this.client.search<NostrEvent>({
       index: this.indexName,
       body: {
         _source: NOSTR_EVENT_FIELDS,
@@ -991,7 +993,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
       bool: { must: Record<string, unknown>[] };
     };
 
-    const response = await this.client.search({
+    const response = await this.client.search<NostrEvent>({
       index: this.indexName,
       body: {
         _source: NOSTR_EVENT_FIELDS,
@@ -1029,7 +1031,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
       bool: { must: Record<string, unknown>[] };
     };
 
-    const response = await this.client.search({
+    const response = await this.client.search<NostrEvent>({
       index: this.indexName,
       body: {
         _source: NOSTR_EVENT_FIELDS,
@@ -1064,7 +1066,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
       bool: { must: Record<string, unknown>[] };
     };
 
-    const response = await this.client.search({
+    const response = await this.client.search<NostrEvent>({
       index: this.indexName,
       body: {
         _source: NOSTR_EVENT_FIELDS,
@@ -1101,7 +1103,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
       bool: { must: Record<string, unknown>[] };
     };
 
-    const response = await this.client.search({
+    const response = await this.client.search<NostrEvent>({
       index: this.indexName,
       body: {
         _source: NOSTR_EVENT_FIELDS,
@@ -1130,7 +1132,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
       bool: { must: Record<string, unknown>[] };
     };
 
-    const response = await this.client.search({
+    const response = await this.client.search<NostrEvent>({
       index: this.indexName,
       body: {
         _source: NOSTR_EVENT_FIELDS,
@@ -1305,7 +1307,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
 
     const query = this.buildQuery(kind0Filter);
 
-    const response = await this.client.search({
+    const response = await this.client.search<NostrEvent>({
       index: this.indexName,
       body: {
         _source: NOSTR_EVENT_FIELDS,
@@ -1639,16 +1641,13 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
         searchBody.collapse = { field: "pubkey" };
       }
 
-      const response = await this.client.search({
+      const response = await this.client.search<NostrEvent>({
         index: this.indexName,
         body: searchBody,
       });
       queryEnd();
 
-      const hits = response.body.hits.hits;
-      return hits
-        .filter((hit: { _source?: NostrEvent }) => hit._source !== undefined)
-        .map((hit: { _source: NostrEvent }) => hit._source);
+      return this.hitsToEvents(response);
     } catch (error) {
       queryEnd();
       console.error("OpenSearch query failed:", error);
@@ -2420,7 +2419,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     const end = opensearchQueryDurationHistogram.startTimer({ type: "sync" });
 
     try {
-      let searchAfter: [number, string] | undefined;
+      let searchAfter: Array<string | number> | undefined;
 
       while (items.length < maxItems) {
         if (opts?.signal?.aborted) break;
@@ -2437,21 +2436,15 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
           body.search_after = searchAfter;
         }
 
-        const response = await this.client.search({
+        const response = await this.client.search<{
+          created_at: number;
+          id: string;
+        }>({
           index: this.indexName,
           body,
         });
 
-        const hits = (
-          response.body as unknown as {
-            hits: {
-              hits: Array<{
-                _source?: { created_at: number; id: string };
-                sort?: [number, string];
-              }>;
-            };
-          }
-        ).hits.hits;
+        const hits = response.body.hits.hits;
 
         if (hits.length === 0) break;
 
@@ -2643,14 +2636,12 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
         const response = await this.writeClient.bulk({
           body,
           refresh: true, // Refresh to make deletions visible immediately
-          // @ts-expect-error: signal not in types but supported by underlying HTTP client
           signal: opts?.signal,
         });
 
         if (response.body.errors) {
           const erroredDocuments = response.body.items.filter(
-            (item: Record<string, unknown>) =>
-              (item.update as Record<string, unknown>)?.error,
+            (item) => item.update?.error,
           );
           console.error(
             `Bulk update had ${erroredDocuments.length} errors:`,
@@ -2924,7 +2915,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     if (pending.ids.size > 0) {
       searches.push(
         this.client
-          .search({
+          .search<DirtyHit>({
             index: this.indexName,
             body: {
               query: {
@@ -2938,8 +2929,9 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
             },
           })
           .then((r) => {
-            const hits = r.body.hits.hits as Array<{ _source?: DirtyHit }>;
-            return hits.flatMap((h) => (h._source?.id ? [h._source] : []));
+            return r.body.hits.hits.flatMap((h) =>
+              h._source?.id ? [h._source] : [],
+            );
           }),
       );
     }
@@ -2948,7 +2940,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     if (pending.pubkeys.size > 0) {
       searches.push(
         this.client
-          .search({
+          .search<DirtyHit>({
             index: this.indexName,
             body: {
               query: {
@@ -2965,8 +2957,9 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
             },
           })
           .then((r) => {
-            const hits = r.body.hits.hits as Array<{ _source?: DirtyHit }>;
-            return hits.flatMap((h) => (h._source?.id ? [h._source] : []));
+            return r.body.hits.hits.flatMap((h) =>
+              h._source?.id ? [h._source] : [],
+            );
           }),
       );
     }
@@ -3052,9 +3045,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
         const s = scores.get(dirtyKind0[i].id);
         if (!s) continue;
         const resp = followerResult.body.responses[i];
-        const total = (resp?.hits as { total?: { value?: number } })?.total
-          ?.value;
-        s.followers = total ?? 0;
+        s.followers = resp?.hits?.total?.value ?? 0;
       }
     }
 
@@ -3206,10 +3197,8 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
 
         const base = i * QUERIES_PER_EVENT;
 
-        const getCount = (resp: Record<string, unknown>): number => {
-          const total = (resp?.hits as { total?: { value?: number } })?.total
-            ?.value;
-          return total ?? 0;
+        const getCount = (resp: MsearchResponseItem | undefined): number => {
+          return resp?.hits?.total?.value ?? 0;
         };
 
         // 0: comments

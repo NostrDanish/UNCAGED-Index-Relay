@@ -26,6 +26,46 @@ interface ApiResponse<T> {
   body: T;
 }
 
+/** A single hit in a search response. */
+export interface SearchHit<TSource = unknown> {
+  _id?: string;
+  _index?: string;
+  _source?: TSource;
+  sort?: Array<string | number>;
+}
+
+/** Body of a `/_search` response (only the fields the relay uses). */
+export interface SearchResponseBody<TSource = unknown> {
+  hits: {
+    total?: { value?: number; relation?: string };
+    hits: Array<SearchHit<TSource>>;
+  };
+  aggregations?: Record<string, unknown>;
+}
+
+/**
+ * One entry of a `/_msearch` `responses` array: either a search response
+ * body or an error object.
+ */
+export interface MsearchResponseItem<TSource = unknown> {
+  error?: unknown;
+  status?: number;
+  hits?: {
+    total?: { value?: number; relation?: string };
+    hits?: Array<SearchHit<TSource>>;
+  };
+  aggregations?: Record<string, unknown>;
+}
+
+/**
+ * One item of a `/_bulk` response, keyed by the action that produced it
+ * (`index`, `update`, `delete`, or `create`).
+ */
+export type BulkResponseItem = Record<
+  string,
+  { error?: unknown; status?: number }
+>;
+
 /** Index-scoped helper exposed as `client.indices.*`. */
 class IndicesApi {
   constructor(private _request: Client["_request"]) {}
@@ -172,17 +212,17 @@ export class Client {
   // ---------------------------------------------------------------------------
 
   /** POST /{index}/_search */
-  async search(params: {
+  async search<TSource = unknown>(params: {
     index: string;
     body: unknown;
-  }): Promise<ApiResponse<Record<string, unknown>>> {
+  }): Promise<ApiResponse<SearchResponseBody<TSource>>> {
     const end = opensearchSearchDurationHistogram.startTimer();
     const res = await this._request(
       "POST",
       `/${encodeURIComponent(params.index)}/_search`,
       params.body,
     );
-    const body = (await res.json()) as Record<string, unknown>;
+    const body = (await res.json()) as SearchResponseBody<TSource>;
     end();
     return { body };
   }
@@ -194,9 +234,9 @@ export class Client {
    * Each search is a pair of lines: a header (with `index`) and a body
    * (the search query).
    */
-  async msearch(
+  async msearch<TSource = unknown>(
     searches: Array<{ index: string; body: unknown }>,
-  ): Promise<ApiResponse<{ responses: Array<Record<string, unknown>> }>> {
+  ): Promise<ApiResponse<{ responses: Array<MsearchResponseItem<TSource>> }>> {
     // Build NDJSON payload: header + body per search, trailing newline.
     const lines: string[] = [];
     for (const s of searches) {
@@ -226,7 +266,9 @@ export class Client {
     }
 
     return {
-      body: (await res.json()) as { responses: Array<Record<string, unknown>> },
+      body: (await res.json()) as {
+        responses: Array<MsearchResponseItem<TSource>>;
+      },
     };
   }
 
@@ -254,7 +296,7 @@ export class Client {
     body: unknown[];
     refresh?: boolean | "wait_for" | "true" | "false";
     signal?: AbortSignal;
-  }): Promise<ApiResponse<{ errors: boolean; items: unknown[] }>> {
+  }): Promise<ApiResponse<{ errors: boolean; items: BulkResponseItem[] }>> {
     // Build NDJSON payload.
     const ndjson = `${params.body.map((obj) => JSON.stringify(obj)).join("\n")}\n`;
 
@@ -290,7 +332,10 @@ export class Client {
     }
 
     return {
-      body: (await res.json()) as { errors: boolean; items: unknown[] },
+      body: (await res.json()) as {
+        errors: boolean;
+        items: BulkResponseItem[];
+      },
     };
   }
 
