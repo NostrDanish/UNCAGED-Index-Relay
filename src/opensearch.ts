@@ -63,6 +63,18 @@ const REPLACED_DOC: Readonly<Record<string, unknown>> = Object.freeze({
 });
 
 /**
+ * Time window for decay-based script_score sorts (sort:hot, sort:rising).
+ *
+ * The hot score halves every 24 hours, so after 7 days an event retains
+ * less than 0.8% of its base score — effectively zero. Bounding
+ * `created_at` lets OpenSearch skip script-scoring the vast majority of
+ * the index. Without this bound, a single `sort:hot` request runs the
+ * painless script on every matching document (tens of millions of docs),
+ * and a handful of concurrent requests can pin every CPU core.
+ */
+const DECAY_SORT_WINDOW_SECONDS = 7 * 24 * 3600;
+
+/**
  * OpenSearch document structure for Nostr events
  */
 interface NostrEventDocument extends NostrEvent {
@@ -947,6 +959,12 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
    * Query hot events — engagers weighted by exponential time decay.
    * Score = engagers * 0.5^(age_in_hours / 24).
    * Uses a script_score query so OpenSearch computes and sorts server-side.
+   *
+   * Filters `created_at >= now - DECAY_SORT_WINDOW_SECONDS` and
+   * `engagers > 0` so the painless script only runs on documents that can
+   * actually score. Without these bounds every matching document in the
+   * index (tens of millions) is script-scored per request, which can pin
+   * every OpenSearch CPU core.
    */
   private async querySortHot(
     filter: NostrFilter,
@@ -956,6 +974,10 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     const query = this.buildQuery(filter) as {
       bool: { must: Record<string, unknown>[] };
     };
+    query.bool.must.push(
+      { range: { created_at: { gte: now - DECAY_SORT_WINDOW_SECONDS } } },
+      { range: { engagers: { gt: 0 } } },
+    );
 
     const response = await this.client.search<NostrEvent>({
       index: this.indexName,
@@ -984,6 +1006,10 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
   /**
    * Query controversial events — high engagement with balanced comments
    * vs reactions. Score = min(comment_cnt, reaction_cnt) * sqrt(total).
+   *
+   * Filters `comment_cnt > 0` and `reaction_cnt > 0` (documents missing
+   * either score exactly 0) so the script only scores the small subset of
+   * documents with both kinds of engagement.
    */
   private async querySortControversial(
     filter: NostrFilter,
@@ -992,6 +1018,10 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     const query = this.buildQuery(filter) as {
       bool: { must: Record<string, unknown>[] };
     };
+    query.bool.must.push(
+      { range: { comment_cnt: { gt: 0 } } },
+      { range: { reaction_cnt: { gt: 0 } } },
+    );
 
     const response = await this.client.search<NostrEvent>({
       index: this.indexName,
@@ -1021,6 +1051,10 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
    * Query rising events — gaining engagement quickly relative to age.
    * Score = (comment_cnt + reaction_cnt + repost_cnt + quote_cnt) / age_in_hours.
    * Uses all-time counts as the score basis.
+   *
+   * Filters `created_at >= now - DECAY_SORT_WINDOW_SECONDS` so the script
+   * only scores recent documents — "rising" is inherently about recency,
+   * and older events divide by a huge age anyway.
    */
   private async querySortRising(
     filter: NostrFilter,
@@ -1030,6 +1064,9 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     const query = this.buildQuery(filter) as {
       bool: { must: Record<string, unknown>[] };
     };
+    query.bool.must.push({
+      range: { created_at: { gte: now - DECAY_SORT_WINDOW_SECONDS } },
+    });
 
     const response = await this.client.search<NostrEvent>({
       index: this.indexName,
@@ -1122,6 +1159,9 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
   /**
    * Sort kind 0 events by follower count with time decay.
    * Score = followers * 0.5^(age_hours / 24).
+   *
+   * Filters `created_at >= now - DECAY_SORT_WINDOW_SECONDS` and
+   * `followers > 0` so the script only scores documents that can rank.
    */
   private async querySortHotKind0(
     filter: NostrFilter,
@@ -1131,6 +1171,10 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     const query = this.buildQuery(filter) as {
       bool: { must: Record<string, unknown>[] };
     };
+    query.bool.must.push(
+      { range: { created_at: { gte: now - DECAY_SORT_WINDOW_SECONDS } } },
+      { range: { followers: { gt: 0 } } },
+    );
 
     const response = await this.client.search<NostrEvent>({
       index: this.indexName,

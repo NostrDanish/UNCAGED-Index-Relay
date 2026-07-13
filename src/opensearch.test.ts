@@ -2628,6 +2628,185 @@ describe("OpenSearchRelay", () => {
       assert.equal(results[0].id, recentEvent.id);
     });
 
+    it("sort:hot excludes events older than the decay window", async () => {
+      const { client, setScore } = createSortMockClient();
+      const relay = new OpenSearchRelay(client as unknown as Client, {
+        indexName: "test-index",
+        bulkMaxSize: 1,
+        refreshDelayMs: 0,
+      });
+
+      const sk = generateSecretKey();
+      const now = Math.floor(Date.now() / 1000);
+
+      const staleEvent = finalizeEvent(
+        {
+          kind: 1,
+          created_at: now - 8 * 24 * 3600, // 8 days ago — outside window
+          tags: [],
+          content: "Stale but heavily engaged event",
+        },
+        sk,
+      );
+
+      const freshEvent = finalizeEvent(
+        {
+          kind: 1,
+          created_at: now - 3600, // 1 hour ago
+          tags: [],
+          content: "Fresh event",
+        },
+        sk,
+      );
+
+      await relay.event(staleEvent);
+      await relay.event(freshEvent);
+
+      // Stale event has massive engagement, but decays to ~0 and must be
+      // excluded by the created_at window filter (never script-scored).
+      setScore(staleEvent.id, { engagers: 100000 });
+      setScore(freshEvent.id, { engagers: 1 });
+
+      const results = await relay.query([{ kinds: [1], search: "sort:hot" }]);
+
+      assert.equal(results.length, 1);
+      assert.equal(results[0].id, freshEvent.id);
+    });
+
+    it("sort:hot excludes events with zero engagers", async () => {
+      const { client, setScore } = createSortMockClient();
+      const relay = new OpenSearchRelay(client as unknown as Client, {
+        indexName: "test-index",
+        bulkMaxSize: 1,
+        refreshDelayMs: 0,
+      });
+
+      const sk = generateSecretKey();
+      const now = Math.floor(Date.now() / 1000);
+
+      const unengaged = finalizeEvent(
+        {
+          kind: 1,
+          created_at: now - 60,
+          tags: [],
+          content: "Nobody engaged with this",
+        },
+        sk,
+      );
+
+      const engaged = finalizeEvent(
+        {
+          kind: 1,
+          created_at: now - 120,
+          tags: [],
+          content: "Somebody engaged with this",
+        },
+        sk,
+      );
+
+      await relay.event(unengaged);
+      await relay.event(engaged);
+
+      // unengaged keeps its default engagers: 0 — filtered out.
+      setScore(engaged.id, { engagers: 2 });
+
+      const results = await relay.query([{ kinds: [1], search: "sort:hot" }]);
+
+      assert.equal(results.length, 1);
+      assert.equal(results[0].id, engaged.id);
+    });
+
+    it("sort:controversial excludes events lacking comments or reactions", async () => {
+      const { client, setScore } = createSortMockClient();
+      const relay = new OpenSearchRelay(client as unknown as Client, {
+        indexName: "test-index",
+        bulkMaxSize: 1,
+        refreshDelayMs: 0,
+      });
+
+      const sk = generateSecretKey();
+      const now = Math.floor(Date.now() / 1000);
+
+      const onlyComments = finalizeEvent(
+        {
+          kind: 1,
+          created_at: now - 60,
+          tags: [],
+          content: "Comments but no reactions",
+        },
+        sk,
+      );
+
+      const balanced = finalizeEvent(
+        {
+          kind: 1,
+          created_at: now - 120,
+          tags: [],
+          content: "Comments and reactions",
+        },
+        sk,
+      );
+
+      await relay.event(onlyComments);
+      await relay.event(balanced);
+
+      // min(comments, reactions) = 0 → score 0 → must be filtered out.
+      setScore(onlyComments.id, { comment_cnt: 50, reaction_cnt: 0 });
+      setScore(balanced.id, { comment_cnt: 3, reaction_cnt: 3 });
+
+      const results = await relay.query([
+        { kinds: [1], search: "sort:controversial" },
+      ]);
+
+      assert.equal(results.length, 1);
+      assert.equal(results[0].id, balanced.id);
+    });
+
+    it("sort:rising excludes events older than the decay window", async () => {
+      const { client, setScore } = createSortMockClient();
+      const relay = new OpenSearchRelay(client as unknown as Client, {
+        indexName: "test-index",
+        bulkMaxSize: 1,
+        refreshDelayMs: 0,
+      });
+
+      const sk = generateSecretKey();
+      const now = Math.floor(Date.now() / 1000);
+
+      const staleEvent = finalizeEvent(
+        {
+          kind: 1,
+          created_at: now - 8 * 24 * 3600, // 8 days ago — outside window
+          tags: [],
+          content: "Old event with engagement",
+        },
+        sk,
+      );
+
+      const freshEvent = finalizeEvent(
+        {
+          kind: 1,
+          created_at: now - 1800, // 30 minutes ago
+          tags: [],
+          content: "Recent event gaining traction",
+        },
+        sk,
+      );
+
+      await relay.event(staleEvent);
+      await relay.event(freshEvent);
+
+      setScore(staleEvent.id, { comment_cnt: 100, reaction_cnt: 100 });
+      setScore(freshEvent.id, { comment_cnt: 2, reaction_cnt: 2 });
+
+      const results = await relay.query([
+        { kinds: [1], search: "sort:rising" },
+      ]);
+
+      assert.equal(results.length, 1);
+      assert.equal(results[0].id, freshEvent.id);
+    });
+
     it("should combine sort with full-text search", async () => {
       const { client, setScore } = createSortMockClient();
       const relay = new OpenSearchRelay(client as unknown as Client, {
