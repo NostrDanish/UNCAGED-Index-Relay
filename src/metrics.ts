@@ -10,6 +10,8 @@
  * format expected by `/metrics`.
  */
 
+import process from "node:process";
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -417,3 +419,49 @@ export const relayOverloadCounter = new Counter({
   help: "EVENT messages rejected due to backpressure",
   labelNames: ["source"] as const, // "analyze" | "storage"
 });
+
+// ---------------------------------------------------------------------------
+// Runtime health (event loop / memory)
+// ---------------------------------------------------------------------------
+
+/**
+ * Event loop scheduling delay in seconds, sampled every 5 seconds. Bun's
+ * event loop is single-threaded, so sustained lag here means every
+ * websocket message, REQ, and /metrics scrape is queueing behind it.
+ */
+export const eventLoopLagGauge = new Gauge({
+  name: "ditto_event_loop_lag_seconds",
+  help: "Event loop scheduling delay beyond the timer interval, sampled every 5s",
+});
+
+/** Resident set size of the relay process in bytes. */
+export const processRssGauge = new Gauge({
+  name: "ditto_process_rss_bytes",
+  help: "Resident set size of the relay process",
+});
+
+/** JavaScript heap used by the relay process in bytes. */
+export const jsHeapUsedGauge = new Gauge({
+  name: "ditto_js_heap_used_bytes",
+  help: "JavaScript heap used by the relay process",
+});
+
+/**
+ * Start sampling runtime health metrics. The lag gauge measures how much
+ * later than scheduled each tick fires — a direct signal of main-thread
+ * event-loop saturation. Returns a function that stops sampling.
+ */
+export function startRuntimeMetrics(intervalMs = 5_000): () => void {
+  let expected = performance.now() + intervalMs;
+  const timer = setInterval(() => {
+    const now = performance.now();
+    eventLoopLagGauge.set(Math.max(0, (now - expected) / 1000));
+    expected = now + intervalMs;
+
+    const mem = process.memoryUsage();
+    processRssGauge.set(mem.rss);
+    jsHeapUsedGauge.set(mem.heapUsed);
+  }, intervalMs);
+  timer.unref?.();
+  return () => clearInterval(timer);
+}

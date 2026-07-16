@@ -5,7 +5,7 @@ import { serve } from "bun";
 import { AnalyzePool } from "./analyze-pool.ts";
 import { Config } from "./config.ts";
 import { renderLandingPage } from "./landing-page.ts";
-import { register } from "./metrics.ts";
+import { register, startRuntimeMetrics } from "./metrics.ts";
 import { OpenSearchRelay } from "./opensearch.ts";
 import type { ClientOptions } from "./opensearch-client.ts";
 import { Client as OpenSearchClient } from "./opensearch-client.ts";
@@ -146,6 +146,9 @@ try {
   console.error(`Make sure OpenSearch is running at ${config.opensearchNode}`);
   process.exit(1);
 }
+
+// Sample event-loop lag and memory usage for /metrics.
+startRuntimeMetrics();
 
 // Pre-render the HTML landing page (relay info is static after startup).
 const landingPageHtml = renderLandingPage(
