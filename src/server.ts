@@ -53,6 +53,8 @@ const opensearchRelay = new OpenSearchRelay(opensearchReadClient, {
   writeClient: opensearchWriteClient,
   tagValueMaxCountPerName: config.tagValueMaxCountPerName,
   bulkMaxQueue: config.bulkMaxQueue,
+  defaultLimit: config.defaultLimit,
+  maxLimit: config.maxLimit,
   logger: log,
 });
 
@@ -63,6 +65,7 @@ const relay = new Relay(opensearchRelay, {
   authKinds: config.authKinds,
   maxMessageLength: config.maxMessageLength,
   maxFilterValues: config.maxFilterValues,
+  maxLimit: config.maxLimit,
   maxEventTags: config.tagValueMaxCountPerName,
   maxInflightPerConn: config.maxInflightPerConn,
   bannedHashtags: config.bannedHashtags,

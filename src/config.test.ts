@@ -394,12 +394,63 @@ describe("Config", () => {
     });
   });
 
+  describe("maxLimit / defaultLimit", () => {
+    it("should default to 1000 / 100 when not set", () => {
+      const config = new Config(baseEnv());
+      assert.equal(config.maxLimit, 1000);
+      assert.equal(config.defaultLimit, 100);
+    });
+
+    it("should parse maxLimit from environment", () => {
+      const config = new Config(baseEnv([["RELAY_MAX_LIMIT", "2000"]]));
+      assert.equal(config.maxLimit, 2000);
+    });
+
+    it("should parse defaultLimit from environment", () => {
+      const config = new Config(baseEnv([["RELAY_DEFAULT_LIMIT", "50"]]));
+      assert.equal(config.defaultLimit, 50);
+    });
+
+    it("should throw when maxLimit is not a number", () => {
+      assert.throws(
+        () => new Config(baseEnv([["RELAY_MAX_LIMIT", "nope"]])),
+        /RELAY_MAX_LIMIT/,
+      );
+    });
+
+    it("should throw when maxLimit is zero", () => {
+      assert.throws(
+        () => new Config(baseEnv([["RELAY_MAX_LIMIT", "0"]])),
+        /RELAY_MAX_LIMIT/,
+      );
+    });
+
+    it("should throw when defaultLimit is not a number", () => {
+      assert.throws(
+        () => new Config(baseEnv([["RELAY_DEFAULT_LIMIT", "nope"]])),
+        /RELAY_DEFAULT_LIMIT/,
+      );
+    });
+
+    it("should throw when defaultLimit exceeds maxLimit", () => {
+      assert.throws(
+        () =>
+          new Config(
+            baseEnv([
+              ["RELAY_MAX_LIMIT", "100"],
+              ["RELAY_DEFAULT_LIMIT", "500"],
+            ]),
+          ),
+        /RELAY_DEFAULT_LIMIT must not exceed RELAY_MAX_LIMIT/,
+      );
+    });
+  });
+
   describe("tagValueMaxCountPerName", () => {
     it("should default to 5000 when not set", () => {
       const config = new Config(baseEnv());
       assert.equal(config.tagValueMaxCountPerName, 5000);
     });
-
     it("should parse from environment", () => {
       const config = new Config(
         baseEnv([["RELAY_TAG_VALUE_MAX_COUNT_PER_NAME", "1024"]]),

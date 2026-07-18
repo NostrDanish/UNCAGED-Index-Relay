@@ -67,6 +67,18 @@ export class Config {
    */
   readonly maxFilterValues: number;
   /**
+   * Default number of events returned for a REQ filter that omits `limit`.
+   * Applied by the storage layer's per-filter clamp. Default: 100.
+   */
+  readonly defaultLimit: number;
+  /**
+   * Maximum number of events returned for a single REQ filter, regardless of
+   * the client-supplied `limit`. Enforced by the storage layer's per-filter
+   * clamp and advertised to clients as NIP-11 `limitation.max_limit` so the
+   * advertised value matches what is enforced. Default: 1000.
+   */
+  readonly maxLimit: number;
+  /**
    * Maximum number of values stored per tag name in the indexed `tags_map`
    * projection. Bounds the per-document inverted-index growth from events
    * with very high tag counts. Also surfaced to clients as NIP-11
@@ -298,6 +310,33 @@ export class Config {
         throw new Error("RELAY_MAX_FILTER_VALUES must be a positive integer.");
       }
       this.maxFilterValues = n;
+    }
+
+    // maxLimit
+    const maxLimitValue = env.get("RELAY_MAX_LIMIT");
+    if (!maxLimitValue) {
+      this.maxLimit = 1000;
+    } else {
+      const n = parseInt(maxLimitValue, 10);
+      if (Number.isNaN(n) || n <= 0) {
+        throw new Error("RELAY_MAX_LIMIT must be a positive integer.");
+      }
+      this.maxLimit = n;
+    }
+
+    // defaultLimit
+    const defaultLimitValue = env.get("RELAY_DEFAULT_LIMIT");
+    if (!defaultLimitValue) {
+      this.defaultLimit = 100;
+    } else {
+      const n = parseInt(defaultLimitValue, 10);
+      if (Number.isNaN(n) || n <= 0) {
+        throw new Error("RELAY_DEFAULT_LIMIT must be a positive integer.");
+      }
+      this.defaultLimit = n;
+    }
+    if (this.defaultLimit > this.maxLimit) {
+      throw new Error("RELAY_DEFAULT_LIMIT must not exceed RELAY_MAX_LIMIT.");
     }
 
     // tagValueMaxCountPerName

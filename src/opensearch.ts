@@ -336,6 +336,11 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
   /** Per-instance override of TAG_VALUE_MAX_COUNT_PER_NAME. */
   private tagValueMaxCountPerName: number;
 
+  /** Default per-filter event limit when the filter omits `limit`. */
+  private defaultLimit: number;
+  /** Maximum per-filter event limit, clamping any client-supplied `limit`. */
+  private maxLimit: number;
+
   /**
    * Maximum number of events permitted to sit in the bulk queue. When
    * exceeded, {@link event} rejects new events with {@link StorageOverloaded}
@@ -374,6 +379,16 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
        */
       tagValueMaxCountPerName?: number;
       /**
+       * Default number of events returned for a REQ filter that omits
+       * `limit`. Default: 100.
+       */
+      defaultLimit?: number;
+      /**
+       * Maximum number of events returned for a single REQ filter, clamping
+       * any client-supplied `limit`. Default: 1000.
+       */
+      maxLimit?: number;
+      /**
        * Structured logger. Defaults to a fresh `info`-level Logger; entry
        * points inject one built from `Config.logLevel`.
        */
@@ -396,6 +411,8 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     this.tagValueMaxCountPerName =
       opts?.tagValueMaxCountPerName ??
       OpenSearchRelay.TAG_VALUE_MAX_COUNT_PER_NAME;
+    this.defaultLimit = opts?.defaultLimit ?? 100;
+    this.maxLimit = opts?.maxLimit ?? 1000;
   }
 
   /**
@@ -421,6 +438,8 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
       historyKindsExcluded: config.historyKindsExcluded,
       authKinds: config.authKinds,
       tagValueMaxCountPerName: config.tagValueMaxCountPerName,
+      defaultLimit: config.defaultLimit,
+      maxLimit: config.maxLimit,
       logger: new Logger(config.logLevel),
     });
   }
@@ -1642,8 +1661,8 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
       return [];
     }
 
-    // Default to 500, cap at 5000
-    const limit = Math.min(filter.limit || 500, 5000);
+    // Clamp to the configured default (when unset) and maximum.
+    const limit = Math.min(filter.limit || this.defaultLimit, this.maxLimit);
 
     // Check if this is a sort query
     const sortMode = this.parseSortMode(filter);

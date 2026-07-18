@@ -2078,6 +2078,91 @@ describe("OpenSearchRelay", () => {
         "Pubkey should be marked dirty after kind 0 replacement",
       );
     });
+
+    describe("per-filter limit clamp", () => {
+      const makeEvents = (n: number, sk: Uint8Array) => {
+        const now = Math.floor(Date.now() / 1000);
+        const events = [];
+        for (let i = 0; i < n; i++) {
+          events.push(
+            finalizeEvent(
+              { kind: 1, created_at: now - i, tags: [], content: `e${i}` },
+              sk,
+            ),
+          );
+        }
+        return events;
+      };
+
+      it("clamps a client limit above maxLimit down to maxLimit", async () => {
+        const { client } = createHistoryMockClient();
+        const relay = new OpenSearchRelay(client as unknown as Client, {
+          indexName: "test-index",
+          bulkMaxSize: 1,
+          refreshDelayMs: 0,
+          maxLimit: 10,
+          defaultLimit: 5,
+        });
+
+        const sk = generateSecretKey();
+        for (const e of makeEvents(20, sk)) await relay.event(e);
+
+        const results = await relay.query([{ kinds: [1], limit: 5000 }]);
+        assert.equal(results.length, 10, "Should clamp to maxLimit (10)");
+      });
+
+      it("applies defaultLimit when the filter omits limit", async () => {
+        const { client } = createHistoryMockClient();
+        const relay = new OpenSearchRelay(client as unknown as Client, {
+          indexName: "test-index",
+          bulkMaxSize: 1,
+          refreshDelayMs: 0,
+          maxLimit: 10,
+          defaultLimit: 5,
+        });
+
+        const sk = generateSecretKey();
+        for (const e of makeEvents(20, sk)) await relay.event(e);
+
+        const results = await relay.query([{ kinds: [1] }]);
+        assert.equal(results.length, 5, "Should apply defaultLimit (5)");
+      });
+
+      it("honors a client limit below maxLimit", async () => {
+        const { client } = createHistoryMockClient();
+        const relay = new OpenSearchRelay(client as unknown as Client, {
+          indexName: "test-index",
+          bulkMaxSize: 1,
+          refreshDelayMs: 0,
+          maxLimit: 10,
+          defaultLimit: 5,
+        });
+
+        const sk = generateSecretKey();
+        for (const e of makeEvents(20, sk)) await relay.event(e);
+
+        const results = await relay.query([{ kinds: [1], limit: 3 }]);
+        assert.equal(results.length, 3, "Should honor client limit (3)");
+      });
+
+      it("defaults to 100/1000 when unset", async () => {
+        const { client } = createHistoryMockClient();
+        const relay = new OpenSearchRelay(client as unknown as Client, {
+          indexName: "test-index",
+          bulkMaxSize: 1,
+          refreshDelayMs: 0,
+        });
+
+        const sk = generateSecretKey();
+        for (const e of makeEvents(150, sk)) await relay.event(e);
+
+        const defaulted = await relay.query([{ kinds: [1] }]);
+        assert.equal(defaulted.length, 100, "Default limit should be 100");
+
+        const clamped = await relay.query([{ kinds: [1], limit: 5000 }]);
+        assert.equal(clamped.length, 150, "Only 150 events exist; max is 1000");
+      });
+    });
   });
 
   describe("pendingDirty cap", () => {

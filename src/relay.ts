@@ -284,7 +284,7 @@ export class Relay {
 
   /**
    * Chunk size for the REQ EOSE send loop. Yields the event loop every
-   * this-many events so a large REQ (up to `max_limit` 5000) doesn't pin
+   * this-many events so a large REQ (up to `max_limit`) doesn't pin
    * the main thread for tens of milliseconds.
    */
   private static REQ_SEND_CHUNK = 50;
@@ -310,6 +310,12 @@ export class Relay {
        * `limitation.max_filter_values`. Default: 5000.
        */
       maxFilterValues?: number;
+      /**
+       * Maximum number of events returned for a single REQ filter. Advertised
+       * via NIP-11 `limitation.max_limit`. Must match the storage layer's
+       * clamp so the advertised value is actually enforced. Default: 1000.
+       */
+      maxLimit?: number;
       /**
        * Maximum number of tags on a single event that the indexer will fully
        * project into `tags_map`. Only advertised via NIP-11
@@ -371,7 +377,7 @@ export class Relay {
         max_message_length: opts.maxMessageLength ?? 4_000_000,
         max_subscriptions: 20,
         max_filters: 100,
-        max_limit: 5000,
+        max_limit: opts.maxLimit ?? 1000,
         max_subid_length: 100,
         max_event_tags: opts.maxEventTags ?? 5000,
         min_pow_difficulty: 0,
@@ -1341,7 +1347,7 @@ export class Relay {
 
       // Send existing events. Under firehose load this loop is the largest
       // single-tick CPU burst the main thread does for any one client — up to
-      // `max_limit` (5000) JSON.stringify + ws.send calls back-to-back. Yield
+      // `max_limit` JSON.stringify + ws.send calls back-to-back. Yield
       // every REQ_SEND_CHUNK events so other REQs, EVENT continuations, and
       // the broadcast drain can interleave; without this, a single big REQ
       // can pin the event loop for tens of milliseconds.

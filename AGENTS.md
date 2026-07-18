@@ -83,6 +83,10 @@ Edit `.env` to configure the application:
 - `OPENSEARCH_INDEX` - Index name (default: nostr-events)
 - `OPENSEARCH_USERNAME` - OpenSearch username (optional)
 - `OPENSEARCH_PASSWORD` - OpenSearch password (optional)
+- `RELAY_MAX_LIMIT` - Maximum events returned per REQ filter; enforced by the
+  storage clamp and advertised as NIP-11 `max_limit` (default: 1000).
+- `RELAY_DEFAULT_LIMIT` - Events returned per REQ filter when `limit` is
+  omitted; must not exceed `RELAY_MAX_LIMIT` (default: 100).
 
 ## Adding Features
 

@@ -1668,6 +1668,27 @@ describe("Relay", () => {
         assert.equal(lim?.max_event_tags, 5000);
       });
 
+      it("advertises max_limit matching the constructor option", () => {
+        const customRelay = new Relay(mockStorage, {
+          relayUrl: "wss://relay.test/",
+          maxLimit: 250,
+        });
+        const lim = customRelay.getRelayInfo().limitation as
+          | { max_limit?: number }
+          | undefined;
+        assert.equal(lim?.max_limit, 250);
+      });
+
+      it("defaults max_limit to 1000 when unset", () => {
+        const defaultRelay = new Relay(mockStorage, {
+          relayUrl: "wss://relay.test/",
+        });
+        const lim = defaultRelay.getRelayInfo().limitation as
+          | { max_limit?: number }
+          | undefined;
+        assert.equal(lim?.max_limit, 1000);
+      });
+
       it("does not advertise max_content_length (not enforced beyond max_message_length)", () => {
         const defaultRelay = new Relay(mockStorage, {
           relayUrl: "wss://relay.test/",
