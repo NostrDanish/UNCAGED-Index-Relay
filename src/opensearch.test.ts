@@ -6792,6 +6792,199 @@ describe("OpenSearchRelay", () => {
     });
   });
 
+  describe("NIP-50 pow filter (NIP-13)", () => {
+    // Mock client that interprets a `range` clause on the `pow` field by
+    // comparing the stored document's pow value against the `gte` bound.
+    const createPowMockClient = () => {
+      const documents = new Map<string, unknown>();
+
+      return {
+        documents,
+        client: {
+          search: async ({ body }: { body: Record<string, unknown> }) => {
+            const results: unknown[] = [];
+            const queryBool = (body.query as Record<string, unknown>)
+              ?.bool as Record<string, unknown>;
+            const queryMust = queryBool?.must as
+              | Array<Record<string, unknown>>
+              | undefined;
+
+            // Extract a `pow >= N` lower bound if present.
+            let powGte: number | undefined;
+            for (const clause of queryMust || []) {
+              const range = clause.range as
+                | Record<string, Record<string, number>>
+                | undefined;
+              if (range?.pow?.gte !== undefined) {
+                powGte = range.pow.gte;
+              }
+            }
+
+            for (const [_id, doc] of documents.entries()) {
+              const docTyped = doc as NostrEvent & {
+                deleted?: boolean;
+                pow?: number;
+              };
+
+              if (docTyped.deleted) continue;
+              if (powGte !== undefined && (docTyped.pow ?? 0) < powGte)
+                continue;
+
+              results.push({ _source: doc });
+            }
+
+            return { body: { hits: { hits: results } } };
+          },
+          bulk: async ({ body }: { body: unknown[] }) => {
+            const items: Array<Record<string, unknown>> = [];
+            for (let i = 0; i < body.length; i += 2) {
+              const action = body[i] as { index?: { _id: string } };
+              const payload = body[i + 1] as Record<string, unknown>;
+              if (action.index) {
+                documents.set(action.index._id, payload);
+                items.push({ index: {} });
+              }
+            }
+            return { body: { errors: false, items } };
+          },
+          count: async () => ({ body: { count: documents.size } }),
+          updateByQuery: async () => ({ body: { updated: 0 } }),
+          msearch: async (requests: unknown[]) => ({
+            body: { responses: requests.map(() => ({ hits: { hits: [] } })) },
+          }),
+          indices: {
+            exists: async () => ({ body: true }),
+            create: async () => ({ body: {} }),
+          },
+          close: async () => {},
+        },
+      };
+    };
+
+    /**
+     * Mine a kind 1 event to at least `target` leading zero bits by
+     * incrementing the nonce. Used to produce cheap, real proof-of-work in
+     * tests (targets are kept small so mining stays fast).
+     */
+    const mineEvent = (
+      sk: Uint8Array,
+      created_at: number,
+      target: number,
+    ): NostrEvent => {
+      let nonce = 0;
+      for (;;) {
+        const event = finalizeEvent(
+          {
+            kind: 1,
+            created_at,
+            tags: [["nonce", String(nonce), String(target)]],
+            content: "mined",
+          },
+          sk,
+        );
+        // Count leading zero bits of the id.
+        let bits = 0;
+        for (let i = 0; i < event.id.length; i++) {
+          const n = Number.parseInt(event.id[i], 16);
+          if (n === 0) {
+            bits += 4;
+          } else {
+            bits += Math.clz32(n) - 28;
+            break;
+          }
+        }
+        if (bits >= target) return event;
+        nonce++;
+      }
+    };
+
+    it("stores pow=0 for events without a nonce tag", async () => {
+      const { client, documents } = createPowMockClient();
+      const relay = new OpenSearchRelay(client as unknown as Client, {
+        indexName: "test-index",
+        bulkMaxSize: 1,
+        refreshDelayMs: 0,
+      });
+
+      const sk = generateSecretKey();
+      const event = finalizeEvent(
+        { kind: 1, created_at: 1000, tags: [], content: "no pow" },
+        sk,
+      );
+      await relay.event(event);
+
+      const doc = documents.get(event.id) as { pow: number };
+      assert.equal(doc.pow, 0);
+    });
+
+    it("stores the computed difficulty for a mined event", async () => {
+      const { client, documents } = createPowMockClient();
+      const relay = new OpenSearchRelay(client as unknown as Client, {
+        indexName: "test-index",
+        bulkMaxSize: 1,
+        refreshDelayMs: 0,
+      });
+
+      const sk = generateSecretKey();
+      const mined = mineEvent(sk, 1000, 8);
+      await relay.event(mined);
+
+      const doc = documents.get(mined.id) as { pow: number };
+      assert.ok(doc.pow >= 8);
+    });
+
+    it("filters events by pow:<n> (difficulty >= n)", async () => {
+      const { client } = createPowMockClient();
+      const relay = new OpenSearchRelay(client as unknown as Client, {
+        indexName: "test-index",
+        bulkMaxSize: 1,
+        refreshDelayMs: 0,
+      });
+
+      const sk = generateSecretKey();
+
+      // Event with no proof of work (pow=0).
+      const plain = finalizeEvent(
+        { kind: 1, created_at: 1000, tags: [], content: "plain" },
+        sk,
+      );
+      // Event mined to at least 8 bits of difficulty.
+      const mined = mineEvent(sk, 1001, 8);
+
+      await relay.event(plain);
+      await relay.event(mined);
+
+      // pow:8 should return only the mined event.
+      const highPow = await relay.query([{ kinds: [1], search: "pow:8" }]);
+      assert.equal(highPow.length, 1);
+      assert.equal(highPow[0].id, mined.id);
+
+      // pow:0 should return both events.
+      const allPow = await relay.query([{ kinds: [1], search: "pow:0" }]);
+      assert.equal(allPow.length, 2);
+    });
+
+    it("ignores a non-numeric pow value", async () => {
+      const { client } = createPowMockClient();
+      const relay = new OpenSearchRelay(client as unknown as Client, {
+        indexName: "test-index",
+        bulkMaxSize: 1,
+        refreshDelayMs: 0,
+      });
+
+      const sk = generateSecretKey();
+      const plain = finalizeEvent(
+        { kind: 1, created_at: 1000, tags: [], content: "plain" },
+        sk,
+      );
+      await relay.event(plain);
+
+      // A malformed pow token adds no clause, so the event still matches.
+      const results = await relay.query([{ kinds: [1], search: "pow:abc" }]);
+      assert.equal(results.length, 1);
+    });
+  });
+
   describe("NIP-50 tag existence filter (tag:/-tag:)", () => {
     // Mock client that interprets `exists` clauses on tags_map.* fields by
     // inspecting the stored document's tags_map. Mirrors how OpenSearch's
@@ -7197,6 +7390,7 @@ describe("OpenSearchRelay", () => {
         "sentiment",
         "media",
         "video",
+        "pow",
         "metadata",
         "followers",
         "engagers",

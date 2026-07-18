@@ -370,7 +370,7 @@ export class Relay {
     this.relayInfo = {
       name: "Ditto Relay",
       description: "A Nostr relay backed by OpenSearch",
-      supported_nips: [1, 9, 11, 40, 42, 45, 50, 62, 70, 77],
+      supported_nips: [1, 9, 11, 13, 40, 42, 45, 50, 62, 70, 77],
       software: "https://gitlab.com/soapbox-pub/ditto-relay",
       version: "0.1.0",
       limitation: {

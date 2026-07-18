@@ -73,7 +73,7 @@ describe("Relay", () => {
       assert.equal(info.version, "0.1.0");
       assert.deepEqual(
         info.supported_nips,
-        [1, 9, 11, 40, 42, 45, 50, 62, 70, 77],
+        [1, 9, 11, 13, 40, 42, 45, 50, 62, 70, 77],
       );
     });
 

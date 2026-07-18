@@ -29,6 +29,8 @@
 │   ├── media.ts            # Media/video detection from imeta tags and URLs
 │   ├── negentropy.ts       # NIP-77 Negentropy protocol codec (set reconciliation)
 │   ├── negentropy.test.ts  # Negentropy tests
+│   ├── pow.ts              # NIP-13 proof-of-work difficulty calculation
+│   ├── pow.test.ts         # Proof-of-work tests
 │   ├── search-text.ts      # Shared buildSearchText for full-text search indexing
 │   ├── search-text.test.ts # Search text tests
 │   ├── autocomplete-text.ts      # Shared buildAutocompleteText for edge-ngram autocomplete indexing
@@ -41,6 +43,7 @@
 │   ├── backfill-client-address.ts # Backfill client field (NIP-89 client address) for existing events
 │   ├── backfill-language.ts       # Backfill language field for existing events
 │   ├── backfill-media.ts          # Backfill media/video fields for existing events
+│   ├── backfill-pow.ts            # Backfill pow field (NIP-13 difficulty) for existing events
 │   ├── backfill-protocol.ts       # Backfill protocol field for NIP-48 events
 │   ├── backfill-search.ts         # Backfill search field for existing events
 │   ├── backfill-sentiment.ts      # Backfill sentiment field for existing events

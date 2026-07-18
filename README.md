@@ -149,6 +149,9 @@ The following NIP-50 search extensions are supported:
 - `sentiment:<value>` — Filter by sentiment: `positive`, `negative`, `neutral`
 - `media:true` / `media:false` — Filter by presence of media attachments
 - `video:true` / `video:false` — Filter by whether all attachments are video
+- `pow:<n>` — Filter by NIP-13 proof-of-work difficulty: matches events whose
+  `id` has at least `n` leading zero bits, clamped to the committed target in
+  the `nonce` tag. Events without a `nonce` tag have `pow:0`, e.g. `pow:20`.
 - `protocol:<value>` — Filter by protocol (NIP-48), e.g. `protocol:activitypub`.
   `protocol:nostr` matches events with no proxy tag.
 - `client:<address>` — Filter by NIP-89 client address (the third value of a
@@ -342,6 +345,7 @@ The relay is designed to scale horizontally:
 - [x] NIP-01: Basic protocol flow
 - [x] NIP-09: Event deletion
 - [x] NIP-11: Relay information document
+- [x] NIP-13: Proof of Work (difficulty indexing + `pow:` search extension)
 - [x] NIP-40: Expiration timestamp
 - [x] NIP-42: Authentication of clients to relays
 - [x] NIP-45: Event counting

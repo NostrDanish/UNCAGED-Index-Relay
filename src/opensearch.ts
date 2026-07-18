@@ -30,6 +30,7 @@ import {
   type Client,
   Client as OpenSearchClient,
 } from "./opensearch-client.ts";
+import { getPow } from "./pow.ts";
 import { buildSearchText } from "./search-text.ts";
 
 /** The 7 core Nostr event fields — used as `_source` filter so OpenSearch
@@ -104,6 +105,13 @@ interface NostrEventDocument extends NostrEvent {
   sentiment?: string;
   media: boolean;
   video: boolean;
+  /**
+   * NIP-13 proof-of-work difficulty: the number of leading zero bits in the
+   * event `id`, clamped to any committed target in the `nonce` tag. Events
+   * without a `nonce` tag are stored with `pow: 0`. Queried by the NIP-50
+   * `pow:<n>` extension (matches events with difficulty >= n).
+   */
+  pow: number;
   /** Parsed profile metadata fields for kind 0 events (name search). */
   metadata?: {
     name?: string;
@@ -751,6 +759,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
       ...(sentiment && { sentiment }),
       media: mediaResult.media ?? false,
       video: mediaResult.video ?? false,
+      pow: getPow(event),
       ...(metadata && { metadata }),
       followers: 0,
       engagers: 0,
@@ -1620,6 +1629,24 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
         } else if (videoToken.value === "false") {
           mustNot.push({ term: { video: true } });
         }
+      }
+
+      // Handle pow: extension (NIP-50 + NIP-13).
+      // `pow:<n>` matches events whose stored proof-of-work difficulty is
+      // at least `n` leading zero bits. Events without a `nonce` tag are
+      // stored with `pow: 0`, so they only match `pow:0`. A non-numeric
+      // value is ignored (no clause added).
+      const powToken = tokens.find(
+        (t) => typeof t === "object" && t.key === "pow",
+      );
+      if (
+        powToken &&
+        typeof powToken === "object" &&
+        /^\d+$/.test(powToken.value)
+      ) {
+        must.push({
+          range: { pow: { gte: Number.parseInt(powToken.value, 10) } },
+        });
       }
 
       // Handle tag:/-tag: extensions (NIP-50).
@@ -2845,6 +2872,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     sentiment: { type: "keyword" },
     media: { type: "boolean" },
     video: { type: "boolean" },
+    pow: { type: "integer" },
     metadata: {
       type: "object",
       properties: {
