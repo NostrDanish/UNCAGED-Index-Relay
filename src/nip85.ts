@@ -15,7 +15,7 @@
  */
 
 import type { NostrEvent, NostrSigner, NRelay } from "@nostrify/nostrify";
-import { log } from "./log.ts";
+import { Logger } from "./log.ts";
 import type { EventScores } from "./opensearch.ts";
 import type { Client } from "./opensearch-client.ts";
 
@@ -31,6 +31,8 @@ export interface Nip85Opts {
   signer: NostrSigner;
   /** Optional callback to broadcast events to connected WebSocket subscribers. */
   broadcast?: (event: NostrEvent) => void;
+  /** Structured logger (default: fresh `info`-level Logger). */
+  logger?: Logger;
 }
 
 /**
@@ -58,12 +60,16 @@ export class Nip85 {
   /** Whether we've already warned about a full dirty set this flush cycle. */
   private dirtyOverflowWarned = false;
 
+  /** Structured logger, injected by the entry point. */
+  private log: Logger;
+
   constructor(opts: Nip85Opts) {
     this.client = opts.client;
     this.indexName = opts.indexName;
     this.relay = opts.relay;
     this.signer = opts.signer;
     this.broadcast = opts.broadcast;
+    this.log = opts.logger ?? new Logger();
   }
 
   /**
@@ -252,7 +258,7 @@ export class Nip85 {
   /** Log once per flush cycle when a dirty set hits the cap. */
   private warnDirtyOverflow(which: string): void {
     if (!this.dirtyOverflowWarned) {
-      log.warn("nip85_dirty_overflow", { which, max: Nip85.MAX_DIRTY });
+      this.log.warn("nip85_dirty_overflow", { which, max: Nip85.MAX_DIRTY });
       this.dirtyOverflowWarned = true;
     }
   }

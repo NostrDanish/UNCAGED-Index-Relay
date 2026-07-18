@@ -10,7 +10,7 @@ import { NIP50, NKinds, NSchema as n } from "@nostrify/nostrify";
 import { buildAutocompleteText } from "./autocomplete-text.ts";
 import type { Config } from "./config.ts";
 import { StorageOverloaded } from "./errors.ts";
-import { errFields, log } from "./log.ts";
+import { errFields, Logger } from "./log.ts";
 import { detectMedia } from "./media.ts";
 import {
   opensearchBulkQueueGauge,
@@ -184,6 +184,8 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
   /** Client used for write operations (bulk, updateByQuery, deleteByQuery). Defaults to `client`. */
   private writeClient: Client;
   private indexName: string;
+  /** Structured logger, injected by the entry point. */
+  private log: Logger;
 
   /** Whether to preserve historical versions of replaceable/addressable events. */
   private historyEnabled: boolean;
@@ -301,7 +303,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
   /** Log once per drain cycle when a dirty set hits the cap. */
   private warnDirtyOverflow(which: string): void {
     if (!this.dirtyOverflowWarned) {
-      log.warn("dirty_overflow", {
+      this.log.warn("dirty_overflow", {
         which,
         max: OpenSearchRelay.MAX_PENDING_DIRTY,
       });
@@ -371,9 +373,15 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
        * {@link TAG_VALUE_MAX_COUNT_PER_NAME} (5000).
        */
       tagValueMaxCountPerName?: number;
+      /**
+       * Structured logger. Defaults to a fresh `info`-level Logger; entry
+       * points inject one built from `Config.logLevel`.
+       */
+      logger?: Logger;
     },
   ) {
     this.client = client;
+    this.log = opts?.logger ?? new Logger();
     this.writeClient = opts?.writeClient ?? client;
     this.indexName = opts?.indexName || "nostr-events";
     this.bulkMaxSize = opts?.bulkMaxSize ?? 100;
@@ -413,6 +421,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
       historyKindsExcluded: config.historyKindsExcluded,
       authKinds: config.authKinds,
       tagValueMaxCountPerName: config.tagValueMaxCountPerName,
+      logger: new Logger(config.logLevel),
     });
   }
 
@@ -919,7 +928,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
 
       return events.slice(0, limit);
     } catch (error) {
-      log.error("sorted_query_failed", errFields(error));
+      this.log.error("sorted_query_failed", errFields(error));
       throw error;
     }
   }
@@ -1703,7 +1712,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
       return this.hitsToEvents(response);
     } catch (error) {
       queryEnd();
-      log.error("query_failed", errFields(error));
+      this.log.error("query_failed", errFields(error));
       throw error;
     }
   }
@@ -1852,12 +1861,12 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
       if (this.refreshDelayMs > 0) {
         setTimeout(() => {
           this.resolveReplaceableSlots(entries).catch((err) =>
-            log.warn("phase2_failed", errFields(err)),
+            this.log.warn("phase2_failed", errFields(err)),
           );
         }, this.refreshDelayMs);
       } else {
         this.resolveReplaceableSlots(entries).catch((err) =>
-          log.warn("phase2_failed", errFields(err)),
+          this.log.warn("phase2_failed", errFields(err)),
         );
       }
     }
@@ -1934,7 +1943,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     const acquired = await this.acquirePhase2Slot();
     if (!acquired) {
       opensearchPhase2DroppedCounter.inc();
-      log.warn("phase2_dropped", {
+      this.log.warn("phase2_dropped", {
         max_waiters: OpenSearchRelay.MAX_PHASE2_WAITERS,
       });
       return;
@@ -2061,7 +2070,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
         ).responses ?? [];
     } catch (error) {
       slotEnd();
-      log.warn("phase2_msearch_failed", errFields(error));
+      this.log.warn("phase2_msearch_failed", errFields(error));
       return;
     }
 
@@ -2178,7 +2187,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
         }
         await this.writeClient.bulk({ body: bulkBody });
       } catch (error) {
-        log.warn("phase2_history_update_failed", errFields(error));
+        this.log.warn("phase2_history_update_failed", errFields(error));
       } finally {
         cleanupEnd();
       }
@@ -2216,7 +2225,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
           conflicts: "proceed",
         });
       } catch (error) {
-        log.warn("phase2_delete_sweep_failed", errFields(error));
+        this.log.warn("phase2_delete_sweep_failed", errFields(error));
       } finally {
         deleteEnd();
       }
@@ -2270,7 +2279,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
           conflicts: "proceed",
         });
       } catch (error) {
-        log.warn("phase2_deep_sweep_failed", errFields(error));
+        this.log.warn("phase2_deep_sweep_failed", errFields(error));
       } finally {
         deepEnd();
       }
@@ -2424,7 +2433,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
           }
         }
       } catch (error) {
-        log.error("filter_query_failed", {
+        this.log.error("filter_query_failed", {
           filters: JSON.stringify(filter),
           ...errFields(error),
         });
@@ -2525,7 +2534,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
       return items;
     } catch (error) {
       end();
-      log.error("sync_query_failed", errFields(error));
+      this.log.error("sync_query_failed", errFields(error));
       throw error;
     }
   }
@@ -2548,7 +2557,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
           yield ["EVENT", "req", event];
         }
       } catch (error) {
-        log.error("filter_query_failed", {
+        this.log.error("filter_query_failed", {
           filters: JSON.stringify(filter),
           ...errFields(error),
         });
@@ -2630,7 +2639,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
           totalCount += response.body.count;
         }
       } catch (error) {
-        log.error("count_filter_failed", {
+        this.log.error("count_filter_failed", {
           filters: JSON.stringify(filter),
           ...errFields(error),
         });
@@ -2671,7 +2680,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
           docIdsToDelete.push(this.getDocumentId(event));
         }
       } catch (error) {
-        log.error("remove_query_failed", errFields(error));
+        this.log.error("remove_query_failed", errFields(error));
       }
     }
 
@@ -2705,15 +2714,15 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
           const erroredDocuments = response.body.items.filter(
             (item) => item.update?.error,
           );
-          log.error("soft_delete_bulk_errors", {
+          this.log.error("soft_delete_bulk_errors", {
             count: erroredDocuments.length,
             errors: JSON.stringify(erroredDocuments.slice(0, 5)),
           });
         } else {
-          log.debug("soft_deleted", { count: uniqueDocIds.length });
+          this.log.debug("soft_deleted", { count: uniqueDocIds.length });
         }
       } catch (error) {
-        log.error("soft_delete_bulk_failed", errFields(error));
+        this.log.error("soft_delete_bulk_failed", errFields(error));
         throw error;
       }
     }
@@ -2741,7 +2750,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
           conflicts: "proceed",
         });
       } catch (error) {
-        log.error("history_delete_failed", errFields(error));
+        this.log.error("history_delete_failed", errFields(error));
       }
     }
   }
@@ -2873,7 +2882,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
             body: { settings: OpenSearchRelay.ANALYZER_SETTINGS },
           });
           await this.writeClient.indices.open({ index: this.indexName });
-          log.info("settings_updated", { index: this.indexName });
+          this.log.info("settings_updated", { index: this.indexName });
         } catch (e) {
           // Ensure the index is reopened even if putSettings fails.
           try {
@@ -2881,7 +2890,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
           } catch {
             // Already open or unrecoverable — ignore.
           }
-          log.warn("settings_update_failed", errFields(e));
+          this.log.warn("settings_update_failed", errFields(e));
         }
 
         // Update mappings so any new fields are added to the existing index.
@@ -2895,9 +2904,9 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
               properties: OpenSearchRelay.MAPPING_PROPERTIES,
             },
           });
-          log.info("mappings_updated", { index: this.indexName });
+          this.log.info("mappings_updated", { index: this.indexName });
         } catch (e) {
-          log.warn("mappings_update_failed", errFields(e));
+          this.log.warn("mappings_update_failed", errFields(e));
         }
         return;
       }
@@ -2929,9 +2938,9 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
         },
       });
 
-      log.info("index_created", { index: this.indexName });
+      this.log.info("index_created", { index: this.indexName });
     } catch (error) {
-      log.error("index_create_failed", errFields(error));
+      this.log.error("index_create_failed", errFields(error));
       throw error;
     }
   }
@@ -3322,7 +3331,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
         for (let i = 0; i < items.length; i++) {
           const result = items[i].update;
           if (result?.error) {
-            log.warn("score_update_failed", {
+            this.log.warn("score_update_failed", {
               err: JSON.stringify(result.error),
             });
           }
@@ -3332,7 +3341,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
 
     const kind0Count = dirtyKind0.length;
     const nonKind0Count = dirtyNonKind0Ids.length;
-    log.debug("scores_recomputed", {
+    this.log.debug("scores_recomputed", {
       count: allDirtyIds.length,
       profiles: kind0Count,
       engagement: nonKind0Count,

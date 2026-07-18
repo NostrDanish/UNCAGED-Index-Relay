@@ -1,6 +1,6 @@
 import type { NostrRelayInfo } from "@nostrify/nostrify";
 
-import { log } from "./log.ts";
+import { Logger } from "./log.ts";
 
 /** Escape HTML special characters to prevent XSS. */
 function esc(str: string): string {
@@ -24,6 +24,7 @@ function safeUrl(
   raw: string,
   allowed: readonly string[],
   fieldName: string,
+  log: Logger,
 ): string | null {
   let parsed: URL;
   try {
@@ -58,6 +59,7 @@ const WS_SCHEMES = ["ws:", "wss:"] as const;
 export function renderLandingPage(
   info: NostrRelayInfo,
   relayUrl: string,
+  log: Logger = new Logger(),
 ): string {
   const name = esc(String(info.name ?? "Nostr Relay"));
   const description = esc(String(info.description ?? ""));
@@ -66,23 +68,23 @@ export function renderLandingPage(
   // block javascript:, data:, and similar XSS vectors from a misconfigured
   // RELAY_* env var. safeUrl returns null for disallowed/unparseable inputs.
   const bannerRaw = info.banner
-    ? safeUrl(String(info.banner), HTTP_SCHEMES, "banner")
+    ? safeUrl(String(info.banner), HTTP_SCHEMES, "banner", log)
     : null;
   const banner = bannerRaw ? esc(bannerRaw) : "";
 
   const iconRaw = info.icon
-    ? safeUrl(String(info.icon), HTTP_SCHEMES, "icon")
+    ? safeUrl(String(info.icon), HTTP_SCHEMES, "icon", log)
     : null;
   const icon = iconRaw ? esc(iconRaw) : "";
 
   const version = info.version ? esc(String(info.version)) : "";
 
   const softwareRaw = info.software
-    ? safeUrl(String(info.software), HTTP_SCHEMES, "software")
+    ? safeUrl(String(info.software), HTTP_SCHEMES, "software", log)
     : null;
   const software = softwareRaw ? esc(softwareRaw) : "";
 
-  const relayUrlSafe = safeUrl(relayUrl, WS_SCHEMES, "relayUrl");
+  const relayUrlSafe = safeUrl(relayUrl, WS_SCHEMES, "relayUrl", log);
   const relay = relayUrlSafe ? esc(relayUrlSafe) : "";
 
   // Contact: may be a mailto: URL, a bare email, or an http(s) URL. Each
@@ -91,13 +93,13 @@ export function renderLandingPage(
   if (info.contact) {
     const raw = String(info.contact);
     if (raw.startsWith("mailto:")) {
-      const validated = safeUrl(raw, ["mailto:"], "contact");
+      const validated = safeUrl(raw, ["mailto:"], "contact", log);
       if (validated) {
         const addr = validated.replace(/^mailto:/i, "");
         contactHtml = `<a href="${esc(validated)}">${esc(addr)}</a>`;
       }
     } else if (raw.startsWith("http://") || raw.startsWith("https://")) {
-      const validated = safeUrl(raw, HTTP_SCHEMES, "contact");
+      const validated = safeUrl(raw, HTTP_SCHEMES, "contact", log);
       if (validated) {
         contactHtml = `<a href="${esc(validated)}" target="_blank" rel="noopener">${esc(validated)}</a>`;
       }

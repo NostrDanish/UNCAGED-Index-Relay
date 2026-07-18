@@ -2,8 +2,12 @@ import type { NostrSigner } from "@nostrify/nostrify";
 import { NSecSigner } from "@nostrify/nostrify";
 import { nip19 } from "nostr-tools";
 
+import type { LogLevel } from "./log.ts";
+
 export class Config {
   readonly port: number;
+  /** Minimum log level to emit: `debug` | `info` | `warn` | `error` (default: `info`). */
+  readonly logLevel: LogLevel;
   readonly relayUrl: string;
   readonly publicUrl: string;
   readonly relayPubkey: string | undefined;
@@ -138,6 +142,23 @@ export class Config {
         throw new Error("PORT must be a valid port number (1-65535).");
       }
       this.port = port;
+    }
+
+    // logLevel
+    const logLevelValue = env.get("LOG_LEVEL");
+    if (!logLevelValue) {
+      this.logLevel = "info";
+    } else {
+      const lower = logLevelValue.toLowerCase();
+      if (
+        lower !== "debug" &&
+        lower !== "info" &&
+        lower !== "warn" &&
+        lower !== "error"
+      ) {
+        throw new Error("LOG_LEVEL must be one of: debug, info, warn, error.");
+      }
+      this.logLevel = lower;
     }
 
     // relayUrl

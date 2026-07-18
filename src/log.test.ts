@@ -1,12 +1,6 @@
 import assert from "node:assert/strict";
-import { afterEach, test } from "node:test";
-import {
-  errFields,
-  getLogLevel,
-  levelEnabled,
-  log,
-  setLogLevel,
-} from "./log.ts";
+import { test } from "node:test";
+import { errFields, Logger, parseLogLevel } from "./log.ts";
 
 /** Capture console output emitted during `fn`. */
 function capture(fn: () => void): { out: string[]; err: string[] } {
@@ -25,11 +19,8 @@ function capture(fn: () => void): { out: string[]; err: string[] } {
   return { out, err };
 }
 
-afterEach(() => {
-  setLogLevel("info");
-});
-
 test("emits single-line JSON with level, time, msg, and fields", () => {
+  const log = new Logger("info");
   const { out } = capture(() => {
     log.info("started", { port: 13131, ready: true });
   });
@@ -44,6 +35,7 @@ test("emits single-line JSON with level, time, msg, and fields", () => {
 });
 
 test("drops undefined fields", () => {
+  const log = new Logger("info");
   const { out } = capture(() => {
     log.info("req", { ip: undefined, returned: 5 });
   });
@@ -52,23 +44,31 @@ test("drops undefined fields", () => {
   assert.equal(entry.returned, 5);
 });
 
-test("suppresses entries below the active level", () => {
-  assert.equal(getLogLevel(), "info");
-  assert.equal(levelEnabled("debug"), false);
-  const { out } = capture(() => {
-    log.debug("req", { returned: 1 });
+test("suppresses entries below the constructed level", () => {
+  const info = new Logger("info");
+  assert.equal(info.levelEnabled("debug"), false);
+  const suppressed = capture(() => {
+    info.debug("req", { returned: 1 });
   });
-  assert.equal(out.length, 0);
+  assert.equal(suppressed.out.length, 0);
 
-  setLogLevel("debug");
-  assert.equal(levelEnabled("debug"), true);
-  const captured = capture(() => {
-    log.debug("req", { returned: 1 });
+  const debug = new Logger("debug");
+  assert.equal(debug.levelEnabled("debug"), true);
+  const emitted = capture(() => {
+    debug.debug("req", { returned: 1 });
   });
-  assert.equal(captured.out.length, 1);
+  assert.equal(emitted.out.length, 1);
+});
+
+test("defaults to info level", () => {
+  const log = new Logger();
+  assert.equal(log.level, "info");
+  assert.equal(log.levelEnabled("debug"), false);
+  assert.equal(log.levelEnabled("info"), true);
 });
 
 test("warn and error go to stderr", () => {
+  const log = new Logger("info");
   const { out, err } = capture(() => {
     log.warn("phase2_failed");
     log.error("store_failed");
@@ -80,13 +80,20 @@ test("warn and error go to stderr", () => {
 });
 
 test("error level suppresses warn", () => {
-  setLogLevel("error");
+  const log = new Logger("error");
   const { err } = capture(() => {
     log.warn("phase2_failed");
     log.error("store_failed");
   });
   assert.equal(err.length, 1);
   assert.equal(JSON.parse(err[0]).msg, "store_failed");
+});
+
+test("parseLogLevel normalizes and defaults to info", () => {
+  assert.equal(parseLogLevel("debug"), "debug");
+  assert.equal(parseLogLevel("WARN"), "warn");
+  assert.equal(parseLogLevel("bogus"), "info");
+  assert.equal(parseLogLevel(undefined), "info");
 });
 
 test("errFields flattens an Error to single-line fields", () => {

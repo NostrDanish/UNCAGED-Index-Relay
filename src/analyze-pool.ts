@@ -1,7 +1,7 @@
 import type { NostrEvent } from "nostr-tools";
 
 import { AnalyzePoolOverloaded } from "./errors.ts";
-import { errFields, log } from "./log.ts";
+import { errFields, Logger } from "./log.ts";
 import { analyzePendingGauge, analyzeWorkerInflightGauge } from "./metrics.ts";
 
 /** Result of analyzing a Nostr event off the main thread. */
@@ -88,13 +88,17 @@ export class AnalyzePool {
   /** Maximum pending requests before `analyze()` throws AnalyzePoolOverloaded. */
   private readonly maxPending: number;
 
+  /** Structured logger, injected by the entry point. */
+  private readonly log: Logger;
+
   /**
    * @param size Desired worker count. `0` or unset means "auto":
    *             `max(1, hardwareConcurrency - 1)`. Always hard-capped at
    *             `hardwareConcurrency`.
    * @param opts.maxPending Pending request cap (default 20_000).
+   * @param opts.logger Structured logger (default: fresh `info`-level Logger).
    */
-  constructor(size?: number, opts?: { maxPending?: number }) {
+  constructor(size?: number, opts?: { maxPending?: number; logger?: Logger }) {
     const cores = navigator.hardwareConcurrency;
     // Auto-size: leave one core for the main WS event loop + OpenSearch I/O.
     const auto = Math.max(1, cores - 1);
@@ -102,6 +106,7 @@ export class AnalyzePool {
     const poolSize = Math.max(1, Math.min(requested, cores));
 
     this.maxPending = opts?.maxPending ?? 20_000;
+    this.log = opts?.logger ?? new Logger();
 
     const workerUrl = new URL("analyze-worker.ts", import.meta.url).href;
 
@@ -141,7 +146,7 @@ export class AnalyzePool {
         );
       };
       worker.onerror = (error) => {
-        log.error("analyze_worker_error", {
+        this.log.error("analyze_worker_error", {
           worker: workerIndex,
           ...errFields(error),
         });
@@ -154,7 +159,7 @@ export class AnalyzePool {
     this.queues = Array.from({ length: poolSize }, () => []);
     this.inflight = new Array(poolSize).fill(0);
 
-    log.info("analyze_pool_started", {
+    this.log.info("analyze_pool_started", {
       workers: poolSize,
       max_pending: this.maxPending,
     });

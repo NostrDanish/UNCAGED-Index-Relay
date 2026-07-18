@@ -17,11 +17,10 @@
  * - `warn`:  something unexpected but tolerated.
  * - `error`: something failed.
  *
- * The active level comes from the `LOG_LEVEL` env var (default `info`).
- * It is read at module load so worker threads and scripts inherit it.
+ * There is no global logger: entry points (`server.ts`, `background-worker.ts`)
+ * construct a {@link Logger} from `Config.logLevel` and pass it down to the
+ * objects that log.
  */
-
-import process from "node:process";
 
 export type LogLevel = "debug" | "info" | "warn" | "error";
 
@@ -32,7 +31,8 @@ const LEVEL_RANK: Record<LogLevel, number> = {
   error: 40,
 };
 
-function parseLevel(value: string | undefined): LogLevel {
+/** Normalize a raw `LOG_LEVEL` value, defaulting to `info`. */
+export function parseLogLevel(value: string | undefined): LogLevel {
   const lower = value?.toLowerCase();
   if (
     lower === "debug" ||
@@ -43,25 +43,6 @@ function parseLevel(value: string | undefined): LogLevel {
     return lower;
   }
   return "info";
-}
-
-let currentLevel: LogLevel = parseLevel(process.env.LOG_LEVEL);
-
-/** Override the active log level (used by tests). */
-export function setLogLevel(level: LogLevel): void {
-  currentLevel = level;
-}
-
-export function getLogLevel(): LogLevel {
-  return currentLevel;
-}
-
-/**
- * Whether entries at `level` are currently emitted. Hot paths can use this
- * to skip building fields entirely when the level is disabled.
- */
-export function levelEnabled(level: LogLevel): boolean {
-  return LEVEL_RANK[level] >= LEVEL_RANK[currentLevel];
 }
 
 export type LogFields = Record<
@@ -87,39 +68,56 @@ export function errFields(err: unknown): LogFields {
   return { err_msg: String(err) };
 }
 
-function write(level: LogLevel, msg: string, fields?: LogFields): void {
-  if (!levelEnabled(level)) return;
-  const entry: Record<string, unknown> = {
-    level,
-    time: new Date().toISOString(),
-    msg,
-  };
-  if (fields) {
-    for (const key in fields) {
-      const value = fields[key];
-      if (value !== undefined) entry[key] = value;
+export class Logger {
+  readonly level: LogLevel;
+
+  constructor(level: LogLevel = "info") {
+    this.level = level;
+  }
+
+  /**
+   * Whether entries at `level` are emitted. Hot paths can use this to skip
+   * building fields entirely when the level is disabled.
+   */
+  levelEnabled(level: LogLevel): boolean {
+    return LEVEL_RANK[level] >= LEVEL_RANK[this.level];
+  }
+
+  debug(msg: string, fields?: LogFields): void {
+    this.write("debug", msg, fields);
+  }
+
+  info(msg: string, fields?: LogFields): void {
+    this.write("info", msg, fields);
+  }
+
+  warn(msg: string, fields?: LogFields): void {
+    this.write("warn", msg, fields);
+  }
+
+  error(msg: string, fields?: LogFields): void {
+    this.write("error", msg, fields);
+  }
+
+  private write(level: LogLevel, msg: string, fields?: LogFields): void {
+    if (!this.levelEnabled(level)) return;
+    const entry: Record<string, unknown> = {
+      level,
+      time: new Date().toISOString(),
+      msg,
+    };
+    if (fields) {
+      for (const key in fields) {
+        const value = fields[key];
+        if (value !== undefined) entry[key] = value;
+      }
+    }
+    const line = JSON.stringify(entry);
+    // warn/error go to stderr so journald records them at a higher priority.
+    if (LEVEL_RANK[level] >= LEVEL_RANK.warn) {
+      console.error(line);
+    } else {
+      console.log(line);
     }
   }
-  const line = JSON.stringify(entry);
-  // warn/error go to stderr so journald records them at a higher priority.
-  if (LEVEL_RANK[level] >= LEVEL_RANK.warn) {
-    console.error(line);
-  } else {
-    console.log(line);
-  }
 }
-
-export const log = {
-  debug(msg: string, fields?: LogFields): void {
-    write("debug", msg, fields);
-  },
-  info(msg: string, fields?: LogFields): void {
-    write("info", msg, fields);
-  },
-  warn(msg: string, fields?: LogFields): void {
-    write("warn", msg, fields);
-  },
-  error(msg: string, fields?: LogFields): void {
-    write("error", msg, fields);
-  },
-};

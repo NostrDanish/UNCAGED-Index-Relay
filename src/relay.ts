@@ -8,7 +8,7 @@ import { matchFilter, verifyEvent } from "nostr-tools";
 
 import type { AnalyzeResult } from "./analyze-pool.ts";
 import { AnalyzePoolOverloaded, StorageOverloaded } from "./errors.ts";
-import { errFields, levelEnabled, log } from "./log.ts";
+import { errFields, Logger } from "./log.ts";
 import {
   relayBroadcastQueueGauge,
   relayConnectionsGauge,
@@ -214,6 +214,8 @@ export class Relay {
   private bannedHashtags: Set<string>;
   /** Kind numbers that are rejected at ingestion regardless of other policy. */
   private rejectedKinds: Set<number>;
+  /** Structured logger, injected by the server entry point. */
+  private log: Logger;
 
   /** All open WebSocket connections. */
   private connections = new Set<ServerWebSocket<WebSocketData>>();
@@ -342,9 +344,15 @@ export class Relay {
        * included as the message's 4th element per NIP-77). Default: 1_000_000.
        */
       negentropyMaxRecords?: number;
+      /**
+       * Structured logger. Defaults to a fresh `info`-level Logger; the
+       * server entry point injects one built from `Config.logLevel`.
+       */
+      logger?: Logger;
     },
   ) {
     this.storage = storage;
+    this.log = opts.logger ?? new Logger();
     this.analyze = opts.analyze ?? defaultAnalyze;
     this.relayUrl = opts.relayUrl;
     this.authKinds = opts.authKinds ?? new Set();
@@ -799,7 +807,10 @@ export class Relay {
           await this.storage.remove(filters);
         }
       } catch (error) {
-        log.error("deletion_failed", { id: event.id, ...errFields(error) });
+        this.log.error("deletion_failed", {
+          id: event.id,
+          ...errFields(error),
+        });
         return {
           eventId: event.id,
           accepted: false,
@@ -851,10 +862,10 @@ export class Relay {
             },
           ]);
 
-          log.info("vanish_request", { pubkey: event.pubkey });
+          this.log.info("vanish_request", { pubkey: event.pubkey });
         }
       } catch (error) {
-        log.error("vanish_failed", { id: event.id, ...errFields(error) });
+        this.log.error("vanish_failed", { id: event.id, ...errFields(error) });
         return {
           eventId: event.id,
           accepted: false,
@@ -910,7 +921,7 @@ export class Relay {
           message: "error: relay overloaded, try again",
         };
       }
-      log.error("store_failed", {
+      this.log.error("store_failed", {
         id: event.id,
         kind: event.kind,
         ...errFields(error),
@@ -1122,7 +1133,7 @@ export class Relay {
       );
       return { success: true, ...result };
     } catch (error) {
-      log.error("count_query_failed", {
+      this.log.error("count_query_failed", {
         filters: JSON.stringify(filters),
         ...errFields(error),
       });
@@ -1188,7 +1199,7 @@ export class Relay {
       );
       return { success: true, events };
     } catch (error) {
-      log.error("req_query_failed", {
+      this.log.error("req_query_failed", {
         filters: JSON.stringify(filters),
         ...errFields(error),
       });
@@ -1231,8 +1242,8 @@ export class Relay {
         result.message,
       ]);
 
-      if (levelEnabled("debug")) {
-        log.debug("event", {
+      if (this.log.levelEnabled("debug")) {
+        this.log.debug("event", {
           ip: ws.data.ip,
           id: event.id,
           kind: event.kind,
@@ -1246,7 +1257,7 @@ export class Relay {
         this.broadcast(event);
       }
     } catch (error) {
-      log.error("event_error", {
+      this.log.error("event_error", {
         ip: ws.data.ip,
         id: event.id,
         kind: event.kind,
@@ -1274,7 +1285,7 @@ export class Relay {
       );
       if (limitError) {
         this.sendMessage(ws, ["CLOSED", subscriptionId, limitError.message]);
-        log.debug("req_rejected", {
+        this.log.debug("req_rejected", {
           ip: data.ip,
           sub: subscriptionId,
           reason: limitError.message,
@@ -1346,8 +1357,8 @@ export class Relay {
       this.sendMessage(ws, ["EOSE", subscriptionId]);
 
       reqEventsReturnedHistogram.observe(events.length);
-      if (levelEnabled("debug")) {
-        log.debug("req", {
+      if (this.log.levelEnabled("debug")) {
+        this.log.debug("req", {
           ip: ws.data.ip,
           ua: ws.data.userAgent,
           sub: subscriptionId,
@@ -1357,7 +1368,7 @@ export class Relay {
         });
       }
     } catch (error) {
-      log.error("req_error", {
+      this.log.error("req_error", {
         ip: ws.data.ip,
         sub: subscriptionId,
         ...errFields(error),
@@ -1410,8 +1421,8 @@ export class Relay {
 
       this.sendMessage(ws, ["COUNT", subscriptionId, response]);
 
-      if (levelEnabled("debug")) {
-        log.debug("count", {
+      if (this.log.levelEnabled("debug")) {
+        this.log.debug("count", {
           ip: ws.data.ip,
           sub: subscriptionId,
           filters: JSON.stringify(filters),
@@ -1419,7 +1430,7 @@ export class Relay {
         });
       }
     } catch (error) {
-      log.error("count_error", {
+      this.log.error("count_error", {
         ip: ws.data.ip,
         sub: subscriptionId,
         ...errFields(error),
@@ -1711,7 +1722,7 @@ export class Relay {
 
       this.sendMessage(ws, ["NEG-MSG", subscriptionId, bytesToHex(response)]);
     } catch (error) {
-      log.error("neg_open_error", {
+      this.log.error("neg_open_error", {
         ip: ws.data.ip,
         sub: subscriptionId,
         ...errFields(error),
@@ -2151,9 +2162,12 @@ export class Relay {
     } catch (error) {
       if (error instanceof SyntaxError) {
         // Malformed JSON from a client — traffic noise, not a server fault.
-        log.debug("invalid_json", { ip: ws.data?.ip });
+        this.log.debug("invalid_json", { ip: ws.data?.ip });
       } else {
-        log.error("message_error", { ip: ws.data?.ip, ...errFields(error) });
+        this.log.error("message_error", {
+          ip: ws.data?.ip,
+          ...errFields(error),
+        });
       }
       this.sendMessage(ws, ["NOTICE", "error: failed to process message"]);
     }
@@ -2166,7 +2180,7 @@ export class Relay {
     ws.data.openedAt = Date.now();
     // Generate NIP-42 AUTH challenge (sent lazily when needed)
     ws.data.challenge = this.generateChallenge();
-    log.debug("ws_open", { ip: ws.data.ip, ua: ws.data.userAgent });
+    this.log.debug("ws_open", { ip: ws.data.ip, ua: ws.data.userAgent });
   }
 
   /**
@@ -2186,8 +2200,8 @@ export class Relay {
   // Handle WebSocket close
   handleCloseConnection(ws: ServerWebSocket<WebSocketData>) {
     const data = ws.data;
-    if (levelEnabled("debug")) {
-      log.debug("ws_close", {
+    if (this.log.levelEnabled("debug")) {
+      this.log.debug("ws_close", {
         ip: data?.ip,
         ua: data?.userAgent,
         dur_s: data?.openedAt

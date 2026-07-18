@@ -5,7 +5,7 @@ import { serve } from "bun";
 import { AnalyzePool } from "./analyze-pool.ts";
 import { Config } from "./config.ts";
 import { renderLandingPage } from "./landing-page.ts";
-import { errFields, getLogLevel, log } from "./log.ts";
+import { errFields, Logger } from "./log.ts";
 import { register, startRuntimeMetrics } from "./metrics.ts";
 import { OpenSearchRelay } from "./opensearch.ts";
 import type { ClientOptions } from "./opensearch-client.ts";
@@ -18,9 +18,14 @@ const config = new Config({
   },
 });
 
+// Single structured logger for this process, passed down into every
+// component that logs.
+const log = new Logger(config.logLevel);
+
 // Initialize analysis worker pool (signature verification, language & sentiment detection)
 const analyzePool = new AnalyzePool(config.analyzePoolSize, {
   maxPending: config.analyzeMaxPending,
+  logger: log,
 });
 
 // Construct OpenSearch clients. Read and write operations use separate clients
@@ -48,10 +53,12 @@ const opensearchRelay = new OpenSearchRelay(opensearchReadClient, {
   writeClient: opensearchWriteClient,
   tagValueMaxCountPerName: config.tagValueMaxCountPerName,
   bulkMaxQueue: config.bulkMaxQueue,
+  logger: log,
 });
 
 const relay = new Relay(opensearchRelay, {
   analyze: (event, opts) => analyzePool.analyze(event, opts),
+  logger: log,
   relayUrl: config.relayUrl,
   authKinds: config.authKinds,
   maxMessageLength: config.maxMessageLength,
@@ -155,6 +162,7 @@ startRuntimeMetrics();
 const landingPageHtml = renderLandingPage(
   relay.getRelayInfo(),
   config.relayUrl,
+  log,
 );
 
 // Pre-load static assets into memory.
@@ -290,7 +298,7 @@ const server = serve<WebSocketData>({
   },
 });
 
-log.info("started", { port: server.port, log_level: getLogLevel() });
+log.info("started", { port: server.port, log_level: config.logLevel });
 
 // Graceful shutdown on SIGINT/SIGTERM — also ensures CPU profiles are written.
 async function shutdown() {

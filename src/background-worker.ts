@@ -13,7 +13,7 @@
 import process from "node:process";
 import type { NostrEvent } from "nostr-tools";
 import { Config } from "./config.ts";
-import { errFields, log } from "./log.ts";
+import { errFields, Logger } from "./log.ts";
 import { Nip85 } from "./nip85.ts";
 import { OpenSearchRelay } from "./opensearch.ts";
 import { Client as OpenSearchClient } from "./opensearch-client.ts";
@@ -30,6 +30,10 @@ const config = new Config({
     return process.env[key];
   },
 });
+
+// This worker is its own entry point (separate thread), so it constructs its
+// own Logger from the same env-derived config as the main process.
+const log = new Logger(config.logLevel);
 
 const clientOptions = {
   node: config.opensearchNode,
@@ -53,6 +57,7 @@ const relay = new OpenSearchRelay(readClient, {
   authKinds: config.authKinds,
   writeClient,
   tagValueMaxCountPerName: config.tagValueMaxCountPerName,
+  logger: log,
 });
 
 const signer = config.nostrSigner;
@@ -68,6 +73,7 @@ const nip85 = new Nip85({
   relay,
   signer,
   broadcast: broadcastToMain,
+  logger: log,
 });
 
 // Wire up dirty tracking callbacks (same as server.ts did).
