@@ -152,6 +152,8 @@ export class Trends {
 
       for (const bucket of buckets) {
         const key = bucket.key.toLowerCase();
+        // Marker tags with no value are indexed as '' — never trend those.
+        if (!key) continue;
         const existing = merged.get(key);
         const authors = bucket.unique_authors?.value ?? 0;
         const uses = bucket.doc_count;

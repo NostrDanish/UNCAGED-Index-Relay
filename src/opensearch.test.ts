@@ -4954,6 +4954,26 @@ describe("OpenSearchRelay", () => {
       assert.deepEqual(tagsMap._, ["value"]);
     });
 
+    it("should index content-warning tags (NIP-36)", async () => {
+      const tagsMap = await getTagsMap([["content-warning", "nudity"]]);
+
+      assert.deepEqual(tagsMap["content-warning"], ["nudity"]);
+    });
+
+    it("should index value-less marker tags with an empty string", async () => {
+      const tagsMap = await getTagsMap([["content-warning"], ["-"]]);
+
+      assert.deepEqual(tagsMap["content-warning"], [""]);
+      assert.deepEqual(tagsMap["-"], [""]);
+    });
+
+    it("should reject value-less tags with non-whitelisted names", async () => {
+      const tagsMap = await getTagsMap([["bolt11"], ["t", "keep"]]);
+
+      assert.equal(tagsMap.bolt11, undefined);
+      assert.deepEqual(tagsMap.t, ["keep"]);
+    });
+
     it("should reject multi-letter tag names not in whitelist", async () => {
       const tagsMap = await getTagsMap([
         ["t", "keep"],
@@ -4965,7 +4985,6 @@ describe("OpenSearchRelay", () => {
         // Previously allowed, now rejected (free-form text / URLs / niche):
         ["alt", "reply"],
         ["title", "Hello World"],
-        ["content-warning", "nsfw"],
         ["image", "https://example.com/pic.jpg"],
         ["name", "My Thing"],
       ]);
@@ -4978,7 +4997,6 @@ describe("OpenSearchRelay", () => {
       assert.equal(tagsMap.my_custom_tag, undefined);
       assert.equal(tagsMap.alt, undefined);
       assert.equal(tagsMap.title, undefined);
-      assert.equal(tagsMap["content-warning"], undefined);
       assert.equal(tagsMap.image, undefined);
       assert.equal(tagsMap.name, undefined);
     });
@@ -5034,10 +5052,10 @@ describe("OpenSearchRelay", () => {
       assert.deepEqual(tagsMap, {});
     });
 
-    it("should skip tags with fewer than 2 elements", async () => {
-      const tagsMap = await getTagsMap([["e"], ["p", "value"]]);
+    it("should index value-less tags as markers and skip empty tags", async () => {
+      const tagsMap = await getTagsMap([[], ["e"], ["p", "value"]]);
 
-      assert.equal(tagsMap.e, undefined);
+      assert.deepEqual(tagsMap.e, [""]);
       assert.deepEqual(tagsMap.p, ["value"]);
     });
 

@@ -442,6 +442,10 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     "status",
     // NIP-89: client application identifier
     "client",
+    // NIP-36: sensitive content marker (value is an optional free-text
+    // reason). Indexed for existence checks so clients can exclude
+    // sensitive events with `-tag:content-warning`.
+    "content-warning",
   ]);
 
   /** Maximum length of a single tag value stored in tags_map. */
@@ -486,6 +490,9 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
    * Validates tag names and values:
    * - Single-character tag names are always allowed.
    * - Multi-character tag names must be in the whitelist of NIP-defined tags.
+   * - Marker tags with no value (e.g. NIP-70 `["-"]`, NIP-36
+   *   `["content-warning"]`) are indexed with an empty-string value so
+   *   `exists` queries (`tag:<name>` / `-tag:<name>`) still see them.
    * - Tag values must be ≤ 255 characters. Values that exceed the limit are
    *   skipped, but the tag name key is still created (with an empty array if
    *   no values pass).
@@ -502,8 +509,8 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     const tagsMap: Record<string, string[]> = {};
 
     for (const tag of tags) {
-      if (tag.length >= 2) {
-        const [tagName, value] = tag;
+      if (tag.length >= 1) {
+        const [tagName, value = ""] = tag;
 
         if (!OpenSearchRelay.isIndexableTagName(tagName)) {
           continue;

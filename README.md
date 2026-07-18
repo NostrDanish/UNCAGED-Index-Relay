@@ -156,7 +156,9 @@ The following NIP-50 search extensions are supported:
 - `tag:<name>` / `-tag:<name>` — Filter by tag existence: `tag:e` returns only
   events that have at least one `e` tag, `-tag:e` returns only events with no
   `e` tag. Only indexable tag names are considered (single-character names and
-  the whitelisted multi-letter names); other names are ignored.
+  the whitelisted multi-letter names); other names are ignored. Value-less
+  marker tags count as existing, so `-tag:content-warning` excludes events
+  flagged as sensitive (NIP-36).
 - `autocomplete:true` / `autocomplete:false` — Toggle edge-ngram prefix
   matching (on by default for kind-0-only filters, off otherwise)
 - `sort:<mode>` — Sort results: `top`, `hot`, `controversial`, `rising`, `zaps`

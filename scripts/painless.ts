@@ -137,12 +137,13 @@ export function buildTagsMapPainlessScript(
     Map tagsMap = new HashMap();
     if (ctx._source.tags != null) {
       for (def tag : ctx._source.tags) {
-        if (tag != null && tag.size() >= 2) {
+        if (tag != null && tag.size() >= 1) {
           String tagName = tag[0].toString();
           if (tagName.length() != 1 && !whitelist.contains(tagName)) {
             continue;
           }
-          String value = tag[1].toString();
+          // Marker tags with no value are indexed as '' so exists queries work.
+          String value = tag.size() >= 2 ? tag[1].toString() : '';
           if (!tagsMap.containsKey(tagName)) {
             tagsMap.put(tagName, new ArrayList());
           }
