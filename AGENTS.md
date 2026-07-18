@@ -24,6 +24,8 @@
 │   ├── analyze-pool.ts     # Worker pool for event analysis (verify, language, sentiment, media)
 │   ├── analyze-pool.test.ts # Analysis pool tests
 │   ├── analyze-worker.ts   # Worker thread for event analysis
+│   ├── log.ts              # Structured JSON logging (one-line entries, Loki-queryable)
+│   ├── log.test.ts         # Logging tests
 │   ├── media.ts            # Media/video detection from imeta tags and URLs
 │   ├── negentropy.ts       # NIP-77 Negentropy protocol codec (set reconciliation)
 │   ├── negentropy.test.ts  # Negentropy tests
@@ -70,6 +72,10 @@ Edit `.env` to configure the application:
 - `RELAY_URL` - Full WebSocket URL of the relay, eg `wss://relay.example.com/`
 - `RELAY_PUBKEY` - Relay operator's public key (hex, for NIP-11)
 - `RELAY_CONTACT` - Relay operator's contact (email or URL, for NIP-11)
+- `LOG_LEVEL` - Log level: `debug` | `info` | `warn` | `error` (default: `info`).
+  Logs are one-line JSON, queryable in Loki with `| json`. `debug` includes
+  per-REQ/per-EVENT/per-connection traffic entries; `info` is reserved for
+  infrequent lifecycle events.
 - `OPENSEARCH_NODE` - OpenSearch endpoint (default: http://localhost:9200)
 - `OPENSEARCH_INDEX` - Index name (default: nostr-events)
 - `OPENSEARCH_USERNAME` - OpenSearch username (optional)

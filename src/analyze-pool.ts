@@ -1,6 +1,7 @@
 import type { NostrEvent } from "nostr-tools";
 
 import { AnalyzePoolOverloaded } from "./errors.ts";
+import { errFields, log } from "./log.ts";
 import { analyzePendingGauge, analyzeWorkerInflightGauge } from "./metrics.ts";
 
 /** Result of analyzing a Nostr event off the main thread. */
@@ -140,7 +141,10 @@ export class AnalyzePool {
         );
       };
       worker.onerror = (error) => {
-        console.error("Analyze worker error:", error);
+        log.error("analyze_worker_error", {
+          worker: workerIndex,
+          ...errFields(error),
+        });
         // Never leave dispose() waiting on a worker that failed to start.
         markReady();
       };
@@ -150,9 +154,10 @@ export class AnalyzePool {
     this.queues = Array.from({ length: poolSize }, () => []);
     this.inflight = new Array(poolSize).fill(0);
 
-    console.log(
-      `Analyze pool started with ${poolSize} workers (maxPending=${this.maxPending})`,
-    );
+    log.info("analyze_pool_started", {
+      workers: poolSize,
+      max_pending: this.maxPending,
+    });
   }
 
   /** Current number of in-flight + queued analyze requests. */

@@ -15,6 +15,7 @@
  */
 
 import type { NostrEvent, NostrSigner, NRelay } from "@nostrify/nostrify";
+import { log } from "./log.ts";
 import type { EventScores } from "./opensearch.ts";
 import type { Client } from "./opensearch-client.ts";
 
@@ -251,9 +252,7 @@ export class Nip85 {
   /** Log once per flush cycle when a dirty set hits the cap. */
   private warnDirtyOverflow(which: string): void {
     if (!this.dirtyOverflowWarned) {
-      console.warn(
-        `[nip85] dirty ${which} set full (${Nip85.MAX_DIRTY}); dropping further additions until next flush`,
-      );
+      log.warn("nip85_dirty_overflow", { which, max: Nip85.MAX_DIRTY });
       this.dirtyOverflowWarned = true;
     }
   }

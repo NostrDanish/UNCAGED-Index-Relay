@@ -1,5 +1,7 @@
 import type { NostrRelayInfo } from "@nostrify/nostrify";
 
+import { log } from "./log.ts";
+
 /** Escape HTML special characters to prevent XSS. */
 function esc(str: string): string {
   return str
@@ -27,15 +29,15 @@ function safeUrl(
   try {
     parsed = new URL(raw);
   } catch {
-    console.warn(
-      `[landing-page] ${fieldName}: not a valid URL (${JSON.stringify(raw)}), omitting`,
-    );
+    log.warn("landing_url_invalid", { field: fieldName, value: raw });
     return null;
   }
   if (!allowed.includes(parsed.protocol.toLowerCase())) {
-    console.warn(
-      `[landing-page] ${fieldName}: disallowed URL scheme ${JSON.stringify(parsed.protocol)} (${JSON.stringify(raw)}), omitting`,
-    );
+    log.warn("landing_url_scheme_disallowed", {
+      field: fieldName,
+      scheme: parsed.protocol,
+      value: raw,
+    });
     return null;
   }
   return parsed.toString();
@@ -103,9 +105,7 @@ export function renderLandingPage(
       const escAddr = esc(raw);
       contactHtml = `<a href="mailto:${escAddr}">${escAddr}</a>`;
     } else {
-      console.warn(
-        `[landing-page] contact: unrecognized format (${JSON.stringify(raw)}), omitting`,
-      );
+      log.warn("landing_contact_invalid", { value: raw });
     }
   }
 

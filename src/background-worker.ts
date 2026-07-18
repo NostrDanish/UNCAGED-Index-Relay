@@ -13,6 +13,7 @@
 import process from "node:process";
 import type { NostrEvent } from "nostr-tools";
 import { Config } from "./config.ts";
+import { errFields, log } from "./log.ts";
 import { Nip85 } from "./nip85.ts";
 import { OpenSearchRelay } from "./opensearch.ts";
 import { Client as OpenSearchClient } from "./opensearch-client.ts";
@@ -105,9 +106,7 @@ function addBounded(set: Set<string>, values: string[], label: string): void {
   for (const v of values) {
     if (set.size >= MAX_DIRTY) {
       if (!dirtyOverflowLogged) {
-        console.warn(
-          `[bg-worker] dirty ${label} set full (${MAX_DIRTY}); dropping further additions until next recompute cycle`,
-        );
+        log.warn("worker_dirty_overflow", { which: label, max: MAX_DIRTY });
         dirtyOverflowLogged = true;
       }
       return;
@@ -153,7 +152,7 @@ async function recomputeLoop(): Promise<void> {
       await nip85.flushAddrStats();
       await nip85.flushIdentifierStats();
     } catch (err) {
-      console.error("[bg-worker] NIP-85 flush failed:", err);
+      log.error("nip85_flush_failed", errFields(err));
     }
     return;
   }
@@ -173,13 +172,13 @@ async function recomputeLoop(): Promise<void> {
     await nip85.flushAddrStats();
     await nip85.flushIdentifierStats();
   } catch (err) {
-    console.error("[bg-worker] Score recomputation / NIP-85 failed:", err);
+    log.error("recompute_failed", errFields(err));
   }
 }
 
 setInterval(() => {
   recomputeLoop().catch((err) =>
-    console.error("[bg-worker] recomputeLoop error:", err),
+    log.error("recompute_loop_error", errFields(err)),
   );
 }, SCORE_RECOMPUTE_INTERVAL_MS);
 
@@ -194,7 +193,7 @@ if (trends && trendsIntervalMs > 0) {
   const preferredLanguages = config.preferredLanguages;
 
   const updateAllTrends = async () => {
-    console.log("[bg-worker] Updating trends...");
+    log.info("trends_updating");
     await t.updateTrendingHashtags(signer);
     await t.updateTrendingLinks(signer);
     await t.updateTrendingPubkeys(signer, relayUrl);
@@ -207,22 +206,20 @@ if (trends && trendsIntervalMs > 0) {
         preferredLanguages,
       );
     }
-    console.log("[bg-worker] Trends updated.");
+    log.info("trends_updated");
   };
 
   setInterval(() => {
     updateAllTrends().catch((err) =>
-      console.error("[bg-worker] Trends update failed:", err),
+      log.error("trends_update_failed", errFields(err)),
     );
   }, trendsIntervalMs);
 
-  const langInfo =
-    preferredLanguages.length > 0
-      ? ` + languages: ${preferredLanguages.join(", ")}`
-      : "";
-  console.log(
-    `[bg-worker] Trends scheduling enabled (every ${(trendsIntervalMs / 60_000).toFixed(0)} min${langInfo})`,
-  );
+  log.info("trends_scheduled", {
+    interval_ms: trendsIntervalMs,
+    languages:
+      preferredLanguages.length > 0 ? preferredLanguages.join(",") : undefined,
+  });
 }
 
-console.log("[bg-worker] Background worker started");
+log.info("bg_worker_started");

@@ -10,6 +10,7 @@ import { NIP50, NKinds, NSchema as n } from "@nostrify/nostrify";
 import { buildAutocompleteText } from "./autocomplete-text.ts";
 import type { Config } from "./config.ts";
 import { StorageOverloaded } from "./errors.ts";
+import { errFields, log } from "./log.ts";
 import { detectMedia } from "./media.ts";
 import {
   opensearchBulkQueueGauge,
@@ -300,9 +301,10 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
   /** Log once per drain cycle when a dirty set hits the cap. */
   private warnDirtyOverflow(which: string): void {
     if (!this.dirtyOverflowWarned) {
-      console.warn(
-        `[opensearch] pendingDirty${which === "ids" ? "Ids" : "Pubkeys"} full (${OpenSearchRelay.MAX_PENDING_DIRTY}); dropping further additions until drain`,
-      );
+      log.warn("dirty_overflow", {
+        which,
+        max: OpenSearchRelay.MAX_PENDING_DIRTY,
+      });
       this.dirtyOverflowWarned = true;
     }
   }
@@ -917,7 +919,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
 
       return events.slice(0, limit);
     } catch (error) {
-      console.error("Sorted query failed:", error);
+      log.error("sorted_query_failed", errFields(error));
       throw error;
     }
   }
@@ -1701,7 +1703,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
       return this.hitsToEvents(response);
     } catch (error) {
       queryEnd();
-      console.error("OpenSearch query failed:", error);
+      log.error("query_failed", errFields(error));
       throw error;
     }
   }
@@ -1850,12 +1852,12 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
       if (this.refreshDelayMs > 0) {
         setTimeout(() => {
           this.resolveReplaceableSlots(entries).catch((err) =>
-            console.warn("Phase 2 replaceable slot resolution failed:", err),
+            log.warn("phase2_failed", errFields(err)),
           );
         }, this.refreshDelayMs);
       } else {
         this.resolveReplaceableSlots(entries).catch((err) =>
-          console.warn("Phase 2 replaceable slot resolution failed:", err),
+          log.warn("phase2_failed", errFields(err)),
         );
       }
     }
@@ -1932,9 +1934,9 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     const acquired = await this.acquirePhase2Slot();
     if (!acquired) {
       opensearchPhase2DroppedCounter.inc();
-      console.warn(
-        `[opensearch] Phase 2 task dropped: waiter queue full (${OpenSearchRelay.MAX_PHASE2_WAITERS}). Affected slots will be cleaned up on the next replacement event.`,
-      );
+      log.warn("phase2_dropped", {
+        max_waiters: OpenSearchRelay.MAX_PHASE2_WAITERS,
+      });
       return;
     }
     try {
@@ -2059,7 +2061,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
         ).responses ?? [];
     } catch (error) {
       slotEnd();
-      console.warn("Phase 2 msearch failed:", error);
+      log.warn("phase2_msearch_failed", errFields(error));
       return;
     }
 
@@ -2176,7 +2178,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
         }
         await this.writeClient.bulk({ body: bulkBody });
       } catch (error) {
-        console.warn("Phase 2 bulk partial-doc update failed:", error);
+        log.warn("phase2_history_update_failed", errFields(error));
       } finally {
         cleanupEnd();
       }
@@ -2214,7 +2216,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
           conflicts: "proceed",
         });
       } catch (error) {
-        console.warn("Phase 2 delete sweep failed:", error);
+        log.warn("phase2_delete_sweep_failed", errFields(error));
       } finally {
         deleteEnd();
       }
@@ -2268,7 +2270,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
           conflicts: "proceed",
         });
       } catch (error) {
-        console.warn("Phase 2 deep-history sweep failed:", error);
+        log.warn("phase2_deep_sweep_failed", errFields(error));
       } finally {
         deepEnd();
       }
@@ -2422,7 +2424,10 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
           }
         }
       } catch (error) {
-        console.error("Query failed for filter:", filter, error);
+        log.error("filter_query_failed", {
+          filters: JSON.stringify(filter),
+          ...errFields(error),
+        });
       }
     }
 
@@ -2520,7 +2525,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
       return items;
     } catch (error) {
       end();
-      console.error("OpenSearch sync items query failed:", error);
+      log.error("sync_query_failed", errFields(error));
       throw error;
     }
   }
@@ -2543,7 +2548,10 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
           yield ["EVENT", "req", event];
         }
       } catch (error) {
-        console.error("Query failed for filter:", filter, error);
+        log.error("filter_query_failed", {
+          filters: JSON.stringify(filter),
+          ...errFields(error),
+        });
       }
     }
     yield ["EOSE", "req"];
@@ -2622,7 +2630,10 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
           totalCount += response.body.count;
         }
       } catch (error) {
-        console.error("Count query failed for filter:", filter, error);
+        log.error("count_filter_failed", {
+          filters: JSON.stringify(filter),
+          ...errFields(error),
+        });
       }
     }
 
@@ -2660,7 +2671,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
           docIdsToDelete.push(this.getDocumentId(event));
         }
       } catch (error) {
-        console.error("Failed to query events for deletion:", error);
+        log.error("remove_query_failed", errFields(error));
       }
     }
 
@@ -2694,15 +2705,15 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
           const erroredDocuments = response.body.items.filter(
             (item) => item.update?.error,
           );
-          console.error(
-            `Bulk update had ${erroredDocuments.length} errors:`,
-            erroredDocuments.slice(0, 5),
-          );
+          log.error("soft_delete_bulk_errors", {
+            count: erroredDocuments.length,
+            errors: JSON.stringify(erroredDocuments.slice(0, 5)),
+          });
         } else {
-          console.log(`🗑️  Soft deleted ${uniqueDocIds.length} events`);
+          log.debug("soft_deleted", { count: uniqueDocIds.length });
         }
       } catch (error) {
-        console.error("Bulk update failed:", error);
+        log.error("soft_delete_bulk_failed", errFields(error));
         throw error;
       }
     }
@@ -2730,7 +2741,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
           conflicts: "proceed",
         });
       } catch (error) {
-        console.error("Failed to delete historical versions:", error);
+        log.error("history_delete_failed", errFields(error));
       }
     }
   }
@@ -2862,7 +2873,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
             body: { settings: OpenSearchRelay.ANALYZER_SETTINGS },
           });
           await this.writeClient.indices.open({ index: this.indexName });
-          console.log(`Updated analyzer settings for index ${this.indexName}`);
+          log.info("settings_updated", { index: this.indexName });
         } catch (e) {
           // Ensure the index is reopened even if putSettings fails.
           try {
@@ -2870,10 +2881,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
           } catch {
             // Already open or unrecoverable — ignore.
           }
-          console.warn(
-            "Warning: could not update analyzer settings (may already exist):",
-            e,
-          );
+          log.warn("settings_update_failed", errFields(e));
         }
 
         // Update mappings so any new fields are added to the existing index.
@@ -2887,12 +2895,9 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
               properties: OpenSearchRelay.MAPPING_PROPERTIES,
             },
           });
-          console.log(`Updated mappings for index ${this.indexName}`);
+          log.info("mappings_updated", { index: this.indexName });
         } catch (e) {
-          console.warn(
-            "Warning: could not update mappings (may need reindex):",
-            e,
-          );
+          log.warn("mappings_update_failed", errFields(e));
         }
         return;
       }
@@ -2924,9 +2929,9 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
         },
       });
 
-      console.log(`✅ Created index ${this.indexName}`);
+      log.info("index_created", { index: this.indexName });
     } catch (error) {
-      console.error("Failed to create index:", error);
+      log.error("index_create_failed", errFields(error));
       throw error;
     }
   }
@@ -3317,10 +3322,9 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
         for (let i = 0; i < items.length; i++) {
           const result = items[i].update;
           if (result?.error) {
-            console.warn(
-              `Score update failed for doc:`,
-              JSON.stringify(result.error),
-            );
+            log.warn("score_update_failed", {
+              err: JSON.stringify(result.error),
+            });
           }
         }
       }
@@ -3328,9 +3332,11 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
 
     const kind0Count = dirtyKind0.length;
     const nonKind0Count = dirtyNonKind0Ids.length;
-    console.log(
-      `Recomputed scores for ${allDirtyIds.length} events (${kind0Count} profiles, ${nonKind0Count} engagement)`,
-    );
+    log.debug("scores_recomputed", {
+      count: allDirtyIds.length,
+      profiles: kind0Count,
+      engagement: nonKind0Count,
+    });
 
     // Build result maps for callers (e.g. NIP-85 publisher).
     const userScores = new Map<string, { followers: number }>();

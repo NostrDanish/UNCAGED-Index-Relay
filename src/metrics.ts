@@ -375,6 +375,17 @@ export const relayReqDurationHistogram = new Histogram({
   buckets: [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5],
 });
 
+/**
+ * Number of stored events returned per REQ (before EOSE). Each returned
+ * event costs a JSON.stringify + ws.send on the main thread, so this
+ * histogram is the direct measure of REQ serialization load.
+ */
+export const reqEventsReturnedHistogram = new Histogram({
+  name: "ditto_relay_req_events_returned",
+  help: "Number of stored events returned per REQ",
+  buckets: [0, 1, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000],
+});
+
 // ---------------------------------------------------------------------------
 // Relay broadcast metrics
 // ---------------------------------------------------------------------------

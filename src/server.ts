@@ -5,6 +5,7 @@ import { serve } from "bun";
 import { AnalyzePool } from "./analyze-pool.ts";
 import { Config } from "./config.ts";
 import { renderLandingPage } from "./landing-page.ts";
+import { errFields, getLogLevel, log } from "./log.ts";
 import { register, startRuntimeMetrics } from "./metrics.ts";
 import { OpenSearchRelay } from "./opensearch.ts";
 import type { ClientOptions } from "./opensearch-client.ts";
@@ -91,7 +92,7 @@ if (config.statsEnabled) {
   };
 
   worker.onerror = (error) => {
-    console.error("Background worker error:", error);
+    log.error("bg_worker_error", { err_msg: error.message });
   };
 
   // Accumulate dirty addrs/identifiers from flush callbacks. These are drained
@@ -132,18 +133,18 @@ if (config.statsEnabled) {
     });
   }, 2_000);
 } else {
-  console.log(
-    "Stats disabled (STATS_ENABLED=false) — background worker not started.",
-  );
+  log.info("stats_disabled");
 }
 
 // Initialize index on startup
 try {
   await opensearchRelay.migrate();
-  console.log("Connected to OpenSearch and initialized index");
+  log.info("opensearch_connected", { node: config.opensearchNode });
 } catch (error) {
-  console.error("Failed to connect to OpenSearch:", error);
-  console.error(`Make sure OpenSearch is running at ${config.opensearchNode}`);
+  log.error("opensearch_connect_failed", {
+    node: config.opensearchNode,
+    ...errFields(error),
+  });
   process.exit(1);
 }
 
@@ -175,12 +176,23 @@ const server = serve<WebSocketData>({
 
     // Handle WebSocket upgrade
     if (url.pathname === "/" && req.headers.get("upgrade") === "websocket") {
+      // Client identity for logging/abuse analysis. The relay sits behind
+      // cloudflared, so the socket peer is always localhost — the real
+      // client IP only exists in these proxy headers.
+      const ip =
+        req.headers.get("cf-connecting-ip") ??
+        req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ??
+        undefined;
+      const userAgent = req.headers.get("user-agent") ?? undefined;
+
       const upgraded = server.upgrade(req, {
         data: {
           subscriptions: new Map(),
           challenge: "",
           challengeSent: false,
           authedPubkeys: new Set(),
+          ip,
+          userAgent,
         },
       });
 
@@ -268,7 +280,7 @@ const server = serve<WebSocketData>({
         // handleMessage already catches and converts errors to NOTICE
         // responses; this is just a belt-and-suspenders to prevent an
         // unhandled rejection from crashing the process.
-        console.error("Unhandled error in handleMessage:", err);
+        log.error("message_unhandled", errFields(err));
       });
     },
 
@@ -278,11 +290,11 @@ const server = serve<WebSocketData>({
   },
 });
 
-console.log(`Nostr relay listening on ws://localhost:${server.port}`);
+log.info("started", { port: server.port, log_level: getLogLevel() });
 
 // Graceful shutdown on SIGINT/SIGTERM — also ensures CPU profiles are written.
 async function shutdown() {
-  console.log("Shutting down...");
+  log.info("shutdown");
   server.stop();
   // Bounded cleanup: waiting on worker teardown keeps the exit clean, but a
   // wedged worker must never be able to hang the shutdown path.
