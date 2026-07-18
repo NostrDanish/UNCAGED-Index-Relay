@@ -8,7 +8,7 @@ import { matchFilter, verifyEvent } from "nostr-tools";
 
 import type { AnalyzeResult } from "./analyze-pool.ts";
 import { AnalyzePoolOverloaded, StorageOverloaded } from "./errors.ts";
-import { errFields, Logger } from "./log.ts";
+import { clip, errFields, Logger } from "./log.ts";
 import {
   relayBroadcastQueueGauge,
   relayConnectionsGauge,
@@ -1134,7 +1134,7 @@ export class Relay {
       return { success: true, ...result };
     } catch (error) {
       this.log.error("count_query_failed", {
-        filters: JSON.stringify(filters),
+        filters: clip(JSON.stringify(filters)),
         ...errFields(error),
       });
       return {
@@ -1200,7 +1200,7 @@ export class Relay {
       return { success: true, events };
     } catch (error) {
       this.log.error("req_query_failed", {
-        filters: JSON.stringify(filters),
+        filters: clip(JSON.stringify(filters)),
         ...errFields(error),
       });
       return {
@@ -1362,7 +1362,7 @@ export class Relay {
           ip: ws.data.ip,
           ua: ws.data.userAgent,
           sub: subscriptionId,
-          filters: JSON.stringify(filters),
+          filters: clip(JSON.stringify(filters)),
           returned: events.length,
           ms: Math.round(performance.now() - startMs),
         });
@@ -1425,7 +1425,7 @@ export class Relay {
         this.log.debug("count", {
           ip: ws.data.ip,
           sub: subscriptionId,
-          filters: JSON.stringify(filters),
+          filters: clip(JSON.stringify(filters)),
           count: result.count,
         });
       }

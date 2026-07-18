@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { errFields, Logger, parseLogLevel } from "./log.ts";
+import { clip, errFields, Logger, parseLogLevel } from "./log.ts";
 
 /** Capture console output emitted during `fn`. */
 function capture(fn: () => void): { out: string[]; err: string[] } {
@@ -108,4 +108,13 @@ test("errFields flattens an Error to single-line fields", () => {
 
 test("errFields handles non-Error values", () => {
   assert.deepEqual(errFields("oops"), { err_msg: "oops" });
+});
+
+test("clip bounds long values and passes short ones through", () => {
+  assert.equal(clip("short"), "short");
+  const long = "x".repeat(5000);
+  const clipped = clip(long);
+  assert.equal(clipped.length, 4001);
+  assert.ok(clipped.endsWith("…"));
+  assert.equal(clip(long, 10), `${"x".repeat(10)}…`);
 });

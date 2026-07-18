@@ -51,6 +51,16 @@ export type LogFields = Record<
 >;
 
 /**
+ * Bound a field value's length so one entry can't exceed journald's line
+ * limit (~48KB) and arrive in Loki as unparseable truncated JSON. Nostr
+ * filters may legally contain up to `max_filter_values` (20k) 64-hex
+ * entries, so serialized filters need this before logging.
+ */
+export function clip(value: string, max = 4000): string {
+  return value.length <= max ? value : `${value.slice(0, max)}…`;
+}
+
+/**
  * Flatten an unknown thrown value into log fields. Keeps the stack to the
  * first frame so every entry stays on a single line.
  */

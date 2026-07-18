@@ -10,7 +10,7 @@ import { NIP50, NKinds, NSchema as n } from "@nostrify/nostrify";
 import { buildAutocompleteText } from "./autocomplete-text.ts";
 import type { Config } from "./config.ts";
 import { StorageOverloaded } from "./errors.ts";
-import { errFields, Logger } from "./log.ts";
+import { clip, errFields, Logger } from "./log.ts";
 import { detectMedia } from "./media.ts";
 import {
   opensearchBulkQueueGauge,
@@ -2434,7 +2434,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
         }
       } catch (error) {
         this.log.error("filter_query_failed", {
-          filters: JSON.stringify(filter),
+          filters: clip(JSON.stringify(filter)),
           ...errFields(error),
         });
       }
@@ -2558,7 +2558,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
         }
       } catch (error) {
         this.log.error("filter_query_failed", {
-          filters: JSON.stringify(filter),
+          filters: clip(JSON.stringify(filter)),
           ...errFields(error),
         });
       }
@@ -2640,7 +2640,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
         }
       } catch (error) {
         this.log.error("count_filter_failed", {
-          filters: JSON.stringify(filter),
+          filters: clip(JSON.stringify(filter)),
           ...errFields(error),
         });
       }
