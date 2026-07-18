@@ -184,13 +184,12 @@ const server = serve<WebSocketData>({
 
     // Handle WebSocket upgrade
     if (url.pathname === "/" && req.headers.get("upgrade") === "websocket") {
-      // Client identity for logging/abuse analysis. The relay sits behind
-      // cloudflared, so the socket peer is always localhost — the real
-      // client IP only exists in these proxy headers.
-      const ip =
-        req.headers.get("cf-connecting-ip") ??
-        req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ??
-        undefined;
+      // Client identity for logging/abuse analysis. Behind a reverse proxy
+      // the socket peer is the proxy, so IP_HEADER names the trusted header
+      // carrying the real client IP; without it, use the socket address.
+      const ip = config.ipHeader
+        ? req.headers.get(config.ipHeader)?.split(",")[0]?.trim() || undefined
+        : server.requestIP(req)?.address;
       const userAgent = req.headers.get("user-agent") ?? undefined;
 
       const upgraded = server.upgrade(req, {

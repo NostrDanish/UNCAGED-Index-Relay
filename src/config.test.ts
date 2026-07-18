@@ -54,6 +54,42 @@ describe("Config", () => {
     });
   });
 
+  describe("ipHeader", () => {
+    it("should default to undefined (use socket address)", () => {
+      const config = new Config(baseEnv());
+      assert.equal(config.ipHeader, undefined);
+    });
+
+    it("should return the header name when set", () => {
+      const config = new Config(baseEnv([["IP_HEADER", "CF-Connecting-IP"]]));
+      assert.equal(config.ipHeader, "CF-Connecting-IP");
+    });
+
+    it("should treat an empty string as unset", () => {
+      const config = new Config(baseEnv([["IP_HEADER", ""]]));
+      assert.equal(config.ipHeader, undefined);
+    });
+  });
+
+  describe("logLevel", () => {
+    it("should default to info", () => {
+      const config = new Config(baseEnv());
+      assert.equal(config.logLevel, "info");
+    });
+
+    it("should accept and lowercase a valid level", () => {
+      const config = new Config(baseEnv([["LOG_LEVEL", "DEBUG"]]));
+      assert.equal(config.logLevel, "debug");
+    });
+
+    it("should throw on an invalid level", () => {
+      assert.throws(
+        () => new Config(baseEnv([["LOG_LEVEL", "verbose"]])),
+        /LOG_LEVEL must be one of/,
+      );
+    });
+  });
+
   describe("relayUrl", () => {
     it("should throw an error when RELAY_URL is not set", () => {
       const mockEnv = new Map([

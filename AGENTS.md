@@ -72,6 +72,9 @@ Edit `.env` to configure the application:
 - `RELAY_URL` - Full WebSocket URL of the relay, eg `wss://relay.example.com/`
 - `RELAY_PUBKEY` - Relay operator's public key (hex, for NIP-11)
 - `RELAY_CONTACT` - Relay operator's contact (email or URL, for NIP-11)
+- `IP_HEADER` - HTTP header carrying the real client IP behind a reverse
+  proxy (e.g. `CF-Connecting-IP`, `X-Real-IP`, `X-Forwarded-For`; first
+  comma-separated entry is used). Unset = use the socket address.
 - `LOG_LEVEL` - Log level: `debug` | `info` | `warn` | `error` (default: `info`).
   Logs are one-line JSON, queryable in Loki with `| json`. `debug` includes
   per-REQ/per-EVENT/per-connection traffic entries; `info` is reserved for

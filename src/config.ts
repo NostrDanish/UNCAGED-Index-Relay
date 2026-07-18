@@ -8,6 +8,15 @@ export class Config {
   readonly port: number;
   /** Minimum log level to emit: `debug` | `info` | `warn` | `error` (default: `info`). */
   readonly logLevel: LogLevel;
+  /**
+   * HTTP header carrying the real client IP, for deployments behind a
+   * reverse proxy (e.g. `CF-Connecting-IP` behind Cloudflare, `X-Real-IP`
+   * or `X-Forwarded-For` behind nginx). For comma-separated values the
+   * first entry is used. When unset, the socket's remote address is used —
+   * correct for direct (un-proxied) deployments. Only set this to a header
+   * your proxy strips/overwrites; otherwise clients can spoof it.
+   */
+  readonly ipHeader: string | undefined;
   readonly relayUrl: string;
   readonly publicUrl: string;
   readonly relayPubkey: string | undefined;
@@ -160,6 +169,9 @@ export class Config {
       }
       this.logLevel = lower;
     }
+
+    // ipHeader
+    this.ipHeader = env.get("IP_HEADER") || undefined;
 
     // relayUrl
     const relayUrlValue = env.get("RELAY_URL");
