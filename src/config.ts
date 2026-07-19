@@ -95,13 +95,6 @@ export class Config {
    */
   readonly analyzePoolSize: number;
   /**
-   * Number of OpenSearch search-worker threads. Defaults to
-   * `hardwareConcurrency - 1` so the main thread keeps a core for the
-   * WebSocket event loop. Override with `SEARCH_POOL_SIZE`; 0 uses the
-   * default. Hard-capped at `hardwareConcurrency`.
-   */
-  readonly searchPoolSize: number;
-  /**
    * Maximum pending analyze requests (queued + in-flight) before the relay
    * starts rejecting new EVENT messages with `error: relay overloaded`.
    * Protects the relay from OOM under firehose-style ingest. Default: 20_000.
@@ -374,20 +367,6 @@ export class Config {
         throw new Error("ANALYZE_POOL_SIZE must be a non-negative integer.");
       }
       this.analyzePoolSize = n;
-    }
-
-    // searchPoolSize: 0 (or unset) means "auto" — the pool picks
-    // `hardwareConcurrency - 1`. Workers offload OpenSearch read
-    // stringify/fetch/parse off the main WS event loop.
-    const searchPoolSizeValue = env.get("SEARCH_POOL_SIZE");
-    if (!searchPoolSizeValue) {
-      this.searchPoolSize = 0;
-    } else {
-      const n = parseInt(searchPoolSizeValue, 10);
-      if (Number.isNaN(n) || n < 0) {
-        throw new Error("SEARCH_POOL_SIZE must be a non-negative integer.");
-      }
-      this.searchPoolSize = n;
     }
 
     // analyzeMaxPending

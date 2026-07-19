@@ -406,12 +406,6 @@ export const analyzePendingGauge = new Gauge({
   help: "Pending analysis requests in the worker pool",
 });
 
-/** Pending OpenSearch read requests in the search worker pool. */
-export const searchPoolPendingGauge = new Gauge({
-  name: "ditto_search_pool_pending",
-  help: "Pending OpenSearch read requests in the search worker pool",
-});
-
 /**
  * Per-worker inflight analyze requests (posted to the worker but not yet
  * returned). Useful for diagnosing skewed dispatch and head-of-line

@@ -11,7 +11,6 @@ import { OpenSearchRelay } from "./opensearch.ts";
 import type { ClientOptions } from "./opensearch-client.ts";
 import { Client as OpenSearchClient } from "./opensearch-client.ts";
 import { Relay, type WebSocketData } from "./relay.ts";
-import { SearchPool } from "./search-pool.ts";
 
 const config = new Config({
   get(key) {
@@ -41,31 +40,11 @@ if (config.opensearchUsername && config.opensearchPassword) {
     password: config.opensearchPassword,
   };
 }
+const opensearchReadClient = new OpenSearchClient(opensearchClientOptions);
 const opensearchWriteClient = new OpenSearchClient(opensearchClientOptions);
 
-// Offload OpenSearch read requests (search/msearch/count) to a worker pool.
-// The request-body JSON.stringify, fetch syscalls, and response res.json()
-// parsing were ~20% of main-thread CPU in production profiles — the budget
-// that tips the single-threaded event loop into congestion collapse at peak.
-// Workers run that on otherwise-idle cores. Writes stay on the in-process
-// client (bulk indexing is already batched and off the hot REQ path).
-const searchPool = new SearchPool(
-  {
-    node: config.opensearchNode,
-    auth:
-      config.opensearchUsername && config.opensearchPassword
-        ? {
-            username: config.opensearchUsername,
-            password: config.opensearchPassword,
-          }
-        : undefined,
-  },
-  config.searchPoolSize,
-  { logger: log },
-);
-
 // Initialize OpenSearch relay
-const opensearchRelay = new OpenSearchRelay(searchPool, {
+const opensearchRelay = new OpenSearchRelay(opensearchReadClient, {
   indexName: config.opensearchIndex,
   historyEnabled: config.historyEnabled,
   historyKindsWhitelist: config.historyKindsWhitelist,
@@ -329,11 +308,7 @@ async function shutdown() {
   server.stop();
   // Bounded cleanup: waiting on worker teardown keeps the exit clean, but a
   // wedged worker must never be able to hang the shutdown path.
-  const cleanup = Promise.all([
-    analyzePool.dispose(),
-    searchPool.close(),
-    bgWorker?.terminate(),
-  ]);
+  const cleanup = Promise.all([analyzePool.dispose(), bgWorker?.terminate()]);
   const timeout = new Promise((resolve) => setTimeout(resolve, 5_000));
   await Promise.race([cleanup, timeout]);
   process.exit(0);

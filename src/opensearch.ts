@@ -24,7 +24,6 @@ import {
 import type {
   ClientOptions,
   MsearchResponseItem,
-  SearchClient,
   SearchResponseBody,
 } from "./opensearch-client.ts";
 import {
@@ -188,8 +187,8 @@ export interface SyncItem {
  * Handles event storage and querying with full-text search support (NIP-50)
  */
 export class OpenSearchRelay implements NRelay, AsyncDisposable {
-  /** Client used for read operations (search, count). May be worker-backed. */
-  private client: SearchClient;
+  /** Client used for read operations (search, count). */
+  private client: Client;
   /** Client used for write operations (bulk, updateByQuery, deleteByQuery). Defaults to `client`. */
   private writeClient: Client;
   private indexName: string;
@@ -359,7 +358,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
   private bulkMaxQueue: number;
 
   constructor(
-    client: SearchClient,
+    client: Client,
     opts?: {
       indexName?: string;
       bulkMaxSize?: number;
@@ -406,9 +405,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
   ) {
     this.client = client;
     this.log = opts?.logger ?? new Logger();
-    // Writes need a full Client. When no separate writeClient is given (tests,
-    // single-client setups), the read client must itself be a full Client.
-    this.writeClient = opts?.writeClient ?? (client as Client);
+    this.writeClient = opts?.writeClient ?? client;
     this.indexName = opts?.indexName || "nostr-events";
     this.bulkMaxSize = opts?.bulkMaxSize ?? 100;
     this.bulkFlushMs = opts?.bulkFlushMs ?? 200;
