@@ -19,7 +19,7 @@ function capture(fn: () => void): { out: string[]; err: string[] } {
   return { out, err };
 }
 
-test("emits single-line JSON with level, time, msg, and fields", () => {
+test("emits single-line JSON with level, msg, and fields", () => {
   const log = new Logger("info");
   const { out } = capture(() => {
     log.info("started", { port: 13131, ready: true });
@@ -31,7 +31,8 @@ test("emits single-line JSON with level, time, msg, and fields", () => {
   assert.equal(entry.msg, "started");
   assert.equal(entry.port, 13131);
   assert.equal(entry.ready, true);
-  assert.ok(!Number.isNaN(Date.parse(entry.time)));
+  // No app-emitted `time` field — journald provides the timestamp.
+  assert.ok(!("time" in entry));
 });
 
 test("drops undefined fields", () => {

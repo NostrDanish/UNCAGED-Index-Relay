@@ -3,9 +3,13 @@
  *
  * Format (slog-style, flat snake_case keys):
  *
- *   {"level":"info","time":"2026-07-18T17:12:03.412Z","msg":"started","port":13131}
+ *   {"level":"info","msg":"started","port":13131}
  *
  * - `level` is a string so Grafana's log panel auto-detects it for coloring.
+ * - There is no app-emitted `time` field: journald stamps every entry with a
+ *   receive timestamp (surfaced in Loki as the log line time), so an extra
+ *   `new Date().toISOString()` per line is pure main-thread overhead on the
+ *   hot logging path and is omitted.
  * - `msg` is a short stable event name (`req`, `ws_open`, ...) — put variable
  *   data in fields, never interpolated into `msg`, so LogQL can aggregate.
  * - Fields must be flat scalars. Serialize structured data (e.g. Nostr
@@ -113,7 +117,6 @@ export class Logger {
     if (!this.levelEnabled(level)) return;
     const entry: Record<string, unknown> = {
       level,
-      time: new Date().toISOString(),
       msg,
     };
     if (fields) {

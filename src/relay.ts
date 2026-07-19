@@ -1351,9 +1351,16 @@ export class Relay {
       // every REQ_SEND_CHUNK events so other REQs, EVENT continuations, and
       // the broadcast drain can interleave; without this, a single big REQ
       // can pin the event loop for tens of milliseconds.
+      //
+      // Serialize the subscription ID once (it's constant across the loop)
+      // and build each frame by concatenation around a single
+      // `JSON.stringify(event)`, mirroring the broadcast path. This avoids
+      // re-stringifying the constant `["EVENT", subId, …]` array wrapper for
+      // every event — measurable in profiles where this loop dominates.
       const events = result.events;
+      const subIdJson = JSON.stringify(subscriptionId);
       for (let i = 0; i < events.length; i++) {
-        this.sendMessage(ws, ["EVENT", subscriptionId, events[i]]);
+        ws.send(`["EVENT",${subIdJson},${JSON.stringify(events[i])}]`);
         if ((i + 1) % Relay.REQ_SEND_CHUNK === 0 && i + 1 < events.length) {
           await yieldEventLoop();
         }
