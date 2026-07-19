@@ -26,6 +26,26 @@ interface ApiResponse<T> {
   body: T;
 }
 
+/**
+ * The read-path surface the relay's query layer needs from a client. Both the
+ * in-process {@link Client} and the worker-backed search pool implement this,
+ * so {@link OpenSearchRelay} can be given either as its read client.
+ */
+export interface SearchClient {
+  search<TSource = unknown>(params: {
+    index: string;
+    body: unknown;
+  }): Promise<ApiResponse<SearchResponseBody<TSource>>>;
+  msearch<TSource = unknown>(
+    searches: Array<{ index: string; body: unknown }>,
+  ): Promise<ApiResponse<{ responses: Array<MsearchResponseItem<TSource>> }>>;
+  count(params: {
+    index: string;
+    body: unknown;
+  }): Promise<ApiResponse<{ count: number }>>;
+  close(): Promise<void>;
+}
+
 /** A single hit in a search response. */
 export interface SearchHit<TSource = unknown> {
   _id?: string;
