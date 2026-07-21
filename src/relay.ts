@@ -5,8 +5,8 @@ import { NKinds, NSchema as n } from "@nostrify/nostrify";
 import type { Filter, NostrEvent } from "nostr-tools";
 import { matchFilter, verifyEvent } from "nostr-tools";
 
-import type { AnalyzeResult } from "./analyze-pool.ts";
-import { AnalyzePoolOverloaded, StorageOverloaded } from "./errors.ts";
+import type { AnalyzeResult } from "./analyze.ts";
+import { StorageOverloaded } from "./errors.ts";
 import { clip, errFields, Logger } from "./log.ts";
 import {
   relayBroadcastQueueGauge,
@@ -127,7 +127,7 @@ function isSyncable(storage: unknown): storage is SyncableStorage {
   );
 }
 
-/** Function that analyzes a Nostr event off the main thread (verify, detect language/sentiment). */
+/** Function that analyzes a Nostr event (verify, detect language/sentiment). */
 export type AnalyzeFn = (
   event: NostrEvent,
   opts?: { verifyOnly?: boolean },
@@ -717,24 +717,9 @@ export class Relay {
     accepted: boolean;
     message: string;
   }> {
-    // Analyze event off the main thread: verify signature, detect language/sentiment.
-    // Backpressure: if the pool is overloaded, analyze() throws synchronously
-    // and we reply OK/false so the client backs off instead of holding the
-    // connection while we OOM.
-    let analysis: AnalyzeResult;
-    try {
-      analysis = await this.analyze(event);
-    } catch (err) {
-      if (err instanceof AnalyzePoolOverloaded) {
-        relayOverloadCounter.inc({ source: "analyze" });
-        return {
-          eventId: event.id,
-          accepted: false,
-          message: "error: relay overloaded, try again",
-        };
-      }
-      throw err;
-    }
+    // Verify signature + derive language/sentiment/media. Runs inline on the
+    // protocol worker (createAnalyzer), so this is CPU-bound local work.
+    const analysis = await this.analyze(event);
     if (!analysis.verified) {
       return {
         eventId: event.id,
@@ -1862,24 +1847,7 @@ export class Relay {
    */
   async handleAuth(ws: RelayConn, event: NostrEvent): Promise<void> {
     // Verify signature (AUTH events don't need language/sentiment analysis).
-    // If the pool is overloaded, surface that as an explicit OK/false so the
-    // client retries instead of treating it as a signature failure.
-    let verified: boolean;
-    try {
-      ({ verified } = await this.analyze(event, { verifyOnly: true }));
-    } catch (err) {
-      if (err instanceof AnalyzePoolOverloaded) {
-        relayOverloadCounter.inc({ source: "analyze" });
-        this.sendMessage(ws, [
-          "OK",
-          event.id,
-          false,
-          "error: relay overloaded, try again",
-        ]);
-        return;
-      }
-      throw err;
-    }
+    const { verified } = await this.analyze(event, { verifyOnly: true });
     if (!verified) {
       this.sendMessage(ws, [
         "OK",
@@ -2014,7 +1982,7 @@ export class Relay {
             // the returned Promise resolves. In production, `server.ts`
             // doesn't await `handleMessage` itself — Bun fires WS messages
             // in parallel — so events from the same connection still
-            // interleave through the analyze pool and batch together.
+            // interleave through analysis and batch together.
             //
             // The per-connection semaphore caps how many of those parallel
             // `handleEvent` Promises can be simultaneously in flight for

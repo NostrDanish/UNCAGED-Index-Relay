@@ -50,10 +50,6 @@ strings**. It never parses, validates, serializes, or queries.
   recomputation, NIP-85, trends. Fed dirty references by the indexer via
   main; its published events are injected into all protocol workers for
   broadcast.
-- **In-process fallback** (`PROTOCOL_WORKERS=0`): the full relay on the
-  main thread with the analyze worker pool (`analyze-pool.ts` +
-  `analyze-worker.ts`) — the pre-worker architecture, kept as a rollback
-  path and for lightweight deployments.
 
 The seam that makes this work is `RelayConn` (relay.ts): the Relay only
 sees `{id, data, send(frame)}` and emits finished NIP-01 frames as strings.
@@ -78,9 +74,6 @@ the hot path.
 │   ├── config.ts           # Configuration management
 │   ├── config.test.ts      # Configuration tests
 │   ├── analyze.ts          # Shared analyzer: verify, language, sentiment, media
-│   ├── analyze-pool.ts     # Worker pool for analysis (in-process fallback mode only)
-│   ├── analyze-pool.test.ts # Analysis pool tests
-│   ├── analyze-worker.ts   # Batching worker shell around analyze.ts
 │   ├── background-worker.ts # Stats/NIP-85/trends worker
 │   ├── log.ts              # Structured JSON logging (one-line entries, Loki-queryable)
 │   ├── log.test.ts         # Logging tests
@@ -151,8 +144,7 @@ Edit `.env` to configure the application:
 - `RELAY_DEFAULT_LIMIT` - Events returned per REQ filter when `limit` is
   omitted; must not exceed `RELAY_MAX_LIMIT` (default: 100).
 - `PROTOCOL_WORKERS` - Number of protocol worker threads. Unset = auto
-  (`max(1, min(16, floor(cores / 4)))`); `0` = in-process fallback (full
-  relay on the main thread with the analyze worker pool).
+  (`max(1, min(16, floor(cores / 4)))`); must be `>= 1` when set.
 
 ## Adding Features
 

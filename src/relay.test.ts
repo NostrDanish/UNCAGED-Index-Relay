@@ -4,7 +4,7 @@ import { createHash } from "node:crypto";
 import { afterEach, beforeEach, describe, it } from "node:test";
 import type { Filter, NostrEvent } from "nostr-tools";
 import { finalizeEvent, generateSecretKey } from "nostr-tools";
-import { AnalyzePoolOverloaded, StorageOverloaded } from "./errors.ts";
+import { StorageOverloaded } from "./errors.ts";
 import {
   bytesToHex,
   hexToBytes,
@@ -622,36 +622,6 @@ describe("Relay", () => {
 
       // But NOT stored
       assert.equal(storageEventCalled, false);
-    });
-
-    it("should NACK with 'relay overloaded' when analyze pool throws AnalyzePoolOverloaded", async () => {
-      const overloadedRelay = new Relay(mockStorage, {
-        relayUrl: "wss://relay.test/",
-        analyze: () => {
-          throw new AnalyzePoolOverloaded(1000, 1000);
-        },
-      });
-
-      const sk = generateSecretKey();
-      const event = finalizeEvent(
-        {
-          kind: 1,
-          created_at: Math.floor(Date.now() / 1000),
-          tags: [],
-          content: "overloaded analyze",
-        },
-        sk,
-      );
-
-      await overloadedRelay.handleEvent(mockWs, event);
-
-      assert.equal(sentMessages.length, 1);
-      assert.deepEqual(sentMessages[0], [
-        "OK",
-        event.id,
-        false,
-        "error: relay overloaded, try again",
-      ]);
     });
 
     it("should NACK with 'relay overloaded' when storage.event throws StorageOverloaded", async () => {

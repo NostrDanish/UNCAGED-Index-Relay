@@ -4,9 +4,8 @@
  * detection. Short-circuits if verification fails.
  *
  * This module is thread-agnostic: `createAnalyzer()` returns a synchronous
- * analyze function that runs wherever it is called. The analyze worker pool
- * (`analyze-worker.ts`) wraps it for the in-process relay mode; protocol
- * workers call it inline so an EVENT never needs an extra thread hop.
+ * analyze function that runs wherever it is called. Protocol workers call it
+ * inline so an EVENT never needs an extra thread hop.
  */
 
 import type { NostrEvent } from "nostr-tools";

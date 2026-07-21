@@ -12,9 +12,9 @@
  * coming back to the right socket. Strings cross the thread boundary as
  * flat copies — no object graphs, no parsing, no serialization on main.
  *
- * Inbound messages are batched per worker per event-loop tick (the same
- * setImmediate pattern as AnalyzePool) so a busy tick costs one postMessage
- * per worker instead of one per message.
+ * Inbound messages are batched per worker per event-loop tick (a
+ * setImmediate flush) so a busy tick costs one postMessage per worker
+ * instead of one per message.
  *
  * Broadcast fan-out: when a worker accepts an EVENT it posts the event to
  * main *as a serialized JSON string* (stringified once, off-main), and main
