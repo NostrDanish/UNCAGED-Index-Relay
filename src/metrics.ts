@@ -270,6 +270,79 @@ class Registry {
 export const register = new Registry();
 
 // ---------------------------------------------------------------------------
+// Multi-thread exposition merging
+// ---------------------------------------------------------------------------
+
+/**
+ * Inject a `worker="<label>"` label into one exposition sample line.
+ * Handles both `name value` and `name{labels} value` forms; our Registry
+ * never emits empty `{}` label sets.
+ */
+function injectWorkerLabel(sample: string, label: string): string {
+  const brace = sample.indexOf("{");
+  const space = sample.indexOf(" ");
+  if (brace !== -1 && brace < space) {
+    return `${sample.slice(0, brace + 1)}worker="${label}",${sample.slice(brace + 1)}`;
+  }
+  return `${sample.slice(0, space)}{worker="${label}"}${sample.slice(space)}`;
+}
+
+/**
+ * Merge Prometheus exposition texts from multiple threads into one valid
+ * document. Each thread has its own metric registry, so the same metric
+ * name appears in several sources; Prometheus requires all samples of a
+ * metric to be grouped under a single HELP/TYPE header. Samples get a
+ * `worker="<label>"` label identifying the originating thread, so totals
+ * are a `sum without (worker) (...)` away.
+ *
+ * Only supports the block format produced by this module's Registry
+ * (blank-line-separated blocks of `# HELP` / `# TYPE` / samples).
+ */
+export function mergeExposition(
+  sources: Array<{ label: string; text: string }>,
+): string {
+  interface Block {
+    help: string;
+    type: string;
+    samples: string[];
+  }
+  const blocks = new Map<string, Block>();
+
+  for (const { label, text } of sources) {
+    for (const rawBlock of text.split("\n\n")) {
+      let help = "";
+      let type = "";
+      let name = "";
+      const samples: string[] = [];
+      for (const line of rawBlock.split("\n")) {
+        if (line.length === 0) continue;
+        if (line.startsWith("# HELP ")) {
+          help = line;
+          name = line.split(" ")[2] ?? "";
+        } else if (line.startsWith("# TYPE ")) {
+          type = line;
+        } else {
+          samples.push(injectWorkerLabel(line, label));
+        }
+      }
+      if (!name) continue;
+      const existing = blocks.get(name);
+      if (existing) {
+        existing.samples.push(...samples);
+      } else {
+        blocks.set(name, { help, type, samples });
+      }
+    }
+  }
+
+  const out: string[] = [];
+  for (const block of blocks.values()) {
+    out.push([block.help, block.type, ...block.samples].join("\n"));
+  }
+  return `${out.join("\n\n")}\n`;
+}
+
+// ---------------------------------------------------------------------------
 // Relay metrics
 // ---------------------------------------------------------------------------
 

@@ -150,6 +150,18 @@ export class Config {
    * Default: 1_000_000.
    */
   readonly negentropyMaxRecords: number;
+  /**
+   * Number of protocol worker threads that own connection state and message
+   * handling (parse, validate, verify, query, frame building). The main
+   * thread only routes raw strings between sockets and workers.
+   *
+   * - unset → auto: `max(1, min(16, floor(hardwareConcurrency / 4)))`,
+   *   resolved by the protocol pool.
+   * - `0`  → in-process fallback: the full relay runs on the main thread
+   *   with the analyze worker pool, as before protocol workers existed.
+   * - `N`  → exactly N workers.
+   */
+  readonly protocolWorkers: number | undefined;
   readonly nostrSigner: NostrSigner;
 
   constructor(env: { get(key: string): string | undefined }) {
@@ -445,6 +457,18 @@ export class Config {
         );
       }
       this.negentropyMaxRecords = n;
+    }
+
+    // protocolWorkers: unset = auto (resolved by the pool), 0 = in-process.
+    const protocolWorkersValue = env.get("PROTOCOL_WORKERS");
+    if (protocolWorkersValue === undefined || protocolWorkersValue === "") {
+      this.protocolWorkers = undefined;
+    } else {
+      const n = parseInt(protocolWorkersValue, 10);
+      if (Number.isNaN(n) || n < 0) {
+        throw new Error("PROTOCOL_WORKERS must be a non-negative integer.");
+      }
+      this.protocolWorkers = n;
     }
 
     // nostrSigner

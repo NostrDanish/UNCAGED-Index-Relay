@@ -254,6 +254,16 @@ export class Relay {
   private rejectedKinds: Set<number>;
   /** Structured logger, injected by the server entry point. */
   private log: Logger;
+  /**
+   * Called once for every locally-accepted EVENT (including ephemeral
+   * events), after it has been queued for local broadcast. When the Relay
+   * runs inside a protocol worker this is the fan-out hook: the worker
+   * forwards accepted events to its siblings (via the main thread) so their
+   * connections' subscriptions are matched too. Events arriving *from*
+   * siblings go through {@link broadcast} directly and do not re-trigger
+   * this hook, so fan-out cannot loop.
+   */
+  private onEventAccepted?: (event: NostrEvent) => void;
 
   /** All open WebSocket connections. */
   private connections = new Set<RelayConn>();
@@ -384,10 +394,17 @@ export class Relay {
        * server entry point injects one built from `Config.logLevel`.
        */
       logger?: Logger;
+      /**
+       * Hook invoked once per locally-accepted EVENT after it is queued for
+       * local broadcast. Used by protocol workers to fan accepted events out
+       * to sibling workers. See the field doc on {@link Relay.onEventAccepted}.
+       */
+      onEventAccepted?: (event: NostrEvent) => void;
     },
   ) {
     this.storage = storage;
     this.log = opts.logger ?? new Logger();
+    this.onEventAccepted = opts.onEventAccepted;
     this.analyze = opts.analyze ?? defaultAnalyze;
     this.relayUrl = opts.relayUrl;
     this.authKinds = opts.authKinds ?? new Set();
@@ -1281,9 +1298,11 @@ export class Relay {
         });
       }
 
-      // Broadcast to all matching subscriptions
+      // Broadcast to all matching subscriptions, and notify the fan-out
+      // hook so sibling protocol workers can broadcast to theirs.
       if (result.accepted) {
         this.broadcast(event);
+        this.onEventAccepted?.(event);
       }
     } catch (error) {
       this.log.error("event_error", {
