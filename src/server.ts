@@ -115,6 +115,16 @@ if (workerCount > 0) {
       sockets.get(connId)?.send(frame);
     },
     onDirty: (dirty) => forwardDirty?.(dirty),
+    onConnectionsLost: (connIds) => {
+      // A protocol worker died and took these connections' protocol state
+      // (subscriptions, auth, negentropy) with it. Close the sockets so
+      // clients reconnect cleanly onto the respawned worker.
+      for (const connId of connIds) {
+        const ws = sockets.get(connId);
+        sockets.delete(connId);
+        ws?.close(1011, "relay worker restarted, please reconnect");
+      }
+    },
   });
 
   const relayInfo = await pool.start();

@@ -99,6 +99,16 @@ export class IndexerClient {
    * flushed immediately on bind.
    */
   bind(port: MessagePort): void {
+    if (this.port) {
+      // Rebind after an indexer restart: outstanding writes died with the
+      // old indexer. Reject them (surfaces as OK false to those clients)
+      // rather than leaving handleEvent continuations hanging forever.
+      for (const pending of this.pending.values()) {
+        pending.reject(new Error("indexer restarted, write lost"));
+      }
+      this.pending.clear();
+      this.port.close();
+    }
     this.port = port;
     // Note: untyped param — Bun and undici both declare a global
     // MessageEvent and they disagree; let TS infer from the setter.

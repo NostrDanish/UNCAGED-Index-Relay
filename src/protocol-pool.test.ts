@@ -16,6 +16,8 @@ describe("ProtocolPool", () => {
   let mockOpenSearch: Server<unknown>;
   /** Frames delivered by the pool, per connection id. */
   const frames = new Map<number, unknown[][]>();
+  /** Connections reported lost by worker-death recovery. */
+  const lostConnIds: number[] = [];
   /** Reads the mock's _search request counter (assigned in before()). */
   let countSearchRequests: () => number = () => 0;
   /** Reads the mock's _bulk request counter (assigned in before()). */
@@ -87,6 +89,7 @@ describe("ProtocolPool", () => {
     // mutations would be invisible — pass an explicit environment instead.
     pool = new ProtocolPool(2, {
       sendFrame,
+      onConnectionsLost: (connIds) => lostConnIds.push(...connIds),
       workerEnv: {
         RELAY_URL: "wss://relay.test/",
         NOSTR_NSEC: nip19.nsecEncode(generateSecretKey()),
@@ -212,6 +215,29 @@ describe("ProtocolPool", () => {
     pool.message(301, JSON.stringify(["REQ", "x", {}]));
     await new Promise((resolve) => setTimeout(resolve, 100));
     assert.equal(frames.get(301), undefined);
+  });
+
+  it("recovers from a protocol worker dying", async () => {
+    // Note: runs last among the pool tests — it kills worker state
+    // (subscriptions from earlier tests die with the worker).
+    // biome-ignore lint/suspicious/noExplicitAny: test-only access to internals
+    const internals = pool as any;
+
+    pool.open(401); // lands on the least-loaded worker
+    const victimIndex = internals.connWorker.get(401) as number;
+    const victim = internals.workers[victimIndex] as Worker;
+
+    // Simulate an uncaught-exception death (Bun fires "close" on terminate).
+    victim.terminate();
+    await until(() => lostConnIds.includes(401));
+
+    // The slot respawned: a fresh connection routed to it still works.
+    await until(() => internals.workers[victimIndex] !== victim);
+    pool.open(402);
+    pool.message(402, "not json");
+    await until(() => (frames.get(402)?.length ?? 0) > 0, 15_000);
+    const frame = frames.get(402)?.[0] as unknown[];
+    assert.equal(frame[0], "NOTICE");
   });
 });
 

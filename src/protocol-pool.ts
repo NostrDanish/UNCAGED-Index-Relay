@@ -65,9 +65,11 @@ export class ProtocolPool {
   /** Resolves with the worker's relayInfo once it posts "ready". */
   private workerReady: Promise<NostrRelayInfo>[];
   /** The single indexer worker owning all OpenSearch writes. */
-  private indexer: Worker;
+  private indexer!: Worker;
   /** Resolves once the indexer posts "ready". */
-  private indexerReady: Promise<void>;
+  private indexerReady!: Promise<void>;
+  /** Set once dispose() runs, so "close" events stop triggering respawns. */
+  private disposed = false;
   /** connId → index of the owning worker. */
   private connWorker = new Map<number, number>();
   /** Open-connection count per worker, for least-loaded assignment. */
@@ -86,6 +88,8 @@ export class ProtocolPool {
   private readonly log: Logger;
   private readonly sendFrame: (connId: number, frame: string) => void;
   private readonly onDirty?: (dirty: DirtyBatch) => void;
+  private readonly onConnectionsLost?: (connIds: number[]) => void;
+  private readonly workerEnv?: Record<string, string>;
 
   constructor(
     size: number,
@@ -94,6 +98,12 @@ export class ProtocolPool {
       sendFrame: (connId: number, frame: string) => void;
       /** Receives dirty-reference batches for the background stats worker. */
       onDirty?: (dirty: DirtyBatch) => void;
+      /**
+       * Called when a protocol worker dies: these connections' protocol
+       * state is gone, so the server should close their sockets and let
+       * clients reconnect (onto the respawned worker).
+       */
+      onConnectionsLost?: (connIds: number[]) => void;
       logger?: Logger;
       /**
        * Environment for the worker threads (tests use this to point workers
@@ -108,94 +118,167 @@ export class ProtocolPool {
     this.log = opts.logger ?? new Logger();
     this.sendFrame = opts.sendFrame;
     this.onDirty = opts.onDirty;
-
-    const workerUrl = new URL("protocol-worker.ts", import.meta.url).href;
-
-    this.workerReady = [];
-    this.workers = Array.from({ length: size }, (_, workerIndex) => {
-      // No `smol: true` here — unlike analyze workers, protocol workers do
-      // the relay's real work and deserve a full-size heap.
-      const worker = new Worker(
-        workerUrl,
-        opts.workerEnv ? { env: opts.workerEnv } : undefined,
-      );
-      let markReady: (info: NostrRelayInfo) => void = () => {};
-      let markFailed: (err: Error) => void = () => {};
-      this.workerReady.push(
-        new Promise<NostrRelayInfo>((resolve, reject) => {
-          markReady = resolve;
-          markFailed = reject;
-        }),
-      );
-      worker.onmessage = (event: MessageEvent<FromProtocolWorker>) => {
-        const msg = event.data;
-        switch (msg.t) {
-          case "ready":
-            markReady(msg.relayInfo);
-            break;
-          case "frames":
-            for (const [connId, frame] of msg.frames) {
-              this.sendFrame(connId, frame);
-            }
-            break;
-          case "accepted":
-            // Fan accepted events out to every *other* worker for broadcast
-            // matching against their connections' subscriptions.
-            for (let i = 0; i < this.workers.length; i++) {
-              if (i === workerIndex) continue;
-              this.workers[i].postMessage({
-                t: "bcast",
-                events: msg.events,
-              } satisfies ToProtocolWorker);
-            }
-            break;
-          case "metrics": {
-            const pending = this.metricsPending.get(msg.reqId);
-            if (pending) {
-              this.metricsPending.delete(msg.reqId);
-              clearTimeout(pending.timer);
-              pending.resolve(msg.text);
-            }
-            break;
-          }
-        }
-      };
-      worker.onerror = (error) => {
-        this.log.error("protocol_worker_error", {
-          worker: workerIndex,
-          err_msg: error.message,
-        });
-        // If the worker dies during startup, fail start() instead of
-        // hanging it. No-op once the ready promise has settled.
-        markFailed(new Error(`protocol worker ${workerIndex} failed to start`));
-      };
-      return worker;
-    });
+    this.onConnectionsLost = opts.onConnectionsLost;
+    this.workerEnv = opts.workerEnv;
 
     this.connCounts = new Array(size).fill(0);
     this.queues = Array.from({ length: size }, () => []);
+    this.workers = new Array(size);
+    this.workerReady = new Array(size);
 
-    // -------------------------------------------------------------------
-    // Indexer worker: single owner of all OpenSearch writes. Each protocol
-    // worker gets a dedicated MessageChannel port to it, so indexing
-    // traffic bypasses the main thread entirely.
-    // -------------------------------------------------------------------
-    const indexerUrl = new URL("indexer-worker.ts", import.meta.url).href;
-    this.indexer = new Worker(
-      indexerUrl,
-      opts.workerEnv ? { env: opts.workerEnv } : undefined,
+    // The indexer must exist before protocol workers so each spawnWorker
+    // can wire its MessageChannel to it.
+    this.spawnIndexer();
+    for (let i = 0; i < size; i++) {
+      this.spawnWorker(i);
+    }
+  }
+
+  /**
+   * Wire one protocol worker to the indexer with a fresh MessageChannel.
+   * Both messages may be posted while the workers are still evaluating
+   * their modules; worker message queues hold them until the onmessage
+   * handlers install.
+   */
+  private connectIndexer(workerIndex: number): void {
+    const channel = new MessageChannel();
+    this.workers[workerIndex].postMessage(
+      { t: "indexer_port", port: channel.port1 } satisfies ToProtocolWorker,
+      [channel.port1],
     );
-    let markIndexerReady = () => {};
-    let markIndexerFailed: (err: Error) => void = () => {};
-    this.indexerReady = new Promise<void>((resolve, reject) => {
-      markIndexerReady = resolve;
-      markIndexerFailed = reject;
+    this.indexer.postMessage(
+      { t: "port", port: channel.port2 } satisfies ToIndexerWorker,
+      [channel.port2],
+    );
+  }
+
+  /** Spawn (or respawn, after a crash) the protocol worker for one slot. */
+  private spawnWorker(workerIndex: number): void {
+    const workerUrl = new URL("protocol-worker.ts", import.meta.url).href;
+    // No `smol: true` here — unlike analyze workers, protocol workers do
+    // the relay's real work and deserve a full-size heap.
+    const worker = new Worker(
+      workerUrl,
+      this.workerEnv ? { env: this.workerEnv } : undefined,
+    );
+    this.workers[workerIndex] = worker;
+
+    let markReady: (info: NostrRelayInfo) => void = () => {};
+    let markFailed: (err: Error) => void = () => {};
+    const ready = new Promise<NostrRelayInfo>((resolve, reject) => {
+      markReady = resolve;
+      markFailed = reject;
     });
-    this.indexer.onmessage = (event: MessageEvent<FromIndexerWorker>) => {
+    // Mark handled so a startup failure after a respawn (when nothing is
+    // awaiting this promise anymore) doesn't surface as an unhandled
+    // rejection; start() and dispose() still observe the original.
+    ready.catch(() => {});
+    this.workerReady[workerIndex] = ready;
+
+    worker.onmessage = (event: MessageEvent<FromProtocolWorker>) => {
       const msg = event.data;
       switch (msg.t) {
         case "ready":
-          markIndexerReady();
+          markReady(msg.relayInfo);
+          break;
+        case "frames":
+          for (const [connId, frame] of msg.frames) {
+            this.sendFrame(connId, frame);
+          }
+          break;
+        case "accepted":
+          // Fan accepted events out to every *other* worker for broadcast
+          // matching against their connections' subscriptions.
+          for (let i = 0; i < this.workers.length; i++) {
+            if (i === workerIndex) continue;
+            this.workers[i].postMessage({
+              t: "bcast",
+              events: msg.events,
+            } satisfies ToProtocolWorker);
+          }
+          break;
+        case "metrics": {
+          const pending = this.metricsPending.get(msg.reqId);
+          if (pending) {
+            this.metricsPending.delete(msg.reqId);
+            clearTimeout(pending.timer);
+            pending.resolve(msg.text);
+          }
+          break;
+        }
+      }
+    };
+    worker.onerror = (error) => {
+      this.log.error("protocol_worker_error", {
+        worker: workerIndex,
+        err_msg: error.message,
+      });
+      // If the worker dies during startup, fail start() instead of
+      // hanging it. No-op once the ready promise has settled.
+      markFailed(new Error(`protocol worker ${workerIndex} failed to start`));
+    };
+    // In Bun, an uncaught exception terminates the worker thread and fires
+    // "close". Treat unexpected death as fatal for the worker's connections:
+    // their protocol state (subscriptions, auth, negentropy) died with it,
+    // so close the sockets and let clients reconnect onto the fresh worker.
+    worker.addEventListener("close", () => {
+      if (this.disposed || this.workers[workerIndex] !== worker) return;
+      this.handleWorkerDeath(workerIndex);
+    });
+
+    this.connectIndexer(workerIndex);
+  }
+
+  /** Recover from a protocol worker dying: drop its connections, respawn. */
+  private handleWorkerDeath(workerIndex: number): void {
+    const lost: number[] = [];
+    for (const [connId, owner] of this.connWorker) {
+      if (owner === workerIndex) lost.push(connId);
+    }
+    for (const connId of lost) {
+      this.connWorker.delete(connId);
+    }
+    this.connCounts[workerIndex] = 0;
+    this.queues[workerIndex] = [];
+
+    this.log.error("protocol_worker_died", {
+      worker: workerIndex,
+      connections_lost: lost.length,
+    });
+
+    // Respawn immediately: worker startup cost (~module eval + wasm init)
+    // is a natural backoff against tight crash loops, and new opens routed
+    // to this slot queue in the worker's message queue until it's ready.
+    this.spawnWorker(workerIndex);
+
+    if (lost.length > 0) {
+      this.onConnectionsLost?.(lost);
+    }
+  }
+
+  /** Spawn (or respawn, after a crash) the indexer worker. */
+  private spawnIndexer(): void {
+    const indexerUrl = new URL("indexer-worker.ts", import.meta.url).href;
+    const indexer = new Worker(
+      indexerUrl,
+      this.workerEnv ? { env: this.workerEnv } : undefined,
+    );
+    this.indexer = indexer;
+
+    let markReady = () => {};
+    let markFailed: (err: Error) => void = () => {};
+    const ready = new Promise<void>((resolve, reject) => {
+      markReady = resolve;
+      markFailed = reject;
+    });
+    ready.catch(() => {});
+    this.indexerReady = ready;
+
+    indexer.onmessage = (event: MessageEvent<FromIndexerWorker>) => {
+      const msg = event.data;
+      switch (msg.t) {
+        case "ready":
+          markReady();
           break;
         case "dirty":
           this.onDirty?.(msg);
@@ -211,26 +294,21 @@ export class ProtocolPool {
         }
       }
     };
-    this.indexer.onerror = (error) => {
+    indexer.onerror = (error) => {
       this.log.error("indexer_worker_error", { err_msg: error.message });
-      markIndexerFailed(new Error("indexer worker failed to start"));
+      markFailed(new Error("indexer worker failed to start"));
     };
-
-    // Wire each protocol worker to the indexer. Both messages are posted
-    // while the workers may still be evaluating their modules; the ports
-    // are delivered once their onmessage handlers install (worker message
-    // queues hold them until then).
-    for (const worker of this.workers) {
-      const channel = new MessageChannel();
-      worker.postMessage(
-        { t: "indexer_port", port: channel.port1 } satisfies ToProtocolWorker,
-        [channel.port1],
-      );
-      this.indexer.postMessage(
-        { t: "port", port: channel.port2 } satisfies ToIndexerWorker,
-        [channel.port2],
-      );
-    }
+    indexer.addEventListener("close", () => {
+      if (this.disposed || this.indexer !== indexer) return;
+      this.log.error("indexer_worker_died", {});
+      // Respawn and re-wire every protocol worker with a fresh port. Each
+      // IndexerClient rejects its outstanding writes on rebind (they were
+      // lost with the old indexer), which surfaces as OK false to clients.
+      this.spawnIndexer();
+      for (let i = 0; i < this.workers.length; i++) {
+        this.connectIndexer(i);
+      }
+    });
   }
 
   /** Number of workers in the pool. */
@@ -356,6 +434,7 @@ export class ProtocolPool {
    * terminating a worker mid-module-evaluation can segfault Bun.
    */
   async dispose(): Promise<void> {
+    this.disposed = true;
     const workers = this.workers;
     const ready = this.workerReady;
     const indexer = this.indexer;
