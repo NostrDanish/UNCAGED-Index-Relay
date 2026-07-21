@@ -27,7 +27,6 @@
 import process from "node:process";
 
 import type { NostrRelayInfo } from "@nostrify/nostrify";
-import type { NostrEvent } from "nostr-tools";
 
 import type { FromIndexerWorker, ToIndexerWorker } from "./indexer-client.ts";
 import { errFields, Logger } from "./log.ts";
@@ -424,18 +423,13 @@ export class ProtocolPool {
   }
 
   /**
-   * Inject events from outside the pool (bg stats worker) into every worker.
-   * The stringify here is main-thread work, but this path is rare (trend
-   * events every few minutes) — the per-EVENT fan-out arrives from workers
-   * already serialized.
+   * Inject events from outside the pool (bg stats worker) into every worker,
+   * as serialized NostrEvent JSON. The bg worker pre-stringifies, so this is
+   * a verbatim forward — no serialization on the main thread.
    */
-  broadcastExternal(events: NostrEvent[]): void {
-    const serialized = events.map((event) => JSON.stringify(event));
+  broadcastExternal(events: string[]): void {
     for (const worker of this.workers) {
-      worker.postMessage({
-        t: "bcast",
-        events: serialized,
-      } satisfies ToProtocolWorker);
+      worker.postMessage({ t: "bcast", events } satisfies ToProtocolWorker);
     }
   }
 

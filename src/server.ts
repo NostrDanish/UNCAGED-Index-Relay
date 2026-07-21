@@ -59,8 +59,12 @@ interface Frontend {
   close(ws: ServerWebSocket<WebSocketData>): void;
   /** Prometheus exposition text for /metrics (all threads). */
   metrics(): Promise<string>;
-  /** Inject an event (from the background stats worker) for broadcast. */
-  broadcastExternal(event: NostrEvent): void;
+  /**
+   * Inject events (from the background stats worker) for broadcast, as
+   * serialized NostrEvent JSON — pre-stringified by the bg worker so the
+   * main thread forwards them without touching the payload.
+   */
+  broadcastExternal(events: string[]): void;
   dispose(): Promise<void>;
 }
 
@@ -162,8 +166,8 @@ if (workerCount > 0) {
       ]);
       return mergeExposition([{ label: "main", text: main }, ...workers]);
     },
-    broadcastExternal(event) {
-      pool.broadcastExternal([event]);
+    broadcastExternal(events) {
+      pool.broadcastExternal(events);
     },
     dispose: () => pool.dispose(),
   };
@@ -291,7 +295,18 @@ if (workerCount > 0) {
       if (conn) relay.handleCloseConnection(conn);
     },
     metrics: () => register.metrics(),
-    broadcastExternal: (event) => relay.broadcast(event),
+    broadcastExternal(events) {
+      // In-process mode runs the whole relay on this thread anyway, so
+      // parsing here is fine (and replaces the structured-clone deserialize
+      // this path used to pay).
+      for (const serialized of events) {
+        try {
+          relay.broadcast(JSON.parse(serialized) as NostrEvent);
+        } catch (err) {
+          log.error("bcast_parse_failed", errFields(err));
+        }
+      }
+    },
     dispose: () => analyzePool.dispose(),
   };
 }
@@ -313,7 +328,7 @@ if (config.statsEnabled) {
   worker.onmessage = (event: MessageEvent) => {
     const msg = event.data;
     if (msg.type === "broadcast") {
-      frontend.broadcastExternal(msg.event);
+      frontend.broadcastExternal(msg.events);
     }
   };
 
