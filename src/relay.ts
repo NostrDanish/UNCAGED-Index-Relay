@@ -263,10 +263,7 @@ export class Relay {
   /** Filters with no `kinds` constraint (must be checked against every event). */
   private catchAll = new Set<IndexedFilter>();
   /** Reverse map: ws → all IndexedFilter entries for that connection (for fast cleanup). */
-  private connectionFilters = new Map<
-    RelayConn,
-    Set<IndexedFilter>
-  >();
+  private connectionFilters = new Map<RelayConn, Set<IndexedFilter>>();
 
   /** Queue of events pending broadcast, drained asynchronously with yields. */
   private broadcastQueue: NostrEvent[] = [];
@@ -284,10 +281,7 @@ export class Relay {
    * that unbounded fan-out into a bounded one without dropping events.
    */
   private maxInflightPerConn: number;
-  private connectionInflight = new WeakMap<
-    RelayConn,
-    Semaphore
-  >();
+  private connectionInflight = new WeakMap<RelayConn, Semaphore>();
 
   /**
    * NIP-77 Negentropy sync sessions, keyed by connection then subscription
@@ -296,10 +290,7 @@ export class Relay {
    * capped by {@link negentropyMaxRecords} and stale sessions are evicted
    * by an idle sweep.
    */
-  private negSessions = new Map<
-    RelayConn,
-    Map<string, NegentropySession>
-  >();
+  private negSessions = new Map<RelayConn, Map<string, NegentropySession>>();
   /** Total active Negentropy sessions across all connections. */
   private negSessionCount = 0;
   /** Idle-sweep timer, running only while sessions exist. */
@@ -501,10 +492,7 @@ export class Relay {
   /**
    * Remove indexed filters for a connection, optionally scoped to a single subscription.
    */
-  private removeFromIndex(
-    ws: RelayConn,
-    subscriptionId?: string,
-  ): void {
+  private removeFromIndex(ws: RelayConn, subscriptionId?: string): void {
     const connFilters = this.connectionFilters.get(ws);
     if (!connFilters) return;
 
@@ -1103,10 +1091,7 @@ export class Relay {
    * Returns true if the connection has an authenticated pubkey that is either
    * the event's author or listed in a `p` tag.
    */
-  private isAuthorizedForEvent(
-    ws: RelayConn,
-    event: NostrEvent,
-  ): boolean {
+  private isAuthorizedForEvent(ws: RelayConn, event: NostrEvent): boolean {
     const authed = ws.data.authedPubkeys;
     if (authed.has(event.pubkey)) return true;
     for (const tag of event.tags) {
@@ -1313,11 +1298,7 @@ export class Relay {
   }
 
   // Handle REQ message
-  async handleReq(
-    ws: RelayConn,
-    subscriptionId: string,
-    filters: Filter[],
-  ) {
+  async handleReq(ws: RelayConn, subscriptionId: string, filters: Filter[]) {
     const endReqTimer = relayReqDurationHistogram.startTimer();
     const startMs = performance.now();
     try {
@@ -1432,11 +1413,7 @@ export class Relay {
   }
 
   // Handle COUNT message
-  async handleCount(
-    ws: RelayConn,
-    subscriptionId: string,
-    filters: Filter[],
-  ) {
+  async handleCount(ws: RelayConn, subscriptionId: string, filters: Filter[]) {
     try {
       // Guard auth-protected kinds
       const authCheck = this.checkAuthKinds(ws, subscriptionId, filters);
@@ -1540,10 +1517,7 @@ export class Relay {
   }
 
   /** Delete a single Negentropy session. Returns whether it existed. */
-  private deleteNegSession(
-    ws: RelayConn,
-    subscriptionId: string,
-  ): boolean {
+  private deleteNegSession(ws: RelayConn, subscriptionId: string): boolean {
     const sessions = this.negSessions.get(ws);
     if (!sessions?.delete(subscriptionId)) return false;
     this.negSessionCount--;
@@ -1820,10 +1794,7 @@ export class Relay {
   }
 
   /** Handle NEG-CLOSE: release the session's resources. */
-  handleNegClose(
-    ws: RelayConn,
-    subscriptionId: string,
-  ): void {
+  handleNegClose(ws: RelayConn, subscriptionId: string): void {
     if (typeof subscriptionId !== "string") return;
     this.deleteNegSession(ws, subscriptionId);
   }
@@ -1870,10 +1841,7 @@ export class Relay {
    * Handle an AUTH message from a client (NIP-42).
    * Validates the kind 22242 event and marks the pubkey as authenticated.
    */
-  async handleAuth(
-    ws: RelayConn,
-    event: NostrEvent,
-  ): Promise<void> {
+  async handleAuth(ws: RelayConn, event: NostrEvent): Promise<void> {
     // Verify signature (AUTH events don't need language/sentiment analysis).
     // If the pool is overloaded, surface that as an explicit OK/false so the
     // client retries instead of treating it as a signature failure.
@@ -1968,10 +1936,7 @@ export class Relay {
   }
 
   // Handle incoming WebSocket message
-  async handleMessage(
-    ws: RelayConn,
-    message: string | Buffer,
-  ) {
+  async handleMessage(ws: RelayConn, message: string | Buffer) {
     try {
       const msg = JSON.parse(message.toString());
 
