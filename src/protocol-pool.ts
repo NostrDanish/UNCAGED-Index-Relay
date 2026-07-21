@@ -17,10 +17,11 @@
  * per worker instead of one per message.
  *
  * Broadcast fan-out: when a worker accepts an EVENT it posts the event to
- * main, and main forwards it to every *other* worker so their connections'
- * subscriptions get matched too. Events injected from outside the pool
- * (e.g. the background stats worker's trend events) go to *all* workers via
- * {@link broadcastExternal}.
+ * main *as a serialized JSON string* (stringified once, off-main), and main
+ * forwards it verbatim to every *other* worker so their connections'
+ * subscriptions get matched too — the receiving worker parses. Events
+ * injected from outside the pool (e.g. the background stats worker's trend
+ * events) go to *all* workers via {@link broadcastExternal}.
  */
 
 import process from "node:process";
@@ -50,14 +51,16 @@ export type ToProtocolWorker =
   | { t: "open"; id: number; ip?: string; ua?: string }
   | { t: "msgs"; msgs: Array<[id: number, data: string]> }
   | { t: "close"; id: number }
-  | { t: "bcast"; events: NostrEvent[] }
+  /** Serialized NostrEvent JSON strings, parsed by the receiving worker. */
+  | { t: "bcast"; events: string[] }
   | { t: "metrics"; reqId: number };
 
 /** Messages sent from a protocol worker to the main thread. */
 export type FromProtocolWorker =
   | { t: "ready"; relayInfo: NostrRelayInfo }
   | { t: "frames"; frames: Array<[id: number, frame: string]> }
-  | { t: "accepted"; events: NostrEvent[] }
+  /** Serialized NostrEvent JSON strings (stringified by the origin worker). */
+  | { t: "accepted"; events: string[] }
   | { t: "metrics"; reqId: number; text: string };
 
 /** Dirty-reference batch drained from a worker's storage layer. */
@@ -420,10 +423,19 @@ export class ProtocolPool {
     } satisfies ToProtocolWorker);
   }
 
-  /** Inject events from outside the pool (bg stats worker) into every worker. */
+  /**
+   * Inject events from outside the pool (bg stats worker) into every worker.
+   * The stringify here is main-thread work, but this path is rare (trend
+   * events every few minutes) — the per-EVENT fan-out arrives from workers
+   * already serialized.
+   */
   broadcastExternal(events: NostrEvent[]): void {
+    const serialized = events.map((event) => JSON.stringify(event));
     for (const worker of this.workers) {
-      worker.postMessage({ t: "bcast", events } satisfies ToProtocolWorker);
+      worker.postMessage({
+        t: "bcast",
+        events: serialized,
+      } satisfies ToProtocolWorker);
     }
   }
 

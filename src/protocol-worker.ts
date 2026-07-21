@@ -110,7 +110,8 @@ const analyze = await createAnalyzer();
 // ---------------------------------------------------------------------------
 
 let pendingFrames: Array<[id: number, frame: string]> = [];
-let pendingAccepted: NostrEvent[] = [];
+/** Accepted events awaiting fan-out, pre-serialized so main only moves strings. */
+let pendingAccepted: string[] = [];
 let outFlushScheduled = false;
 
 function scheduleOutFlush(): void {
@@ -155,7 +156,10 @@ const relay = new Relay(storage, {
   rejectedKinds: config.rejectedKinds,
   negentropyMaxRecords: config.negentropyMaxRecords,
   onEventAccepted: (event) => {
-    pendingAccepted.push(event);
+    // Serialize here (off-main): main forwards the string verbatim to
+    // sibling workers, which parse it. Structured-cloning the event object
+    // would make main re-serialize it once per sibling.
+    pendingAccepted.push(JSON.stringify(event));
     scheduleOutFlush();
   },
   relayInfo: {
@@ -221,9 +225,16 @@ self.onmessage = (event: MessageEvent<ToProtocolWorker>) => {
 
     case "bcast":
       // Events accepted by sibling workers (or injected by the background
-      // stats worker): match against local subscriptions only.
-      for (const nostrEvent of msg.events) {
-        relay.broadcast(nostrEvent);
+      // stats worker), as serialized JSON: parse here, match against local
+      // subscriptions only. A parse failure must not kill the worker (an
+      // exception escaping onmessage terminates the thread), so guard it —
+      // the strings come from trusted siblings, but cheap insurance.
+      for (const serialized of msg.events) {
+        try {
+          relay.broadcast(JSON.parse(serialized) as NostrEvent);
+        } catch (err) {
+          log.error("bcast_parse_failed", errFields(err));
+        }
       }
       break;
 
