@@ -1,19 +1,12 @@
 import type { NostrEvent } from "nostr-tools";
 
+import type { AnalyzeResult } from "./analyze.ts";
 import { AnalyzePoolOverloaded } from "./errors.ts";
 import { errFields, Logger } from "./log.ts";
 import { analyzePendingGauge, analyzeWorkerInflightGauge } from "./metrics.ts";
 
-/** Result of analyzing a Nostr event off the main thread. */
-export interface AnalyzeResult {
-  verified: boolean;
-  search_text?: string;
-  autocomplete_text?: string;
-  language?: string;
-  sentiment?: string;
-  media?: boolean;
-  video?: boolean;
-}
+// Re-exported so existing importers (relay.ts, tests) keep a single source.
+export type { AnalyzeResult } from "./analyze.ts";
 
 interface PendingRequest {
   resolve: (result: AnalyzeResult) => void;
