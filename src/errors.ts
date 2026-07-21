@@ -7,14 +7,6 @@
  * the connection while we OOM.
  */
 
-/** The analyze worker pool's pending queue exceeded its configured cap. */
-export class AnalyzePoolOverloaded extends Error {
-  constructor(pending: number, max: number) {
-    super(`analyze pool overloaded (${pending}/${max} pending)`);
-    this.name = "AnalyzePoolOverloaded";
-  }
-}
-
 /** The OpenSearch bulk indexing queue exceeded its configured cap. */
 export class StorageOverloaded extends Error {
   constructor(queued: number, max: number) {

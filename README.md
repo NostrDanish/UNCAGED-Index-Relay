@@ -39,6 +39,22 @@ scalability and full-text search capabilities.
 
 ## Architecture
 
+### Threading Model
+
+The relay is multi-threaded around one rule: the main thread only moves
+strings. Connections are assigned (sticky, least-loaded) to one of N
+**protocol workers**, each running a full relay instance that owns its
+connections' complete protocol state and does all per-message work: JSON
+parsing, validation, inline signature verification and content analysis,
+OpenSearch queries, broadcast matching, and NIP-01 frame building. The main
+thread routes raw inbound message strings to the owning worker and sends
+finished frame strings back over the sockets — nothing else.
+
+All OpenSearch writes are owned by a single **indexer worker**, reached from
+protocol workers over dedicated MessageChannel ports, so bulk batches stay
+coalesced and replaceable-slot resolution has one writer. A **background
+stats worker** handles engagement scores, NIP-85 assertions, and trends.
+
 ### Event Storage
 
 Events are stored in OpenSearch with the following enhancements:
@@ -223,8 +239,7 @@ All options:
 | `RELAY_TAG_VALUE_MAX_COUNT_PER_NAME` | Max indexed values per tag name | `5000` |
 | `RELAY_MAX_INFLIGHT_PER_CONN` | Max concurrent EVENTs per connection | `32` |
 | `RELAY_NEGENTROPY_MAX_RECORDS` | Max records per NIP-77 sync session | `1000000` |
-| `ANALYZE_POOL_SIZE` | Analysis worker threads (`0` = auto) | `0` |
-| `ANALYZE_MAX_PENDING` | Max pending analysis requests | `20000` |
+| `PROTOCOL_WORKERS` | Protocol worker threads (unset = auto, must be >= 1) | auto |
 | `BULK_MAX_QUEUE` | Max OpenSearch bulk queue size | `5000` |
 
 ## Running

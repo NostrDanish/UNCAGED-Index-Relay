@@ -4,28 +4,81 @@
 
 - **NIP-01 Relay**: True WebSocket-based Nostr relay implementation
 - **Bun Runtime**: Uses Bun's native WebSocket server for high performance
+- **Multi-threaded**: Protocol workers own connections and per-message work;
+  the main thread only routes strings between sockets and workers
 - **OpenSearch Backend**: Scalable event storage and querying
 - **Validation**: Zod and Nostrify for event validation
 - **Environment Config**: Type-safe configuration management
 - **Portable Code**: Uses Node.js builtins for maximum compatibility (except WebSocket server)
+
+## Architecture
+
+The relay is multi-threaded around one rule: **the main thread only moves
+strings**. It never parses, validates, serializes, or queries.
+
+```
+                     ┌─ protocol worker 0..N-1 (protocol-worker.ts)
+ Bun.serve (main)    │    per-conn state: subs, auth, negentropy
+  upgrade/close ─────┤    parse + zod + verify/analyze (inline)
+  raw msg strings ──►│    OpenSearch reads (own read client)
+  frame strings ◄────┤    broadcast matching + frame building
+  ws.send only       │         │ MessageChannel (writes)
+                     └─────────▼
+                      indexer worker (indexer-worker.ts)
+                        bulk queue/flush, phase-2 slot resolution,
+                        dirty tracking → background stats worker
+```
+
+- **Main thread** (`server.ts` + `protocol-pool.ts`): HTTP endpoints
+  (NIP-11 cached as a string, /metrics aggregation), WebSocket upgrade,
+  sticky least-connections assignment of connections to protocol workers,
+  batched string forwarding in both directions, accepted-event fan-out to
+  sibling workers, worker supervision (a dead worker's connections are
+  closed with 1011 and the slot respawns; clients reconnect; repeated
+  deaths within 30s trip a crash-loop guard that exits the process so
+  systemd restarts it with real backoff).
+- **Protocol workers** (`protocol-worker.ts`): a full `Relay` instance each.
+  All per-message CPU lives here, including inline signature verification
+  and language/sentiment/media analysis (`analyze.ts`) — no extra thread
+  hop per EVENT.
+- **Indexer worker** (`indexer-worker.ts`): the single owner of OpenSearch
+  writes. Protocol workers RPC to it over dedicated MessageChannel ports
+  (`indexer-client.ts`), bypassing the main thread; bulk batches stay
+  coalesced and replaceable-slot resolution has one writer. `event()`
+  resolves on bulk-flush confirmation, so OK responses reflect durability.
+- **Background stats worker** (`background-worker.ts`): score
+  recomputation, NIP-85, trends. Fed dirty references by the indexer via
+  main; its published events are injected into all protocol workers for
+  broadcast.
+
+The seam that makes this work is `RelayConn` (relay.ts): the Relay only
+sees `{id, data, send(frame)}` and emits finished NIP-01 frames as strings.
+Strings cross thread boundaries as flat copies — no object-graph clones on
+the hot path.
 
 ## Project Structure
 
 ```
 .
 ├── src/
-│   ├── server.ts           # WebSocket relay server (Bun-specific)
+│   ├── server.ts           # Entry point: Bun.serve, HTTP, mode wiring (Bun-specific)
+│   ├── protocol-pool.ts    # Main-thread bridge: worker spawn/routing/fan-out/supervision
+│   ├── protocol-pool.test.ts # Pool integration tests (real workers, mock OpenSearch)
+│   ├── protocol-worker.ts  # Protocol worker: connections + all per-message work
+│   ├── indexer-worker.ts   # Indexer worker: single owner of OpenSearch writes
+│   ├── indexer-client.ts   # Write-RPC client + port protocol (used in protocol workers)
 │   ├── relay.ts            # Relay implementation (event handling, subscriptions)
 │   ├── relay.test.ts       # Relay tests
 │   ├── opensearch.ts       # OpenSearch backend (storage, querying, NIP-50)
 │   ├── opensearch.test.ts  # OpenSearch tests
 │   ├── config.ts           # Configuration management
 │   ├── config.test.ts      # Configuration tests
-│   ├── analyze-pool.ts     # Worker pool for event analysis (verify, language, sentiment, media)
-│   ├── analyze-pool.test.ts # Analysis pool tests
-│   ├── analyze-worker.ts   # Worker thread for event analysis
+│   ├── analyze.ts          # Shared analyzer: verify, language, sentiment, media
+│   ├── background-worker.ts # Stats/NIP-85/trends worker
 │   ├── log.ts              # Structured JSON logging (one-line entries, Loki-queryable)
 │   ├── log.test.ts         # Logging tests
+│   ├── metrics.ts          # Prometheus metrics + multi-thread exposition merging
+│   ├── metrics.test.ts     # Metrics merging tests
 │   ├── media.ts            # Media/video detection from imeta tags and URLs
 │   ├── negentropy.ts       # NIP-77 Negentropy protocol codec (set reconciliation)
 │   ├── negentropy.test.ts  # Negentropy tests
@@ -90,6 +143,8 @@ Edit `.env` to configure the application:
   storage clamp and advertised as NIP-11 `max_limit` (default: 1000).
 - `RELAY_DEFAULT_LIMIT` - Events returned per REQ filter when `limit` is
   omitted; must not exceed `RELAY_MAX_LIMIT` (default: 100).
+- `PROTOCOL_WORKERS` - Number of protocol worker threads. Unset = auto
+  (`max(1, min(16, floor(cores / 4)))`); must be `>= 1` when set.
 
 ## Adding Features
 

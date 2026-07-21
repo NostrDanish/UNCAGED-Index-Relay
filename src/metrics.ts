@@ -270,6 +270,79 @@ class Registry {
 export const register = new Registry();
 
 // ---------------------------------------------------------------------------
+// Multi-thread exposition merging
+// ---------------------------------------------------------------------------
+
+/**
+ * Inject a `worker="<label>"` label into one exposition sample line.
+ * Handles both `name value` and `name{labels} value` forms; our Registry
+ * never emits empty `{}` label sets.
+ */
+function injectWorkerLabel(sample: string, label: string): string {
+  const brace = sample.indexOf("{");
+  const space = sample.indexOf(" ");
+  if (brace !== -1 && brace < space) {
+    return `${sample.slice(0, brace + 1)}worker="${label}",${sample.slice(brace + 1)}`;
+  }
+  return `${sample.slice(0, space)}{worker="${label}"}${sample.slice(space)}`;
+}
+
+/**
+ * Merge Prometheus exposition texts from multiple threads into one valid
+ * document. Each thread has its own metric registry, so the same metric
+ * name appears in several sources; Prometheus requires all samples of a
+ * metric to be grouped under a single HELP/TYPE header. Samples get a
+ * `worker="<label>"` label identifying the originating thread, so totals
+ * are a `sum without (worker) (...)` away.
+ *
+ * Only supports the block format produced by this module's Registry
+ * (blank-line-separated blocks of `# HELP` / `# TYPE` / samples).
+ */
+export function mergeExposition(
+  sources: Array<{ label: string; text: string }>,
+): string {
+  interface Block {
+    help: string;
+    type: string;
+    samples: string[];
+  }
+  const blocks = new Map<string, Block>();
+
+  for (const { label, text } of sources) {
+    for (const rawBlock of text.split("\n\n")) {
+      let help = "";
+      let type = "";
+      let name = "";
+      const samples: string[] = [];
+      for (const line of rawBlock.split("\n")) {
+        if (line.length === 0) continue;
+        if (line.startsWith("# HELP ")) {
+          help = line;
+          name = line.split(" ")[2] ?? "";
+        } else if (line.startsWith("# TYPE ")) {
+          type = line;
+        } else {
+          samples.push(injectWorkerLabel(line, label));
+        }
+      }
+      if (!name) continue;
+      const existing = blocks.get(name);
+      if (existing) {
+        existing.samples.push(...samples);
+      } else {
+        blocks.set(name, { help, type, samples });
+      }
+    }
+  }
+
+  const out: string[] = [];
+  for (const block of blocks.values()) {
+    out.push([block.help, block.type, ...block.samples].join("\n"));
+  }
+  return `${out.join("\n\n")}\n`;
+}
+
+// ---------------------------------------------------------------------------
 // Relay metrics
 // ---------------------------------------------------------------------------
 
@@ -397,38 +470,17 @@ export const relayBroadcastQueueGauge = new Gauge({
 });
 
 // ---------------------------------------------------------------------------
-// Analyze pool metrics
-// ---------------------------------------------------------------------------
-
-/** Pending analysis requests in the worker pool. */
-export const analyzePendingGauge = new Gauge({
-  name: "ditto_analyze_pending",
-  help: "Pending analysis requests in the worker pool",
-});
-
-/**
- * Per-worker inflight analyze requests (posted to the worker but not yet
- * returned). Useful for diagnosing skewed dispatch and head-of-line
- * blocking when one worker stalls on a slow batch.
- */
-export const analyzeWorkerInflightGauge = new Gauge({
-  name: "ditto_analyze_worker_inflight",
-  help: "Inflight analyze requests per worker",
-  labelNames: ["worker"] as const,
-});
-
-// ---------------------------------------------------------------------------
 // Overload / backpressure
 // ---------------------------------------------------------------------------
 
 /**
  * Count of EVENT messages rejected because the relay was overloaded
- * (analyze pool pending cap or OpenSearch bulk queue cap exceeded).
+ * (OpenSearch bulk queue cap exceeded).
  */
 export const relayOverloadCounter = new Counter({
   name: "ditto_relay_overload_total",
   help: "EVENT messages rejected due to backpressure",
-  labelNames: ["source"] as const, // "analyze" | "storage"
+  labelNames: ["source"] as const, // "storage"
 });
 
 // ---------------------------------------------------------------------------
@@ -459,19 +511,30 @@ export const jsHeapUsedGauge = new Gauge({
 
 /**
  * Start sampling runtime health metrics. The lag gauge measures how much
- * later than scheduled each tick fires — a direct signal of main-thread
- * event-loop saturation. Returns a function that stops sampling.
+ * later than scheduled each tick fires — a direct signal of event-loop
+ * saturation on whatever thread this runs on. Returns a function that
+ * stops sampling.
+ *
+ * @param opts.memory Sample RSS/heap too. Only the main thread should do
+ *   this: `process.memoryUsage()` is process-wide, so per-worker samples
+ *   would just duplicate the same number under every worker label.
  */
-export function startRuntimeMetrics(intervalMs = 5_000): () => void {
+export function startRuntimeMetrics(
+  intervalMs = 5_000,
+  opts?: { memory?: boolean },
+): () => void {
+  const memory = opts?.memory ?? true;
   let expected = performance.now() + intervalMs;
   const timer = setInterval(() => {
     const now = performance.now();
     eventLoopLagGauge.set(Math.max(0, (now - expected) / 1000));
     expected = now + intervalMs;
 
-    const mem = process.memoryUsage();
-    processRssGauge.set(mem.rss);
-    jsHeapUsedGauge.set(mem.heapUsed);
+    if (memory) {
+      const mem = process.memoryUsage();
+      processRssGauge.set(mem.rss);
+      jsHeapUsedGauge.set(mem.heapUsed);
+    }
   }, intervalMs);
   timer.unref?.();
   return () => clearInterval(timer);

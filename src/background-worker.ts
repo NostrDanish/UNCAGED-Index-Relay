@@ -7,7 +7,9 @@
  * Communication protocol:
  * - Main → Worker:  { type: "dirty", ids: string[], pubkeys: string[], addrs: string[], identifiers: string[] }
  * - Main → Worker:  { type: "config", opensearchNode: string, opensearchIndex: string, ... }
- * - Worker → Main:  { type: "broadcast", event: NostrEvent }
+ * - Worker → Main:  { type: "broadcast", events: string[] } — serialized
+ *   NostrEvent JSON, stringified here so the main thread only moves strings
+ *   (a recompute tick can emit hundreds of NIP-85 stat events).
  */
 
 import process from "node:process";
@@ -62,9 +64,29 @@ const relay = new OpenSearchRelay(readClient, {
 
 const signer = config.nostrSigner;
 
-/** Post a NostrEvent back to the main thread for WebSocket broadcast. */
+/**
+ * Post a NostrEvent back to the main thread for WebSocket broadcast.
+ *
+ * Serialized here (off-main) and batched per event-loop tick: a recompute
+ * tick publishes one kind 30382/30383 per dirty pubkey/event — hundreds on
+ * a busy relay — so one postMessage per event would clone-storm the main
+ * thread. Same setImmediate coalescing pattern as the protocol workers.
+ */
+let pendingBroadcasts: string[] = [];
+let broadcastFlushScheduled = false;
+
 function broadcastToMain(event: NostrEvent): void {
-  self.postMessage({ type: "broadcast", event });
+  pendingBroadcasts.push(JSON.stringify(event));
+  if (!broadcastFlushScheduled) {
+    broadcastFlushScheduled = true;
+    setImmediate(() => {
+      broadcastFlushScheduled = false;
+      if (pendingBroadcasts.length > 0) {
+        self.postMessage({ type: "broadcast", events: pendingBroadcasts });
+        pendingBroadcasts = [];
+      }
+    });
+  }
 }
 
 const nip85 = new Nip85({

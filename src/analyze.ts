@@ -1,38 +1,38 @@
-/// Worker thread that performs Nostr event analysis off the main thread.
-/// Handles signature verification (via nostr-wasm), search text extraction,
-/// language detection (tinyld), sentiment analysis, and media detection.
-/// Short-circuits if verification fails.
-///
-/// Receives batches of events (NostrEvent[]) and responds with batches of
-/// results to amortize postMessage structured-clone overhead.
-
-declare var self: Worker;
+/**
+ * Nostr event analysis: signature verification (via nostr-wasm), search text
+ * extraction, language detection (tinyld), sentiment analysis, and media
+ * detection. Short-circuits if verification fails.
+ *
+ * This module is thread-agnostic: `createAnalyzer()` returns a synchronous
+ * analyze function that runs wherever it is called. Protocol workers call it
+ * inline so an EVENT never needs an extra thread hop.
+ */
 
 import type { NostrEvent } from "nostr-tools";
 import { initNostrWasm } from "nostr-wasm";
 import Sentiment from "sentiment";
 import { detect as detectLanguage } from "tinyld";
 
-import type { AnalyzeRequest, AnalyzeResult } from "./analyze-pool.ts";
 import { buildAutocompleteText } from "./autocomplete-text.ts";
 import { detectMedia } from "./media.ts";
 import { buildSearchText } from "./search-text.ts";
 
-const nw = await initNostrWasm();
-const sentimentAnalyzer = new Sentiment();
+/** Result of analyzing a Nostr event. */
+export interface AnalyzeResult {
+  verified: boolean;
+  search_text?: string;
+  autocomplete_text?: string;
+  language?: string;
+  sentiment?: string;
+  media?: boolean;
+  video?: boolean;
+}
 
-// Warm up tinyld and the sentiment analyzer at worker startup so the first
-// real request doesn't pay the lazy model/lexicon initialization cost. Both
-// libraries do work on first invocation (tinyld loads its n-gram tables;
-// `Sentiment` lazy-builds its AFINN lookup) which otherwise lands on whatever
-// unlucky event happens to arrive first after the worker spawns.
-detectLanguage("warmup text for language detection");
-sentimentAnalyzer.analyze("warmup text for sentiment analysis");
-
-// Signal the pool that module evaluation is complete. Terminating a worker
-// while it is still initializing (loading tinyld's n-gram tables, wasm, etc.)
-// can segfault Bun, so the pool waits for this message before terminating.
-self.postMessage("ready");
+/** Synchronous event analyzer produced by {@link createAnalyzer}. */
+export type Analyzer = (
+  event: NostrEvent,
+  opts?: { verifyOnly?: boolean },
+) => AnalyzeResult;
 
 /** Minimum text length (in characters) required to attempt language detection. */
 const MIN_LANGUAGE_DETECT_LENGTH = 10;
@@ -306,6 +306,12 @@ const SKIP_LANG_SENT_KINDS = new Set([
 ]);
 
 /**
+ * Shared sentiment analyzer instance. Construction is cheap; the AFINN
+ * lexicon is lazy-built on first use, which {@link createAnalyzer} warms up.
+ */
+const sentimentAnalyzer = new Sentiment();
+
+/**
  * Detect the language of a Nostr event using its pre-computed search text.
  *
  * Returns an ISO 639-1 two-letter code, or `undefined` when the language
@@ -378,63 +384,70 @@ function detectEventSentiment(
   return "neutral";
 }
 
-/** Analyze a single request and return the result with its correlation id. */
-function analyzeOne(
-  request: AnalyzeRequest,
-): { reqId: number } & AnalyzeResult {
-  const { reqId, event: nostrEvent, verifyOnly } = request;
+/**
+ * Create a synchronous event analyzer.
+ *
+ * Performs the one-time expensive initialization up front: loads the
+ * nostr-wasm verifier and warms up tinyld (n-gram tables) and the sentiment
+ * analyzer (AFINN lexicon), so the first real event doesn't pay lazy-init
+ * cost on whatever thread this runs on.
+ */
+export async function createAnalyzer(): Promise<Analyzer> {
+  const nw = await initNostrWasm();
 
-  // Step 1: Verify signature
-  let verified: boolean;
-  try {
-    nw.verifyEvent(nostrEvent);
-    verified = true;
-  } catch {
-    verified = false;
-  }
+  detectLanguage("warmup text for language detection");
+  sentimentAnalyzer.analyze("warmup text for sentiment analysis");
 
-  // Build the result imperatively to avoid the per-event allocation churn of
-  // conditional spreads (`...(x && { x })`), which create 3–4 throwaway
-  // objects per event under firehose load.
-  const out: { reqId: number } & AnalyzeResult = { reqId, verified };
+  return function analyzeEvent(
+    nostrEvent: NostrEvent,
+    opts?: { verifyOnly?: boolean },
+  ): AnalyzeResult {
+    // Step 1: Verify signature
+    let verified: boolean;
+    try {
+      nw.verifyEvent(nostrEvent);
+      verified = true;
+    } catch {
+      verified = false;
+    }
 
-  // Short-circuit if verification failed — don't waste time on analysis.
-  // Also short-circuit if the caller only wants the verified bit.
-  if (!verified || verifyOnly) {
+    // Build the result imperatively to avoid the per-event allocation churn
+    // of conditional spreads (`...(x && { x })`), which create 3–4 throwaway
+    // objects per event under firehose load.
+    const out: AnalyzeResult = { verified };
+
+    // Short-circuit if verification failed — don't waste time on analysis.
+    // Also short-circuit if the caller only wants the verified bit.
+    if (!verified || opts?.verifyOnly) {
+      return out;
+    }
+
+    // Step 2: Build search text (used by language/sentiment detection below)
+    const searchText = buildSearchText(nostrEvent);
+    if (searchText) out.search_text = searchText;
+
+    // Step 2b: Build autocomplete text (short name/title-shaped surface used
+    // by the NIP-50 `autocomplete:true` extension token; see
+    // src/autocomplete-text.ts).
+    const autocompleteText = buildAutocompleteText(nostrEvent);
+    if (autocompleteText) out.autocomplete_text = autocompleteText;
+
+    // Step 3: Detect language and sentiment, but only for kinds whose content
+    // is natural-language text. Encrypted payloads, NIP-51 lists, reposts,
+    // and zap receipts get media detection only.
+    const kind = nostrEvent.kind;
+    if (!SKIP_LANG_SENT_KINDS.has(kind)) {
+      const language = detectEventLanguage(searchText);
+      if (language) out.language = language;
+      const sentiment = detectEventSentiment(nostrEvent, searchText);
+      if (sentiment) out.sentiment = sentiment;
+    }
+
+    // Step 4: Detect media (cheap, no kind restriction beyond what detectMedia does)
+    const { media, video } = detectMedia(nostrEvent);
+    if (media !== undefined) out.media = media;
+    if (video !== undefined) out.video = video;
+
     return out;
-  }
-
-  // Step 2: Build search text (used by language/sentiment detection below)
-  const searchText = buildSearchText(nostrEvent);
-  if (searchText) out.search_text = searchText;
-
-  // Step 2b: Build autocomplete text (short name/title-shaped surface used
-  // by the NIP-50 `autocomplete:true` extension token; see
-  // src/autocomplete-text.ts).
-  const autocompleteText = buildAutocompleteText(nostrEvent);
-  if (autocompleteText) out.autocomplete_text = autocompleteText;
-
-  // Step 3: Detect language and sentiment, but only for kinds whose content
-  // is natural-language text. Encrypted payloads, NIP-51 lists, reposts,
-  // and zap receipts get media detection only.
-  const kind = nostrEvent.kind;
-  if (!SKIP_LANG_SENT_KINDS.has(kind)) {
-    const language = detectEventLanguage(searchText);
-    if (language) out.language = language;
-    const sentiment = detectEventSentiment(nostrEvent, searchText);
-    if (sentiment) out.sentiment = sentiment;
-  }
-
-  // Step 4: Detect media (cheap, no kind restriction beyond what detectMedia does)
-  const { media, video } = detectMedia(nostrEvent);
-  if (media !== undefined) out.media = media;
-  if (video !== undefined) out.video = video;
-
-  return out;
+  };
 }
-
-self.onmessage = (event: MessageEvent<AnalyzeRequest[]>) => {
-  const batch = event.data;
-  const results = batch.map(analyzeOne);
-  postMessage(results);
-};

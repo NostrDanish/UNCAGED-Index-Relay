@@ -88,19 +88,6 @@ export class Config {
    */
   readonly tagValueMaxCountPerName: number;
   /**
-   * Number of analyze worker threads. Defaults to `hardwareConcurrency - 1`
-   * (minimum 1) so the main thread keeps a dedicated core for the WebSocket
-   * event loop and OpenSearch I/O. Override with `ANALYZE_POOL_SIZE`.
-   * Set to 0 to use the default. Hard-capped at `hardwareConcurrency`.
-   */
-  readonly analyzePoolSize: number;
-  /**
-   * Maximum pending analyze requests (queued + in-flight) before the relay
-   * starts rejecting new EVENT messages with `error: relay overloaded`.
-   * Protects the relay from OOM under firehose-style ingest. Default: 20_000.
-   */
-  readonly analyzeMaxPending: number;
-  /**
    * Maximum size of the OpenSearch bulk indexing queue before
    * `relay.storage.event(...)` rejects new events with `error: relay
    * overloaded`. Default: 5_000.
@@ -150,6 +137,16 @@ export class Config {
    * Default: 1_000_000.
    */
   readonly negentropyMaxRecords: number;
+  /**
+   * Number of protocol worker threads that own connection state and message
+   * handling (parse, validate, verify, query, frame building). The main
+   * thread only routes raw strings between sockets and workers.
+   *
+   * - unset → auto: `max(1, min(16, floor(hardwareConcurrency / 4)))`,
+   *   resolved by the protocol pool.
+   * - `N`  → exactly N workers (must be >= 1).
+   */
+  readonly protocolWorkers: number | undefined;
   readonly nostrSigner: NostrSigner;
 
   constructor(env: { get(key: string): string | undefined }) {
@@ -355,32 +352,6 @@ export class Config {
       this.tagValueMaxCountPerName = n;
     }
 
-    // analyzePoolSize: 0 (or unset) means "auto" — the pool itself picks
-    // `hardwareConcurrency - 1`. We accept the raw value here and the pool
-    // applies the auto default + hard cap.
-    const analyzePoolSizeValue = env.get("ANALYZE_POOL_SIZE");
-    if (!analyzePoolSizeValue) {
-      this.analyzePoolSize = 0;
-    } else {
-      const n = parseInt(analyzePoolSizeValue, 10);
-      if (Number.isNaN(n) || n < 0) {
-        throw new Error("ANALYZE_POOL_SIZE must be a non-negative integer.");
-      }
-      this.analyzePoolSize = n;
-    }
-
-    // analyzeMaxPending
-    const analyzeMaxPendingValue = env.get("ANALYZE_MAX_PENDING");
-    if (!analyzeMaxPendingValue) {
-      this.analyzeMaxPending = 20_000;
-    } else {
-      const n = parseInt(analyzeMaxPendingValue, 10);
-      if (Number.isNaN(n) || n <= 0) {
-        throw new Error("ANALYZE_MAX_PENDING must be a positive integer.");
-      }
-      this.analyzeMaxPending = n;
-    }
-
     // bulkMaxQueue
     const bulkMaxQueueValue = env.get("BULK_MAX_QUEUE");
     if (!bulkMaxQueueValue) {
@@ -445,6 +416,18 @@ export class Config {
         );
       }
       this.negentropyMaxRecords = n;
+    }
+
+    // protocolWorkers: unset = auto (resolved by the pool), else exactly N.
+    const protocolWorkersValue = env.get("PROTOCOL_WORKERS");
+    if (protocolWorkersValue === undefined || protocolWorkersValue === "") {
+      this.protocolWorkers = undefined;
+    } else {
+      const n = parseInt(protocolWorkersValue, 10);
+      if (Number.isNaN(n) || n < 1) {
+        throw new Error("PROTOCOL_WORKERS must be a positive integer.");
+      }
+      this.protocolWorkers = n;
     }
 
     // nostrSigner

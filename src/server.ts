@@ -1,16 +1,20 @@
 import { readFile } from "node:fs/promises";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
+import type { ServerWebSocket } from "bun";
 import { serve } from "bun";
-import { AnalyzePool } from "./analyze-pool.ts";
 import { Config } from "./config.ts";
 import { renderLandingPage } from "./landing-page.ts";
 import { errFields, Logger } from "./log.ts";
-import { register, startRuntimeMetrics } from "./metrics.ts";
+import { mergeExposition, register, startRuntimeMetrics } from "./metrics.ts";
 import { OpenSearchRelay } from "./opensearch.ts";
 import type { ClientOptions } from "./opensearch-client.ts";
 import { Client as OpenSearchClient } from "./opensearch-client.ts";
-import { Relay, type WebSocketData } from "./relay.ts";
+import {
+  type DirtyBatch,
+  ProtocolPool,
+  resolveProtocolWorkers,
+} from "./protocol-pool.ts";
 
 const config = new Config({
   get(key) {
@@ -22,15 +26,17 @@ const config = new Config({
 // component that logs.
 const log = new Logger(config.logLevel);
 
-// Initialize analysis worker pool (signature verification, language & sentiment detection)
-const analyzePool = new AnalyzePool(config.analyzePoolSize, {
-  maxPending: config.analyzeMaxPending,
-  logger: log,
-});
+/** Per-socket data attached at upgrade time. */
+interface WebSocketData {
+  ip?: string;
+  userAgent?: string;
+  /** Routing key for the protocol pool. */
+  connId?: number;
+}
 
-// Construct OpenSearch clients. Read and write operations use separate clients
-// so that long-running write operations (e.g. bulk flushes with
-// `refresh: "wait_for"`) cannot starve the connection pool used by queries.
+/** Monotonic connection ID source, unique for the process lifetime. */
+let nextConnId = 1;
+
 const opensearchClientOptions: ClientOptions = {
   node: config.opensearchNode,
 };
@@ -40,45 +46,58 @@ if (config.opensearchUsername && config.opensearchPassword) {
     password: config.opensearchPassword,
   };
 }
-const opensearchReadClient = new OpenSearchClient(opensearchClientOptions);
-const opensearchWriteClient = new OpenSearchClient(opensearchClientOptions);
 
-// Initialize OpenSearch relay
-const opensearchRelay = new OpenSearchRelay(opensearchReadClient, {
-  indexName: config.opensearchIndex,
-  historyEnabled: config.historyEnabled,
-  historyKindsWhitelist: config.historyKindsWhitelist,
-  historyKindsExcluded: config.historyKindsExcluded,
-  authKinds: config.authKinds,
-  writeClient: opensearchWriteClient,
-  tagValueMaxCountPerName: config.tagValueMaxCountPerName,
-  bulkMaxQueue: config.bulkMaxQueue,
-  defaultLimit: config.defaultLimit,
-  maxLimit: config.maxLimit,
-  logger: log,
-});
+/**
+ * Forwards dirty-reference batches to the background stats worker. Assigned
+ * when the worker is spawned (below); the pool calls it via this indirection
+ * because the pool is created before the worker exists.
+ */
+let forwardDirty: ((dirty: DirtyBatch) => void) | undefined;
 
-const relay = new Relay(opensearchRelay, {
-  analyze: (event, opts) => analyzePool.analyze(event, opts),
+const workerCount = resolveProtocolWorkers(config.protocolWorkers);
+
+// N protocol workers own all protocol state and per-message work; the main
+// thread only routes strings between sockets and workers.
+
+// Run index migration once, before workers spawn, with a short-lived
+// client — workers skip migration so N of them don't race on it.
+try {
+  const migrateRelay = new OpenSearchRelay(
+    new OpenSearchClient(opensearchClientOptions),
+    { indexName: config.opensearchIndex, logger: log },
+  );
+  await migrateRelay.migrate();
+  log.info("opensearch_connected", { node: config.opensearchNode });
+} catch (error) {
+  log.error("opensearch_connect_failed", {
+    node: config.opensearchNode,
+    ...errFields(error),
+  });
+  process.exit(1);
+}
+
+const sockets = new Map<number, ServerWebSocket<WebSocketData>>();
+
+const pool = new ProtocolPool(workerCount, {
   logger: log,
-  relayUrl: config.relayUrl,
-  authKinds: config.authKinds,
-  maxMessageLength: config.maxMessageLength,
-  maxFilterValues: config.maxFilterValues,
-  maxLimit: config.maxLimit,
-  maxEventTags: config.tagValueMaxCountPerName,
-  maxInflightPerConn: config.maxInflightPerConn,
-  bannedHashtags: config.bannedHashtags,
-  rejectedKinds: config.rejectedKinds,
-  negentropyMaxRecords: config.negentropyMaxRecords,
-  relayInfo: {
-    pubkey: config.relayPubkey,
-    contact: config.relayContact,
-    self: await config.nostrSigner.getPublicKey(),
-    icon: new URL("/icon.png", config.publicUrl).toString(),
-    banner: new URL("/banner.jpg", config.publicUrl).toString(),
+  sendFrame: (connId, frame) => {
+    sockets.get(connId)?.send(frame);
+  },
+  onDirty: (dirty) => forwardDirty?.(dirty),
+  onConnectionsLost: (connIds) => {
+    // A protocol worker died and took these connections' protocol state
+    // (subscriptions, auth, negentropy) with it. Close the sockets so
+    // clients reconnect cleanly onto the respawned worker.
+    for (const connId of connIds) {
+      const ws = sockets.get(connId);
+      sockets.delete(connId);
+      ws?.close(1011, "relay worker restarted, please reconnect");
+    }
   },
 });
+
+const relayInfo = await pool.start();
+log.info("protocol_pool_started", { workers: workerCount });
 
 // ---------------------------------------------------------------------------
 // Background worker — score recomputation, NIP-85, and trends run off-thread
@@ -97,7 +116,7 @@ if (config.statsEnabled) {
   worker.onmessage = (event: MessageEvent) => {
     const msg = event.data;
     if (msg.type === "broadcast") {
-      relay.broadcast(msg.event);
+      pool.broadcastExternal(msg.events);
     }
   };
 
@@ -105,68 +124,26 @@ if (config.statsEnabled) {
     log.error("bg_worker_error", { err_msg: error.message });
   };
 
-  // Accumulate dirty addrs/identifiers from flush callbacks. These are drained
-  // and forwarded to the worker alongside the dirty IDs/pubkeys.
-  const pendingDirtyAddrs = new Set<string>();
-  const pendingDirtyIdentifiers = new Set<string>();
-  opensearchRelay.onDirtyAddrs = (addrs) => {
-    for (const addr of addrs) pendingDirtyAddrs.add(addr);
-  };
-  opensearchRelay.onDirtyIdentifiers = (ids) => {
-    for (const id of ids) pendingDirtyIdentifiers.add(id);
-  };
-
-  // Forward dirty state from the main thread to the background worker every 2s.
-  // This is lightweight — just draining Sets and posting arrays via postMessage.
-  setInterval(() => {
-    const dirty = opensearchRelay.drainDirty();
-    const addrs = [...pendingDirtyAddrs];
-    pendingDirtyAddrs.clear();
-    const identifiers = [...pendingDirtyIdentifiers];
-    pendingDirtyIdentifiers.clear();
-
-    if (
-      dirty.ids.length === 0 &&
-      dirty.pubkeys.length === 0 &&
-      addrs.length === 0 &&
-      identifiers.length === 0
-    ) {
-      return;
-    }
-
+  forwardDirty = (dirty) => {
     worker.postMessage({
       type: "dirty",
       ids: dirty.ids,
       pubkeys: dirty.pubkeys,
-      addrs,
-      identifiers,
+      addrs: dirty.addrs,
+      identifiers: dirty.identifiers,
     });
-  }, 2_000);
+  };
 } else {
   log.info("stats_disabled");
-}
-
-// Initialize index on startup
-try {
-  await opensearchRelay.migrate();
-  log.info("opensearch_connected", { node: config.opensearchNode });
-} catch (error) {
-  log.error("opensearch_connect_failed", {
-    node: config.opensearchNode,
-    ...errFields(error),
-  });
-  process.exit(1);
 }
 
 // Sample event-loop lag and memory usage for /metrics.
 startRuntimeMetrics();
 
-// Pre-render the HTML landing page (relay info is static after startup).
-const landingPageHtml = renderLandingPage(
-  relay.getRelayInfo(),
-  config.relayUrl,
-  log,
-);
+// Pre-render the HTML landing page and the NIP-11 document (relay info is
+// static after startup, so both are cached as strings).
+const landingPageHtml = renderLandingPage(relayInfo, config.relayUrl, log);
+const nip11Json = JSON.stringify(relayInfo, null, 2);
 
 // Pre-load static assets into memory.
 const faviconIco = await readFile(
@@ -196,14 +173,7 @@ const server = serve<WebSocketData>({
       const userAgent = req.headers.get("user-agent") ?? undefined;
 
       const upgraded = server.upgrade(req, {
-        data: {
-          subscriptions: new Map(),
-          challenge: "",
-          challengeSent: false,
-          authedPubkeys: new Set(),
-          ip,
-          userAgent,
-        },
+        data: { ip, userAgent },
       });
 
       if (!upgraded) {
@@ -231,9 +201,17 @@ const server = serve<WebSocketData>({
         });
       }
 
-      // Prometheus metrics endpoint
+      // Prometheus metrics endpoint: merge this thread's exposition with
+      // every protocol worker's.
       if (url.pathname === "/metrics") {
-        const metrics = await register.metrics();
+        const [main, workers] = await Promise.all([
+          register.metrics(),
+          pool.metrics(),
+        ]);
+        const metrics = mergeExposition([
+          { label: "main", text: main },
+          ...workers,
+        ]);
         return new Response(metrics, {
           headers: { "Content-Type": register.contentType },
         });
@@ -244,7 +222,7 @@ const server = serve<WebSocketData>({
         const acceptHeader = req.headers.get("accept");
 
         if (acceptHeader?.includes("application/nostr+json")) {
-          return new Response(JSON.stringify(relay.getRelayInfo(), null, 2), {
+          return new Response(nip11Json, {
             headers: {
               "Content-Type": "application/nostr+json",
               "Access-Control-Allow-Origin": "*",
@@ -267,40 +245,42 @@ const server = serve<WebSocketData>({
   websocket: {
     // Enforce the advertised NIP-11 max_message_length at the transport
     // layer. Frames larger than this are dropped by Bun with code 1009
-    // before reaching `handleMessage` — the JSON.parse / validation path
+    // before reaching the protocol layer — the JSON.parse / validation path
     // never sees them.
     maxPayloadLength: config.maxMessageLength,
 
     open(ws) {
-      relay.handleOpen(ws);
+      const connId = nextConnId++;
+      ws.data.connId = connId;
+      sockets.set(connId, ws);
+      pool.open(connId, ws.data.ip, ws.data.userAgent);
     },
 
     message(ws, message) {
-      // Fire-and-forget: do NOT await `handleMessage` here. Awaiting would
-      // serialize message processing per connection, which becomes a hard
-      // bottleneck when a single client (e.g. a Bluesky bridge) pumps
-      // events at firehose rates — every event would block the next on
-      // analyze-worker hops + bulk-flush latency. With fire-and-forget,
-      // events from one connection can fan out into the analyze pool and
-      // be batched together, and OK responses come back in their natural
-      // completion order (NIP-01 does not require strict OK ordering).
-      // Errors thrown inside handleMessage are caught internally and
-      // converted to NOTICE / OK-false responses.
-      relay.handleMessage(ws, message).catch((err) => {
-        // handleMessage already catches and converts errors to NOTICE
-        // responses; this is just a belt-and-suspenders to prevent an
-        // unhandled rejection from crashing the process.
-        log.error("message_unhandled", errFields(err));
-      });
+      const connId = ws.data.connId;
+      if (connId === undefined) return;
+      // Normalize to a string on this side of the boundary: strings cross
+      // postMessage as flat copies, and the Relay parses from string anyway.
+      pool.message(
+        connId,
+        typeof message === "string" ? message : message.toString(),
+      );
     },
 
     close(ws) {
-      relay.handleCloseConnection(ws);
+      const connId = ws.data.connId;
+      if (connId === undefined) return;
+      sockets.delete(connId);
+      pool.close(connId);
     },
   },
 });
 
-log.info("started", { port: server.port, log_level: config.logLevel });
+log.info("started", {
+  port: server.port,
+  log_level: config.logLevel,
+  protocol_workers: workerCount,
+});
 
 // Graceful shutdown on SIGINT/SIGTERM — also ensures CPU profiles are written.
 async function shutdown() {
@@ -308,7 +288,7 @@ async function shutdown() {
   server.stop();
   // Bounded cleanup: waiting on worker teardown keeps the exit clean, but a
   // wedged worker must never be able to hang the shutdown path.
-  const cleanup = Promise.all([analyzePool.dispose(), bgWorker?.terminate()]);
+  const cleanup = Promise.all([pool.dispose(), bgWorker?.terminate()]);
   const timeout = new Promise((resolve) => setTimeout(resolve, 5_000));
   await Promise.race([cleanup, timeout]);
   process.exit(0);

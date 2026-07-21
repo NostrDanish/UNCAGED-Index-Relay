@@ -2,10 +2,9 @@ import { strict as assert } from "node:assert";
 import { Buffer } from "node:buffer";
 import { createHash } from "node:crypto";
 import { afterEach, beforeEach, describe, it } from "node:test";
-import type { ServerWebSocket } from "bun";
 import type { Filter, NostrEvent } from "nostr-tools";
 import { finalizeEvent, generateSecretKey } from "nostr-tools";
-import { AnalyzePoolOverloaded, StorageOverloaded } from "./errors.ts";
+import { StorageOverloaded } from "./errors.ts";
 import {
   bytesToHex,
   hexToBytes,
@@ -16,13 +15,13 @@ import {
   type AnalyzableRelay,
   clampUntil,
   Relay,
-  type WebSocketData,
+  type RelayConn,
 } from "./relay.ts";
 
 describe("Relay", () => {
   let relay: Relay;
   let mockStorage: AnalyzableRelay;
-  let mockWs: ServerWebSocket<WebSocketData>;
+  let mockWs: RelayConn;
   let sentMessages: unknown[][];
   let consoleErrorSpy: typeof console.error;
   let consoleLogSpy: typeof console.log;
@@ -54,7 +53,7 @@ describe("Relay", () => {
         challengeSent: false,
         authedPubkeys: new Set(),
       },
-    } as unknown as ServerWebSocket<WebSocketData>;
+    } as unknown as RelayConn;
 
     relay = new Relay(mockStorage, { relayUrl: "wss://relay.test/" });
   });
@@ -590,7 +589,7 @@ describe("Relay", () => {
           challenge: "",
           authedPubkeys: new Set(),
         },
-      } as unknown as ServerWebSocket<WebSocketData>;
+      } as unknown as RelayConn;
 
       relay.handleOpen(sub);
       mockStorage.query = async () => [];
@@ -623,36 +622,6 @@ describe("Relay", () => {
 
       // But NOT stored
       assert.equal(storageEventCalled, false);
-    });
-
-    it("should NACK with 'relay overloaded' when analyze pool throws AnalyzePoolOverloaded", async () => {
-      const overloadedRelay = new Relay(mockStorage, {
-        relayUrl: "wss://relay.test/",
-        analyze: () => {
-          throw new AnalyzePoolOverloaded(1000, 1000);
-        },
-      });
-
-      const sk = generateSecretKey();
-      const event = finalizeEvent(
-        {
-          kind: 1,
-          created_at: Math.floor(Date.now() / 1000),
-          tags: [],
-          content: "overloaded analyze",
-        },
-        sk,
-      );
-
-      await overloadedRelay.handleEvent(mockWs, event);
-
-      assert.equal(sentMessages.length, 1);
-      assert.deepEqual(sentMessages[0], [
-        "OK",
-        event.id,
-        false,
-        "error: relay overloaded, try again",
-      ]);
     });
 
     it("should NACK with 'relay overloaded' when storage.event throws StorageOverloaded", async () => {
@@ -1912,7 +1881,7 @@ describe("Relay", () => {
     it("should handle undefined data gracefully", () => {
       const wsWithNoData = {
         data: undefined,
-      } as unknown as ServerWebSocket<WebSocketData>;
+      } as unknown as RelayConn;
 
       assert.doesNotThrow(() => {
         relay.handleCloseConnection(wsWithNoData);
@@ -1923,7 +1892,7 @@ describe("Relay", () => {
   describe("broadcast / live subscriptions", () => {
     /** Helper to create a mock WebSocket that records sent messages. */
     function createMockWs(): {
-      ws: ServerWebSocket<WebSocketData>;
+      ws: RelayConn;
       messages: unknown[][];
     } {
       const messages: unknown[][] = [];
@@ -1936,7 +1905,7 @@ describe("Relay", () => {
           challenge: "",
           authedPubkeys: new Set(),
         },
-      } as unknown as ServerWebSocket<WebSocketData>;
+      } as unknown as RelayConn;
       return { ws, messages };
     }
 
@@ -2908,7 +2877,7 @@ describe("Relay", () => {
           challenge: "",
           authedPubkeys: new Set(),
         },
-      } as unknown as ServerWebSocket<WebSocketData>;
+      } as unknown as RelayConn;
 
       relay.handleOpen(sub);
       mockStorage.query = async () => [];
@@ -3052,7 +3021,7 @@ describe("Relay", () => {
     it("should not broadcast future events to subscriptions without explicit until", async () => {
       /** Helper to create a mock WebSocket that records sent messages. */
       function createMockWs(): {
-        ws: ServerWebSocket<WebSocketData>;
+        ws: RelayConn;
         messages: unknown[][];
       } {
         const messages: unknown[][] = [];
@@ -3065,7 +3034,7 @@ describe("Relay", () => {
             challenge: "",
             authedPubkeys: new Set(),
           },
-        } as unknown as ServerWebSocket<WebSocketData>;
+        } as unknown as RelayConn;
         return { ws, messages };
       }
 
@@ -3527,7 +3496,7 @@ describe("Relay", () => {
 describe("Relay with authKinds", () => {
   let relay: Relay;
   let mockStorage: AnalyzableRelay;
-  let mockWs: ServerWebSocket<WebSocketData>;
+  let mockWs: RelayConn;
   let sentMessages: unknown[][];
 
   beforeEach(() => {
@@ -3551,7 +3520,7 @@ describe("Relay with authKinds", () => {
         challengeSent: false,
         authedPubkeys: new Set(),
       },
-    } as unknown as ServerWebSocket<WebSocketData>;
+    } as unknown as RelayConn;
 
     relay = new Relay(mockStorage, {
       relayUrl: "wss://relay.test/",
@@ -3888,7 +3857,7 @@ describe("Relay with authKinds", () => {
 
   describe("broadcast with auth kinds", () => {
     function createMockWs(): {
-      ws: ServerWebSocket<WebSocketData>;
+      ws: RelayConn;
       messages: unknown[][];
     } {
       const messages: unknown[][] = [];
@@ -3902,7 +3871,7 @@ describe("Relay with authKinds", () => {
           challengeSent: false,
           authedPubkeys: new Set(),
         },
-      } as unknown as ServerWebSocket<WebSocketData>;
+      } as unknown as RelayConn;
       return { ws, messages };
     }
 
@@ -4188,7 +4157,7 @@ describe("Relay with authKinds", () => {
 
   describe("broadcast auth-kind event to authorized subscriber only", () => {
     function createMockWs(): {
-      ws: ServerWebSocket<WebSocketData>;
+      ws: RelayConn;
       messages: unknown[][];
     } {
       const messages: unknown[][] = [];
@@ -4202,7 +4171,7 @@ describe("Relay with authKinds", () => {
           challengeSent: false,
           authedPubkeys: new Set(),
         },
-      } as unknown as ServerWebSocket<WebSocketData>;
+      } as unknown as RelayConn;
       return { ws, messages };
     }
 
