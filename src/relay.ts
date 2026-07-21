@@ -2,7 +2,6 @@ import type { Buffer } from "node:buffer";
 import { randomBytes } from "node:crypto";
 import type { NostrRelayInfo, NRelay } from "@nostrify/nostrify";
 import { NKinds, NSchema as n } from "@nostrify/nostrify";
-import type { ServerWebSocket } from "bun";
 import type { Filter, NostrEvent } from "nostr-tools";
 import { matchFilter, verifyEvent } from "nostr-tools";
 
@@ -171,7 +170,7 @@ interface NegentropySession {
   lastActive: number;
 }
 
-export interface WebSocketData {
+export interface ConnData {
   subscriptions: Map<string, Subscription>;
   /** The current AUTH challenge string for this connection. */
   challenge: string;
@@ -193,9 +192,48 @@ export interface WebSocketData {
   eventCount?: number;
 }
 
+/**
+ * Transport-agnostic handle for one client connection.
+ *
+ * The Relay never touches the WebSocket directly — it only reads/writes
+ * per-connection protocol state via {@link ConnData} and emits finished
+ * NIP-01 frames (already-serialized JSON strings) through {@link send}.
+ * This is the seam that lets the protocol layer run either in-process
+ * (send = `ws.send`) or inside a worker (send = postMessage back to the
+ * socket-owning thread), and it is why every frame the Relay produces is
+ * a string: strings cross thread boundaries as flat copies.
+ */
+export interface RelayConn {
+  /**
+   * Stable identifier for this connection, unique for the lifetime of the
+   * process. Used to route frames back to the owning socket when the
+   * protocol layer runs in a worker.
+   */
+  readonly id: number;
+  /** Per-connection protocol state, owned by the protocol layer. */
+  data: ConnData;
+  /** Deliver one finished NIP-01 frame (serialized JSON array) to the client. */
+  send(frame: string): void;
+}
+
+/** Create a fresh {@link ConnData} for a new connection. */
+export function createConnData(init?: {
+  ip?: string;
+  userAgent?: string;
+}): ConnData {
+  return {
+    subscriptions: new Map(),
+    challenge: "",
+    challengeSent: false,
+    authedPubkeys: new Set(),
+    ip: init?.ip,
+    userAgent: init?.userAgent,
+  };
+}
+
 /** A single filter entry in the subscription index. */
 interface IndexedFilter {
-  ws: ServerWebSocket<WebSocketData>;
+  ws: RelayConn;
   subscriptionId: string;
   filter: Filter;
 }
@@ -218,7 +256,7 @@ export class Relay {
   private log: Logger;
 
   /** All open WebSocket connections. */
-  private connections = new Set<ServerWebSocket<WebSocketData>>();
+  private connections = new Set<RelayConn>();
 
   /** Kind → indexed filters for that kind. */
   private kindIndex = new Map<number, Set<IndexedFilter>>();
@@ -226,7 +264,7 @@ export class Relay {
   private catchAll = new Set<IndexedFilter>();
   /** Reverse map: ws → all IndexedFilter entries for that connection (for fast cleanup). */
   private connectionFilters = new Map<
-    ServerWebSocket<WebSocketData>,
+    RelayConn,
     Set<IndexedFilter>
   >();
 
@@ -247,7 +285,7 @@ export class Relay {
    */
   private maxInflightPerConn: number;
   private connectionInflight = new WeakMap<
-    ServerWebSocket<WebSocketData>,
+    RelayConn,
     Semaphore
   >();
 
@@ -259,7 +297,7 @@ export class Relay {
    * by an idle sweep.
    */
   private negSessions = new Map<
-    ServerWebSocket<WebSocketData>,
+    RelayConn,
     Map<string, NegentropySession>
   >();
   /** Total active Negentropy sessions across all connections. */
@@ -422,7 +460,7 @@ export class Relay {
   }
 
   // Helper to send JSON message to client
-  private sendMessage(ws: ServerWebSocket<WebSocketData>, message: unknown[]) {
+  private sendMessage(ws: RelayConn, message: unknown[]) {
     ws.send(JSON.stringify(message));
   }
 
@@ -431,7 +469,7 @@ export class Relay {
    * Call removeFromIndex first if replacing an existing subscription.
    */
   private addToIndex(
-    ws: ServerWebSocket<WebSocketData>,
+    ws: RelayConn,
     subscriptionId: string,
     filters: Filter[],
   ): void {
@@ -464,7 +502,7 @@ export class Relay {
    * Remove indexed filters for a connection, optionally scoped to a single subscription.
    */
   private removeFromIndex(
-    ws: ServerWebSocket<WebSocketData>,
+    ws: RelayConn,
     subscriptionId?: string,
   ): void {
     const connFilters = this.connectionFilters.get(ws);
@@ -587,7 +625,7 @@ export class Relay {
 
     // Track which (ws, subscriptionId) pairs have already been sent to.
     // Outer map uses ws reference identity, inner set is subscriptionId strings.
-    const sent = new Map<ServerWebSocket<WebSocketData>, Set<string>>();
+    const sent = new Map<RelayConn, Set<string>>();
 
     const check = (entry: IndexedFilter) => {
       // Skip if already sent to this (ws, subId)
@@ -668,7 +706,7 @@ export class Relay {
    */
   private async handleEventMessage(
     event: NostrEvent,
-    ws: ServerWebSocket<WebSocketData>,
+    ws: RelayConn,
   ): Promise<{
     eventId: string;
     accepted: boolean;
@@ -964,7 +1002,7 @@ export class Relay {
    * Returns the validated filters on success, or an error object.
    */
   private checkAuthKinds(
-    ws: ServerWebSocket<WebSocketData>,
+    ws: RelayConn,
     subscriptionId: string,
     filters: Filter[],
   ):
@@ -1066,7 +1104,7 @@ export class Relay {
    * the event's author or listed in a `p` tag.
    */
   private isAuthorizedForEvent(
-    ws: ServerWebSocket<WebSocketData>,
+    ws: RelayConn,
     event: NostrEvent,
   ): boolean {
     const authed = ws.data.authedPubkeys;
@@ -1237,7 +1275,7 @@ export class Relay {
   }
 
   // Handle EVENT message
-  async handleEvent(ws: ServerWebSocket<WebSocketData>, event: NostrEvent) {
+  async handleEvent(ws: RelayConn, event: NostrEvent) {
     relayEventsCounter.inc({ kind: event.kind });
     try {
       const result = await this.handleEventMessage(event, ws);
@@ -1276,7 +1314,7 @@ export class Relay {
 
   // Handle REQ message
   async handleReq(
-    ws: ServerWebSocket<WebSocketData>,
+    ws: RelayConn,
     subscriptionId: string,
     filters: Filter[],
   ) {
@@ -1395,7 +1433,7 @@ export class Relay {
 
   // Handle COUNT message
   async handleCount(
-    ws: ServerWebSocket<WebSocketData>,
+    ws: RelayConn,
     subscriptionId: string,
     filters: Filter[],
   ) {
@@ -1454,7 +1492,7 @@ export class Relay {
   }
 
   // Handle CLOSE message
-  handleClose(ws: ServerWebSocket<WebSocketData>, subscriptionId: string) {
+  handleClose(ws: RelayConn, subscriptionId: string) {
     const data = ws.data;
     data.subscriptions.delete(subscriptionId);
     this.removeFromIndex(ws, subscriptionId);
@@ -1470,7 +1508,7 @@ export class Relay {
    * the relay's record cap may be included as the 4th element.
    */
   private sendNegErr(
-    ws: ServerWebSocket<WebSocketData>,
+    ws: RelayConn,
     subscriptionId: string,
     reason: string,
     maxRecords?: number,
@@ -1484,7 +1522,7 @@ export class Relay {
 
   /** Store a Negentropy session, replacing any existing one for the same subscription ID. */
   private setNegSession(
-    ws: ServerWebSocket<WebSocketData>,
+    ws: RelayConn,
     subscriptionId: string,
     session: NegentropySession,
   ): void {
@@ -1503,7 +1541,7 @@ export class Relay {
 
   /** Delete a single Negentropy session. Returns whether it existed. */
   private deleteNegSession(
-    ws: ServerWebSocket<WebSocketData>,
+    ws: RelayConn,
     subscriptionId: string,
   ): boolean {
     const sessions = this.negSessions.get(ws);
@@ -1518,7 +1556,7 @@ export class Relay {
   }
 
   /** Delete all Negentropy sessions for a connection (on close). */
-  private clearNegSessions(ws: ServerWebSocket<WebSocketData>): void {
+  private clearNegSessions(ws: RelayConn): void {
     const sessions = this.negSessions.get(ws);
     if (!sessions) return;
     this.negSessionCount -= sessions.size;
@@ -1565,7 +1603,7 @@ export class Relay {
    * store the session for subsequent NEG-MSG rounds.
    */
   async handleNegOpen(
-    ws: ServerWebSocket<WebSocketData>,
+    ws: RelayConn,
     subscriptionId: string,
     rawFilter: unknown,
     initialMessageHex: unknown,
@@ -1748,7 +1786,7 @@ export class Relay {
 
   /** Handle a NEG-MSG reconciliation round against an open session. */
   handleNegMsg(
-    ws: ServerWebSocket<WebSocketData>,
+    ws: RelayConn,
     subscriptionId: string,
     messageHex: unknown,
   ): void {
@@ -1783,7 +1821,7 @@ export class Relay {
 
   /** Handle NEG-CLOSE: release the session's resources. */
   handleNegClose(
-    ws: ServerWebSocket<WebSocketData>,
+    ws: RelayConn,
     subscriptionId: string,
   ): void {
     if (typeof subscriptionId !== "string") return;
@@ -1796,7 +1834,7 @@ export class Relay {
   }
 
   /** Send the AUTH challenge to the client if it hasn't been sent yet. */
-  private ensureChallengeSent(ws: ServerWebSocket<WebSocketData>): void {
+  private ensureChallengeSent(ws: RelayConn): void {
     if (!ws.data.challengeSent) {
       this.sendMessage(ws, ["AUTH", ws.data.challenge]);
       ws.data.challengeSent = true;
@@ -1824,7 +1862,7 @@ export class Relay {
   /**
    * Check if a pubkey is authenticated on this connection.
    */
-  isAuthenticated(ws: ServerWebSocket<WebSocketData>, pubkey: string): boolean {
+  isAuthenticated(ws: RelayConn, pubkey: string): boolean {
     return ws.data.authedPubkeys.has(pubkey);
   }
 
@@ -1833,7 +1871,7 @@ export class Relay {
    * Validates the kind 22242 event and marks the pubkey as authenticated.
    */
   async handleAuth(
-    ws: ServerWebSocket<WebSocketData>,
+    ws: RelayConn,
     event: NostrEvent,
   ): Promise<void> {
     // Verify signature (AUTH events don't need language/sentiment analysis).
@@ -1931,7 +1969,7 @@ export class Relay {
 
   // Handle incoming WebSocket message
   async handleMessage(
-    ws: ServerWebSocket<WebSocketData>,
+    ws: RelayConn,
     message: string | Buffer,
   ) {
     try {
@@ -2187,7 +2225,7 @@ export class Relay {
   }
 
   // Handle WebSocket open
-  handleOpen(ws: ServerWebSocket<WebSocketData>) {
+  handleOpen(ws: RelayConn) {
     this.connections.add(ws);
     relayConnectionsGauge.set(this.connections.size);
     ws.data.openedAt = Date.now();
@@ -2201,7 +2239,7 @@ export class Relay {
    * WeakMap keyed by ws so it disappears automatically on close without
    * needing explicit cleanup.
    */
-  private getInflightSemaphore(ws: ServerWebSocket<WebSocketData>): Semaphore {
+  private getInflightSemaphore(ws: RelayConn): Semaphore {
     let sem = this.connectionInflight.get(ws);
     if (!sem) {
       sem = new Semaphore(this.maxInflightPerConn);
@@ -2211,7 +2249,7 @@ export class Relay {
   }
 
   // Handle WebSocket close
-  handleCloseConnection(ws: ServerWebSocket<WebSocketData>) {
+  handleCloseConnection(ws: RelayConn) {
     const data = ws.data;
     if (this.log.levelEnabled("debug")) {
       this.log.debug("ws_close", {

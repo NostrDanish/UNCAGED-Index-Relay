@@ -10,7 +10,21 @@ import { register, startRuntimeMetrics } from "./metrics.ts";
 import { OpenSearchRelay } from "./opensearch.ts";
 import type { ClientOptions } from "./opensearch-client.ts";
 import { Client as OpenSearchClient } from "./opensearch-client.ts";
-import { Relay, type WebSocketData } from "./relay.ts";
+import { createConnData, Relay, type RelayConn } from "./relay.ts";
+
+/**
+ * Per-socket data attached at upgrade time. The `conn` wrapper is created in
+ * the `open` handler (the socket doesn't exist yet at upgrade) and is the
+ * only handle the protocol layer ever sees — it never touches the WebSocket.
+ */
+interface WebSocketData {
+  ip?: string;
+  userAgent?: string;
+  conn?: RelayConn;
+}
+
+/** Monotonic connection ID source, unique for the process lifetime. */
+let nextConnId = 1;
 
 const config = new Config({
   get(key) {
@@ -196,14 +210,7 @@ const server = serve<WebSocketData>({
       const userAgent = req.headers.get("user-agent") ?? undefined;
 
       const upgraded = server.upgrade(req, {
-        data: {
-          subscriptions: new Map(),
-          challenge: "",
-          challengeSent: false,
-          authedPubkeys: new Set(),
-          ip,
-          userAgent,
-        },
+        data: { ip, userAgent },
       });
 
       if (!upgraded) {
@@ -272,10 +279,18 @@ const server = serve<WebSocketData>({
     maxPayloadLength: config.maxMessageLength,
 
     open(ws) {
-      relay.handleOpen(ws);
+      const conn: RelayConn = {
+        id: nextConnId++,
+        data: createConnData({ ip: ws.data.ip, userAgent: ws.data.userAgent }),
+        send: (frame) => ws.send(frame),
+      };
+      ws.data.conn = conn;
+      relay.handleOpen(conn);
     },
 
     message(ws, message) {
+      const conn = ws.data.conn;
+      if (!conn) return; // open() hasn't run — cannot happen for an established socket
       // Fire-and-forget: do NOT await `handleMessage` here. Awaiting would
       // serialize message processing per connection, which becomes a hard
       // bottleneck when a single client (e.g. a Bluesky bridge) pumps
@@ -286,7 +301,7 @@ const server = serve<WebSocketData>({
       // completion order (NIP-01 does not require strict OK ordering).
       // Errors thrown inside handleMessage are caught internally and
       // converted to NOTICE / OK-false responses.
-      relay.handleMessage(ws, message).catch((err) => {
+      relay.handleMessage(conn, message).catch((err) => {
         // handleMessage already catches and converts errors to NOTICE
         // responses; this is just a belt-and-suspenders to prevent an
         // unhandled rejection from crashing the process.
@@ -295,7 +310,8 @@ const server = serve<WebSocketData>({
     },
 
     close(ws) {
-      relay.handleCloseConnection(ws);
+      const conn = ws.data.conn;
+      if (conn) relay.handleCloseConnection(conn);
     },
   },
 });
