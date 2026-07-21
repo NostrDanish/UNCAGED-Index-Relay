@@ -51,6 +51,16 @@ export class Config {
    * Default: 4,1059 (NIP-04 DMs and NIP-59 Gift Wraps).
    */
   readonly authKinds: Set<number>;
+  /**
+   * Set of pubkeys (hex) granted unconditional read access to auth-protected
+   * kinds. A connection that authenticates (NIP-42) as any of these pubkeys
+   * bypasses all AUTH gating and can read every user's auth-kind events
+   * (e.g. DMs, gift wraps) via REQ/COUNT/NEG-OPEN — including catch-all
+   * filters and live subscriptions. Intended for operator-controlled services
+   * such as bridges and notification servers. Set via the `MASTER_PUBKEYS`
+   * env var (comma-separated hex pubkeys). Default: empty (no master pubkeys).
+   */
+  readonly masterPubkeys: Set<string>;
   /** Whether to enable background stats recomputation and NIP-85 publishing. Default: true. */
   readonly statsEnabled: boolean;
   /**
@@ -272,6 +282,26 @@ export class Config {
         .map((s) => parseInt(s.trim(), 10))
         .filter((n) => !Number.isNaN(n));
       this.authKinds = new Set(kinds);
+    }
+
+    // masterPubkeys
+    const masterPubkeysValue = env.get("MASTER_PUBKEYS");
+    if (!masterPubkeysValue) {
+      this.masterPubkeys = new Set();
+    } else {
+      const pubkeys = masterPubkeysValue
+        .split(",")
+        .map((s) => s.trim().toLowerCase())
+        .filter((s) => s.length > 0)
+        .map((s) => {
+          if (!/^[0-9a-f]{64}$/.test(s)) {
+            throw new Error(
+              `MASTER_PUBKEYS entries must be 64-character hex pubkeys; invalid entry: ${s}`,
+            );
+          }
+          return s;
+        });
+      this.masterPubkeys = new Set(pubkeys);
     }
 
     // statsEnabled

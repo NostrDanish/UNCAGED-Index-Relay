@@ -104,6 +104,20 @@ export interface AnalyzableRelay extends NRelay {
     event: NostrEvent,
     opts?: { signal?: AbortSignal; analysis?: EventAnalysis },
   ): Promise<void>;
+  /**
+   * Query events. When `includeAuthKinds` is set, auth-protected kinds are
+   * NOT stripped from catch-all (no explicit `kinds`) filters. Used to serve
+   * master pubkeys, which have unconditional read access to all auth kinds.
+   */
+  query(
+    filters: Filter[],
+    opts?: { signal?: AbortSignal; includeAuthKinds?: boolean },
+  ): Promise<NostrEvent[]>;
+  /** Count events, with the same `includeAuthKinds` visibility override as {@link query}. */
+  count?(
+    filters: Filter[],
+    opts?: { signal?: AbortSignal; includeAuthKinds?: boolean },
+  ): Promise<{ count: number; approximate?: boolean }>;
 }
 
 /**
@@ -116,7 +130,11 @@ export interface AnalyzableRelay extends NRelay {
 export interface SyncableStorage {
   queryItems(
     filter: Filter,
-    opts?: { maxItems?: number; signal?: AbortSignal },
+    opts?: {
+      maxItems?: number;
+      signal?: AbortSignal;
+      includeAuthKinds?: boolean;
+    },
   ): Promise<Array<{ created_at: number; id: string }>>;
 }
 
@@ -246,6 +264,11 @@ export class Relay {
   private relayUrl: string;
   /** Kinds that require AUTH for REQ/COUNT queries and are excluded from unscoped queries. */
   private authKinds: Set<number>;
+  /**
+   * Pubkeys with unconditional read access to auth-protected kinds. A
+   * connection authenticated as any of these bypasses all auth-kind gating.
+   */
+  private masterPubkeys: Set<string>;
   /** Maximum number of entries allowed in any single filter array field. */
   private maxFilterValues: number;
   /** Lowercased `t` tag values that cause an event to be rejected at ingestion. */
@@ -336,6 +359,13 @@ export class Relay {
       relayUrl: string;
       authKinds?: Set<number>;
       /**
+       * Pubkeys granted unconditional read access to auth-protected kinds.
+       * A connection authenticated (NIP-42) as any of these bypasses all
+       * auth-kind gating on REQ/COUNT/NEG-OPEN and live subscriptions.
+       * Default: empty.
+       */
+      masterPubkeys?: Set<string>;
+      /**
        * Maximum size (bytes) of a single WebSocket message. Advertised via
        * NIP-11 `limitation.max_message_length`. Must match the transport-layer
        * limit (`Bun.serve` `maxPayloadLength`) so the advertised value is
@@ -408,6 +438,7 @@ export class Relay {
     this.analyze = opts.analyze ?? defaultAnalyze;
     this.relayUrl = opts.relayUrl;
     this.authKinds = opts.authKinds ?? new Set();
+    this.masterPubkeys = opts.masterPubkeys ?? new Set();
     this.maxFilterValues = opts.maxFilterValues ?? 5000;
     this.maxInflightPerConn = opts.maxInflightPerConn ?? 32;
     this.bannedHashtags = opts.bannedHashtags ?? new Set();
@@ -639,7 +670,9 @@ export class Relay {
 
       // Exclude auth-protected kinds from subscriptions that didn't explicitly request them,
       // and verify the subscriber is a party to the event (author or p-tagged).
-      if (this.authKinds.has(event.kind)) {
+      // Master-authed connections bypass both checks — they receive every
+      // auth-kind event, including via catch-all subscriptions.
+      if (this.authKinds.has(event.kind) && !this.isMaster(entry.ws)) {
         const hasKind = entry.filter.kinds?.includes(event.kind);
         if (!hasKind) return;
         if (!this.isAuthorizedForEvent(entry.ws, event)) return;
@@ -1002,6 +1035,12 @@ export class Relay {
       return { ok: true, filters };
     }
 
+    // Master pubkeys have unconditional read access to all auth kinds; skip
+    // every per-filter auth check.
+    if (this.isMaster(ws)) {
+      return { ok: true, filters };
+    }
+
     const result: Filter[] = [];
 
     for (const filter of filters) {
@@ -1094,10 +1133,24 @@ export class Relay {
    * the event's author or listed in a `p` tag.
    */
   private isAuthorizedForEvent(ws: RelayConn, event: NostrEvent): boolean {
+    if (this.isMaster(ws)) return true;
     const authed = ws.data.authedPubkeys;
     if (authed.has(event.pubkey)) return true;
     for (const tag of event.tags) {
       if (tag[0] === "p" && tag[1] && authed.has(tag[1])) return true;
+    }
+    return false;
+  }
+
+  /**
+   * Whether the connection has authenticated (NIP-42) as a configured master
+   * pubkey. Master connections have unconditional read access to every user's
+   * auth-protected events and bypass all auth-kind gating.
+   */
+  private isMaster(ws: RelayConn): boolean {
+    if (this.masterPubkeys.size === 0) return false;
+    for (const pk of ws.data.authedPubkeys) {
+      if (this.masterPubkeys.has(pk)) return true;
     }
     return false;
   }
@@ -1108,6 +1161,7 @@ export class Relay {
   private async handleCountMessage(
     subscriptionId: string,
     filters: Filter[],
+    includeAuthKinds = false,
   ): Promise<
     | { success: true; count: number; approximate?: boolean }
     | { success: false; error: { subscriptionId: string; message: string } }
@@ -1161,6 +1215,7 @@ export class Relay {
 
       const result = await this.storage.count(
         filters.map((f) => clampUntil(f)),
+        { includeAuthKinds },
       );
       return { success: true, ...result };
     } catch (error) {
@@ -1184,6 +1239,7 @@ export class Relay {
   private async handleReqMessage(
     subscriptionId: string,
     filters: Filter[],
+    includeAuthKinds = false,
   ): Promise<
     | { success: true; events: NostrEvent[] }
     | { success: false; error: { subscriptionId: string; message: string } }
@@ -1227,6 +1283,7 @@ export class Relay {
     try {
       const events = await this.storage.query(
         filters.map((f) => clampUntil(f)),
+        { includeAuthKinds },
       );
       return { success: true, events };
     } catch (error) {
@@ -1335,7 +1392,11 @@ export class Relay {
       filters = authCheck.filters;
 
       // Process the REQ message
-      const result = await this.handleReqMessage(subscriptionId, filters);
+      const result = await this.handleReqMessage(
+        subscriptionId,
+        filters,
+        this.isMaster(ws),
+      );
 
       if (!result.success) {
         this.sendMessage(ws, [
@@ -1432,7 +1493,11 @@ export class Relay {
       filters = authCheck.filters;
 
       // Process the COUNT message
-      const result = await this.handleCountMessage(subscriptionId, filters);
+      const result = await this.handleCountMessage(
+        subscriptionId,
+        filters,
+        this.isMaster(ws),
+      );
 
       if (!result.success) {
         this.sendMessage(ws, [
@@ -1691,8 +1756,11 @@ export class Relay {
       // Cheap pre-check via COUNT so oversized queries are rejected before
       // streaming any records. Skipped when `limit` already bounds the set
       // below the record cap.
+      const includeAuthKinds = this.isMaster(ws);
       if (!limited && this.storage.count) {
-        const { count } = await this.storage.count([syncFilter]);
+        const { count } = await this.storage.count([syncFilter], {
+          includeAuthKinds,
+        });
         if (count > this.negentropyMaxRecords) {
           this.sendNegErr(
             ws,
@@ -1706,6 +1774,7 @@ export class Relay {
 
       const items = await this.storage.queryItems(syncFilter, {
         maxItems: this.negentropyMaxRecords + 1,
+        includeAuthKinds,
       });
       // COUNT can be approximate — re-check the real size.
       if (items.length > this.negentropyMaxRecords) {

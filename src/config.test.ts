@@ -262,6 +262,57 @@ describe("Config", () => {
     });
   });
 
+  describe("masterPubkeys", () => {
+    const hex =
+      "4b1b7f0d17e5ee24ccd091afacfe7923329c21387f1f3ee14c3cf3fa31e2a813";
+
+    it("should default to an empty set when not set", () => {
+      const config = new Config(baseEnv());
+      assert.deepEqual(config.masterPubkeys, new Set());
+    });
+
+    it("should parse a comma-separated list of hex pubkeys", () => {
+      const config = new Config(
+        baseEnv([["MASTER_PUBKEYS", `${hex},${"a".repeat(64)}`]]),
+      );
+      assert.deepEqual(config.masterPubkeys, new Set([hex, "a".repeat(64)]));
+    });
+
+    it("should lowercase and trim hex entries", () => {
+      const config = new Config(
+        baseEnv([["MASTER_PUBKEYS", ` ${hex.toUpperCase()} `]]),
+      );
+      assert.deepEqual(config.masterPubkeys, new Set([hex]));
+    });
+
+    it("should return an empty set for an empty string", () => {
+      const config = new Config(baseEnv([["MASTER_PUBKEYS", ""]]));
+      assert.deepEqual(config.masterPubkeys, new Set());
+    });
+
+    it("should throw on a non-hex entry", () => {
+      assert.throws(
+        () => new Config(baseEnv([["MASTER_PUBKEYS", "not-a-pubkey"]])),
+        /MASTER_PUBKEYS/,
+      );
+    });
+
+    it("should throw on an npub entry", () => {
+      assert.throws(
+        () =>
+          new Config(
+            baseEnv([
+              [
+                "MASTER_PUBKEYS",
+                "npub1fvdh7rghuhhzfnxsjxh6elneyvefcgfc0u0nac2v8nel5v0z4qfs7ak6zx",
+              ],
+            ]),
+          ),
+        /MASTER_PUBKEYS/,
+      );
+    });
+  });
+
   describe("bannedHashtags", () => {
     it("should default to an empty set when not set", () => {
       const config = new Config(baseEnv());

@@ -147,6 +147,7 @@ const relay = new Relay(storage, {
   logger: log,
   relayUrl: config.relayUrl,
   authKinds: config.authKinds,
+  masterPubkeys: config.masterPubkeys,
   maxMessageLength: config.maxMessageLength,
   maxFilterValues: config.maxFilterValues,
   maxLimit: config.maxLimit,

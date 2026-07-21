@@ -4246,3 +4246,177 @@ describe("Relay with authKinds", () => {
     });
   });
 });
+
+describe("Relay with masterPubkeys", () => {
+  let relay: Relay;
+  let mockStorage: AnalyzableRelay;
+  let mockWs: RelayConn;
+  let sentMessages: unknown[][];
+  let masterPk: string;
+  let strangerPk: string;
+  /** Opts captured from the last storage.query / storage.count call. */
+  let lastQueryOpts: { includeAuthKinds?: boolean } | undefined;
+  let lastCountOpts: { includeAuthKinds?: boolean } | undefined;
+
+  beforeEach(() => {
+    sentMessages = [];
+    console.error = () => {};
+    console.log = () => {};
+    lastQueryOpts = undefined;
+    lastCountOpts = undefined;
+
+    mockStorage = {
+      event: async (_event: NostrEvent) => {},
+      query: async (
+        _filters: Filter[],
+        opts?: { includeAuthKinds?: boolean },
+      ) => {
+        lastQueryOpts = opts;
+        return [];
+      },
+      count: async (
+        _filters: Filter[],
+        opts?: { includeAuthKinds?: boolean },
+      ) => {
+        lastCountOpts = opts;
+        return { count: 7 };
+      },
+      remove: async (_filters: Filter[]) => {},
+    } as unknown as AnalyzableRelay;
+
+    masterPk = finalizeEvent(
+      { kind: 1, created_at: 0, tags: [], content: "" },
+      generateSecretKey(),
+    ).pubkey;
+    strangerPk = finalizeEvent(
+      { kind: 1, created_at: 0, tags: [], content: "" },
+      generateSecretKey(),
+    ).pubkey;
+
+    mockWs = {
+      send: (message: string) => {
+        sentMessages.push(JSON.parse(message));
+      },
+      data: {
+        subscriptions: new Map(),
+        challenge: "test-challenge",
+        challengeSent: false,
+        authedPubkeys: new Set(),
+      },
+    } as unknown as RelayConn;
+
+    relay = new Relay(mockStorage, {
+      relayUrl: "wss://relay.test/",
+      authKinds: new Set([4, 1059]),
+      masterPubkeys: new Set([masterPk]),
+    });
+  });
+
+  afterEach(() => {
+    console.error = () => {};
+    console.log = () => {};
+  });
+
+  it("lets a master REQ auth kinds for other users without authing as them", async () => {
+    mockWs.data.authedPubkeys.add(masterPk);
+
+    // Filter targets a stranger's DMs; the connection never authed as them.
+    await relay.handleReq(mockWs, "sub1", [
+      { kinds: [4], authors: [strangerPk] },
+    ]);
+
+    assert.ok(sentMessages.find((m) => m[0] === "EOSE"));
+    assert.ok(!sentMessages.find((m) => m[0] === "CLOSED"));
+  });
+
+  it("does not exclude auth kinds from a master's catch-all query", async () => {
+    mockWs.data.authedPubkeys.add(masterPk);
+
+    await relay.handleReq(mockWs, "sub1", [{}]);
+
+    assert.equal(lastQueryOpts?.includeAuthKinds, true);
+    assert.ok(sentMessages.find((m) => m[0] === "EOSE"));
+  });
+
+  it("returns auth-kind events a master is not a party to", async () => {
+    mockWs.data.authedPubkeys.add(masterPk);
+
+    const dm = finalizeEvent(
+      {
+        kind: 4,
+        created_at: Math.floor(Date.now() / 1000),
+        tags: [["p", strangerPk]],
+        content: "between two strangers",
+      },
+      generateSecretKey(),
+    );
+    mockStorage.query = async () => [dm];
+
+    await relay.handleReq(mockWs, "sub1", [{ ids: [dm.id] }]);
+
+    const eventMsgs = sentMessages.filter((m) => m[0] === "EVENT");
+    assert.equal(eventMsgs.length, 1);
+    assert.equal((eventMsgs[0][2] as NostrEvent).id, dm.id);
+    assert.ok(!sentMessages.find((m) => m[0] === "CLOSED"));
+  });
+
+  it("lets a master COUNT auth kinds for other users", async () => {
+    mockWs.data.authedPubkeys.add(masterPk);
+
+    await relay.handleCount(mockWs, "c1", [
+      { kinds: [4], authors: [strangerPk] },
+    ]);
+
+    assert.equal(lastCountOpts?.includeAuthKinds, true);
+    const count = sentMessages.find((m) => m[0] === "COUNT");
+    assert.ok(count);
+    assert.deepEqual(count[2], { count: 7 });
+  });
+
+  it("broadcasts auth-kind events to a master's catch-all subscription", async () => {
+    mockWs.data.authedPubkeys.add(masterPk);
+    relay.handleOpen(mockWs);
+    await relay.handleReq(mockWs, "sub1", [{}]); // catch-all
+    sentMessages.length = 0;
+
+    const sender = {
+      send: () => {},
+      data: {
+        subscriptions: new Map(),
+        challenge: "",
+        challengeSent: false,
+        authedPubkeys: new Set(),
+      },
+    } as unknown as RelayConn;
+    relay.handleOpen(sender);
+    const dm = finalizeEvent(
+      {
+        kind: 4,
+        created_at: Math.floor(Date.now() / 1000),
+        tags: [["p", strangerPk]],
+        content: "not addressed to the master",
+      },
+      generateSecretKey(),
+    );
+    await relay.handleEvent(sender, dm);
+    relay.flushBroadcasts();
+
+    const eventMsgs = sentMessages.filter((m) => m[0] === "EVENT");
+    assert.equal(eventMsgs.length, 1);
+    assert.equal((eventMsgs[0][2] as NostrEvent).kind, 4);
+  });
+
+  it("still gates a connection that has not authed as a master", async () => {
+    // Authed only as a non-master pubkey.
+    mockWs.data.authedPubkeys.add(strangerPk);
+
+    await relay.handleReq(mockWs, "sub1", [{ kinds: [4] }]);
+
+    const closed = sentMessages.find((m) => m[0] === "CLOSED");
+    assert.ok(closed);
+    // Authenticated, but not as a party — gated with "restricted:", and the
+    // storage query is never reached with the auth-kind bypass.
+    assert.ok((closed[2] as string).startsWith("restricted:"));
+    assert.notEqual(lastQueryOpts?.includeAuthKinds, true);
+  });
+});

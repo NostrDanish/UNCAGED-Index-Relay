@@ -1435,7 +1435,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
    */
   private buildQuery(
     filter: NostrFilter,
-    opts?: { includeReplaced?: boolean },
+    opts?: { includeReplaced?: boolean; includeAuthKinds?: boolean },
   ): Record<string, unknown> {
     const must: Record<string, unknown>[] = [
       { term: { deleted: false } }, // Always exclude deleted events
@@ -1468,10 +1468,12 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
       must.push({ terms: { kind: filter.kinds } });
     } else if (
       this.authKinds.size > 0 &&
+      !opts?.includeAuthKinds &&
       !(filter.ids && filter.ids.length > 0)
     ) {
       // Exclude auth-protected kinds from queries that don't explicitly request them.
       // When specific IDs are requested, skip exclusion — the relay layer handles auth.
+      // Master-authed connections pass `includeAuthKinds` to opt out entirely.
       mustNot.push({ terms: { kind: [...this.authKinds] } });
     }
 
@@ -1682,6 +1684,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
   private async queryFilter(
     filter: NostrFilter,
     _signal?: AbortSignal,
+    includeAuthKinds?: boolean,
   ): Promise<NostrEvent[]> {
     // If limit is 0, skip the query (realtime-only subscription)
     if (filter.limit === 0) {
@@ -1722,7 +1725,10 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
 
     // Auto-include historical versions for naddr-shaped filters.
     const includeReplaced = this.isHistoryFilter(filter);
-    const query = this.buildQuery(filter, { includeReplaced });
+    const query = this.buildQuery(filter, {
+      includeReplaced,
+      includeAuthKinds,
+    });
     const distinctAuthor = this.hasDistinctAuthor(filter);
 
     // Sort by created_at (newest first)
@@ -2459,7 +2465,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
    */
   async query(
     filters: NostrFilter[],
-    opts?: { signal?: AbortSignal },
+    opts?: { signal?: AbortSignal; includeAuthKinds?: boolean },
   ): Promise<NostrEvent[]> {
     const allEvents: NostrEvent[] = [];
     const seenIds = new Set<string>();
@@ -2469,7 +2475,11 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
         break;
       }
       try {
-        const events = await this.queryFilter(filter, opts?.signal);
+        const events = await this.queryFilter(
+          filter,
+          opts?.signal,
+          opts?.includeAuthKinds,
+        );
 
         // Deduplicate events across filters
         for (const event of events) {
@@ -2512,7 +2522,12 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
    */
   async queryItems(
     filter: NostrFilter,
-    opts?: { maxItems?: number; pageSize?: number; signal?: AbortSignal },
+    opts?: {
+      maxItems?: number;
+      pageSize?: number;
+      signal?: AbortSignal;
+      includeAuthKinds?: boolean;
+    },
   ): Promise<SyncItem[]> {
     const limit = typeof filter.limit === "number" ? filter.limit : undefined;
     const maxItems = Math.min(
@@ -2523,7 +2538,9 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     // With a limit we want the newest N, so iterate descending and reverse
     // at the end; otherwise iterate ascending directly.
     const order = limit === undefined ? ("asc" as const) : ("desc" as const);
-    const query = this.buildQuery(filter);
+    const query = this.buildQuery(filter, {
+      includeAuthKinds: opts?.includeAuthKinds,
+    });
     const items: SyncItem[] = [];
 
     opensearchQueriesCounter.inc({ type: "sync" });
@@ -2622,7 +2639,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
    */
   async count(
     filters: NostrFilter[],
-    opts?: { signal?: AbortSignal },
+    opts?: { signal?: AbortSignal; includeAuthKinds?: boolean },
   ): Promise<{ count: number; approximate?: boolean }> {
     let totalCount = 0;
     let approximate: boolean | undefined;
@@ -2633,7 +2650,9 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
       }
 
       try {
-        const query = this.buildQuery(filter);
+        const query = this.buildQuery(filter, {
+          includeAuthKinds: opts?.includeAuthKinds,
+        });
 
         opensearchQueriesCounter.inc({ type: "count" });
         const countEnd = opensearchQueryDurationHistogram.startTimer({
