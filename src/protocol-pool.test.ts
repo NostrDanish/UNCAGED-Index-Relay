@@ -18,6 +18,8 @@ describe("ProtocolPool", () => {
   const frames = new Map<number, unknown[][]>();
   /** Connections reported lost by worker-death recovery. */
   const lostConnIds: number[] = [];
+  /** Times the crash-loop guard fired (stubbed — default exits the process). */
+  let crashLoopCount = 0;
   /** Reads the mock's _search request counter (assigned in before()). */
   let countSearchRequests: () => number = () => 0;
   /** Reads the mock's _bulk request counter (assigned in before()). */
@@ -90,6 +92,9 @@ describe("ProtocolPool", () => {
     pool = new ProtocolPool(2, {
       sendFrame,
       onConnectionsLost: (connIds) => lostConnIds.push(...connIds),
+      onCrashLoop: () => {
+        crashLoopCount++;
+      },
       workerEnv: {
         RELAY_URL: "wss://relay.test/",
         NOSTR_NSEC: nip19.nsecEncode(generateSecretKey()),
@@ -238,6 +243,28 @@ describe("ProtocolPool", () => {
     await until(() => (frames.get(402)?.length ?? 0) > 0, 15_000);
     const frame = frames.get(402)?.[0] as unknown[];
     assert.equal(frame[0], "NOTICE");
+  });
+
+  it("trips the crash-loop guard after repeated worker deaths", async () => {
+    // The previous test already recorded one death. Kill the same slot
+    // until CRASH_LOOP_MAX_DEATHS (3) is reached within the window.
+    // biome-ignore lint/suspicious/noExplicitAny: test-only access to internals
+    const internals = pool as any;
+    assert.equal(crashLoopCount, 0);
+
+    while (crashLoopCount === 0) {
+      const victim = internals.workers[0] as Worker;
+      victim.terminate();
+      // Wait for the close handler to run (slot respawned = death recorded).
+      await until(() => internals.workers[0] !== victim);
+    }
+    assert.equal(crashLoopCount, 1);
+
+    // The stub doesn't exit, so the pool kept respawning: still serves.
+    pool.open(501);
+    pool.message(501, "not json");
+    await until(() => (frames.get(501)?.length ?? 0) > 0, 15_000);
+    assert.equal((frames.get(501)?.[0] as unknown[])[0], "NOTICE");
   });
 });
 

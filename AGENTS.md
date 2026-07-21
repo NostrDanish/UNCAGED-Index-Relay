@@ -34,7 +34,9 @@ strings**. It never parses, validates, serializes, or queries.
   sticky least-connections assignment of connections to protocol workers,
   batched string forwarding in both directions, accepted-event fan-out to
   sibling workers, worker supervision (a dead worker's connections are
-  closed with 1011 and the slot respawns; clients reconnect).
+  closed with 1011 and the slot respawns; clients reconnect; repeated
+  deaths within 30s trip a crash-loop guard that exits the process so
+  systemd restarts it with real backoff).
 - **Protocol workers** (`protocol-worker.ts`): a full `Relay` instance each.
   All per-message CPU lives here, including inline signature verification
   and language/sentiment/media analysis (`analyze.ts`) — no extra thread

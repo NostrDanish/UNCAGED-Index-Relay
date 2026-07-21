@@ -23,11 +23,26 @@
  * {@link broadcastExternal}.
  */
 
+import process from "node:process";
+
 import type { NostrRelayInfo } from "@nostrify/nostrify";
 import type { NostrEvent } from "nostr-tools";
 
 import type { FromIndexerWorker, ToIndexerWorker } from "./indexer-client.ts";
 import { errFields, Logger } from "./log.ts";
+
+/**
+ * Crash-loop guard: if workers (protocol or indexer) die this many times
+ * within {@link CRASH_LOOP_WINDOW_MS}, the pool gives up and exits the
+ * process instead of respawning forever. Immediate respawn is the right
+ * call for a rare poison-pill crash (the offending connection is closed
+ * before the slot respawns), but a *deterministic* startup failure would
+ * otherwise spin spawning workers at full CPU while serving nothing —
+ * exiting hands the problem to the supervisor (systemd), whose restart
+ * policy has real backoff and makes the outage visible.
+ */
+export const CRASH_LOOP_MAX_DEATHS = 3;
+export const CRASH_LOOP_WINDOW_MS = 30_000;
 
 /** Messages sent from the main thread to a protocol worker. */
 export type ToProtocolWorker =
@@ -70,6 +85,8 @@ export class ProtocolPool {
   private indexerReady!: Promise<void>;
   /** Set once dispose() runs, so "close" events stop triggering respawns. */
   private disposed = false;
+  /** Timestamps of recent worker deaths, for crash-loop detection. */
+  private deathTimes: number[] = [];
   /** connId → index of the owning worker. */
   private connWorker = new Map<number, number>();
   /** Open-connection count per worker, for least-loaded assignment. */
@@ -89,6 +106,7 @@ export class ProtocolPool {
   private readonly sendFrame: (connId: number, frame: string) => void;
   private readonly onDirty?: (dirty: DirtyBatch) => void;
   private readonly onConnectionsLost?: (connIds: number[]) => void;
+  private readonly onCrashLoop: () => void;
   private readonly workerEnv?: Record<string, string>;
 
   constructor(
@@ -104,6 +122,12 @@ export class ProtocolPool {
        * clients reconnect (onto the respawned worker).
        */
       onConnectionsLost?: (connIds: number[]) => void;
+      /**
+       * Called when the crash-loop threshold is hit (tests override this).
+       * Default: log has already fired; exit so the supervisor restarts
+       * the whole process with proper backoff.
+       */
+      onCrashLoop?: () => void;
       logger?: Logger;
       /**
        * Environment for the worker threads (tests use this to point workers
@@ -119,6 +143,7 @@ export class ProtocolPool {
     this.sendFrame = opts.sendFrame;
     this.onDirty = opts.onDirty;
     this.onConnectionsLost = opts.onConnectionsLost;
+    this.onCrashLoop = opts.onCrashLoop ?? (() => process.exit(1));
     this.workerEnv = opts.workerEnv;
 
     this.connCounts = new Array(size).fill(0);
@@ -229,8 +254,30 @@ export class ProtocolPool {
     this.connectIndexer(workerIndex);
   }
 
+  /**
+   * Record one worker death (protocol or indexer) in the sliding window;
+   * trip the crash-loop guard when the threshold is reached. May not
+   * return (default onCrashLoop exits the process).
+   */
+  private recordDeath(worker: string): void {
+    const now = Date.now();
+    this.deathTimes.push(now);
+    while (this.deathTimes[0] < now - CRASH_LOOP_WINDOW_MS) {
+      this.deathTimes.shift();
+    }
+    if (this.deathTimes.length >= CRASH_LOOP_MAX_DEATHS) {
+      this.log.error("worker_crash_loop", {
+        worker,
+        deaths: this.deathTimes.length,
+        window_ms: CRASH_LOOP_WINDOW_MS,
+      });
+      this.onCrashLoop();
+    }
+  }
+
   /** Recover from a protocol worker dying: drop its connections, respawn. */
   private handleWorkerDeath(workerIndex: number): void {
+    this.recordDeath(String(workerIndex));
     const lost: number[] = [];
     for (const [connId, owner] of this.connWorker) {
       if (owner === workerIndex) lost.push(connId);
@@ -246,9 +293,10 @@ export class ProtocolPool {
       connections_lost: lost.length,
     });
 
-    // Respawn immediately: worker startup cost (~module eval + wasm init)
-    // is a natural backoff against tight crash loops, and new opens routed
-    // to this slot queue in the worker's message queue until it's ready.
+    // Respawn immediately: a rare crash (poison-pill message) recovers
+    // fastest this way, and new opens routed to this slot queue in the
+    // worker's message queue until it's ready. Persistent failures are
+    // handled by the crash-loop guard in recordDeath, not by backoff here.
     this.spawnWorker(workerIndex);
 
     if (lost.length > 0) {
@@ -301,6 +349,7 @@ export class ProtocolPool {
     indexer.addEventListener("close", () => {
       if (this.disposed || this.indexer !== indexer) return;
       this.log.error("indexer_worker_died", {});
+      this.recordDeath("indexer");
       // Respawn and re-wire every protocol worker with a fresh port. Each
       // IndexerClient rejects its outstanding writes on rebind (they were
       // lost with the old indexer), which surfaces as OK false to clients.
