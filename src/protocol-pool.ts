@@ -26,10 +26,12 @@
 import type { NostrRelayInfo } from "@nostrify/nostrify";
 import type { NostrEvent } from "nostr-tools";
 
+import type { FromIndexerWorker, ToIndexerWorker } from "./indexer-client.ts";
 import { errFields, Logger } from "./log.ts";
 
 /** Messages sent from the main thread to a protocol worker. */
 export type ToProtocolWorker =
+  | { t: "indexer_port"; port: MessagePort }
   | { t: "open"; id: number; ip?: string; ua?: string }
   | { t: "msgs"; msgs: Array<[id: number, data: string]> }
   | { t: "close"; id: number }
@@ -41,13 +43,6 @@ export type FromProtocolWorker =
   | { t: "ready"; relayInfo: NostrRelayInfo }
   | { t: "frames"; frames: Array<[id: number, frame: string]> }
   | { t: "accepted"; events: NostrEvent[] }
-  | {
-      t: "dirty";
-      ids: string[];
-      pubkeys: string[];
-      addrs: string[];
-      identifiers: string[];
-    }
   | { t: "metrics"; reqId: number; text: string };
 
 /** Dirty-reference batch drained from a worker's storage layer. */
@@ -69,6 +64,10 @@ export class ProtocolPool {
   private workers: Worker[];
   /** Resolves with the worker's relayInfo once it posts "ready". */
   private workerReady: Promise<NostrRelayInfo>[];
+  /** The single indexer worker owning all OpenSearch writes. */
+  private indexer: Worker;
+  /** Resolves once the indexer posts "ready". */
+  private indexerReady: Promise<void>;
   /** connId → index of the owning worker. */
   private connWorker = new Map<number, number>();
   /** Open-connection count per worker, for least-loaded assignment. */
@@ -150,9 +149,6 @@ export class ProtocolPool {
               } satisfies ToProtocolWorker);
             }
             break;
-          case "dirty":
-            this.onDirty?.(msg);
-            break;
           case "metrics": {
             const pending = this.metricsPending.get(msg.reqId);
             if (pending) {
@@ -178,6 +174,63 @@ export class ProtocolPool {
 
     this.connCounts = new Array(size).fill(0);
     this.queues = Array.from({ length: size }, () => []);
+
+    // -------------------------------------------------------------------
+    // Indexer worker: single owner of all OpenSearch writes. Each protocol
+    // worker gets a dedicated MessageChannel port to it, so indexing
+    // traffic bypasses the main thread entirely.
+    // -------------------------------------------------------------------
+    const indexerUrl = new URL("indexer-worker.ts", import.meta.url).href;
+    this.indexer = new Worker(
+      indexerUrl,
+      opts.workerEnv ? { env: opts.workerEnv } : undefined,
+    );
+    let markIndexerReady = () => {};
+    let markIndexerFailed: (err: Error) => void = () => {};
+    this.indexerReady = new Promise<void>((resolve, reject) => {
+      markIndexerReady = resolve;
+      markIndexerFailed = reject;
+    });
+    this.indexer.onmessage = (event: MessageEvent<FromIndexerWorker>) => {
+      const msg = event.data;
+      switch (msg.t) {
+        case "ready":
+          markIndexerReady();
+          break;
+        case "dirty":
+          this.onDirty?.(msg);
+          break;
+        case "metrics": {
+          const pending = this.metricsPending.get(msg.reqId);
+          if (pending) {
+            this.metricsPending.delete(msg.reqId);
+            clearTimeout(pending.timer);
+            pending.resolve(msg.text);
+          }
+          break;
+        }
+      }
+    };
+    this.indexer.onerror = (error) => {
+      this.log.error("indexer_worker_error", { err_msg: error.message });
+      markIndexerFailed(new Error("indexer worker failed to start"));
+    };
+
+    // Wire each protocol worker to the indexer. Both messages are posted
+    // while the workers may still be evaluating their modules; the ports
+    // are delivered once their onmessage handlers install (worker message
+    // queues hold them until then).
+    for (const worker of this.workers) {
+      const channel = new MessageChannel();
+      worker.postMessage(
+        { t: "indexer_port", port: channel.port1 } satisfies ToProtocolWorker,
+        [channel.port1],
+      );
+      this.indexer.postMessage(
+        { t: "port", port: channel.port2 } satisfies ToIndexerWorker,
+        [channel.port2],
+      );
+    }
   }
 
   /** Number of workers in the pool. */
@@ -186,11 +239,15 @@ export class ProtocolPool {
   }
 
   /**
-   * Wait for every worker to finish initializing. Returns the relay info
-   * document (identical across workers — same config) for NIP-11 serving.
+   * Wait for every worker (protocol + indexer) to finish initializing.
+   * Returns the relay info document (identical across workers — same
+   * config) for NIP-11 serving.
    */
   async start(): Promise<NostrRelayInfo> {
-    const infos = await Promise.all(this.workerReady);
+    const [infos] = await Promise.all([
+      Promise.all(this.workerReady),
+      this.indexerReady,
+    ]);
     return infos[0];
   }
 
@@ -259,27 +316,36 @@ export class ProtocolPool {
   }
 
   /**
-   * Collect each worker's Prometheus exposition text. Workers that don't
-   * answer within `timeoutMs` are skipped (a wedged worker must not be able
-   * to hang the /metrics endpoint).
+   * Collect each thread's Prometheus exposition text (protocol workers and
+   * the indexer). Workers that don't answer within `timeoutMs` are skipped
+   * (a wedged worker must not be able to hang the /metrics endpoint).
    */
   metrics(timeoutMs = 2_000): Promise<Array<{ label: string; text: string }>> {
-    const collected = this.workers.map((worker, i) => {
+    const request = (
+      worker: Worker,
+      label: string,
+    ): Promise<{ label: string; text: string } | null> => {
       const reqId = this.nextMetricsReq++;
-      return new Promise<{ label: string; text: string } | null>((resolve) => {
+      return new Promise((resolve) => {
         const timer = setTimeout(() => {
           this.metricsPending.delete(reqId);
-          this.log.warn("protocol_worker_metrics_timeout", { worker: i });
+          this.log.warn("worker_metrics_timeout", { worker: label });
           resolve(null);
         }, timeoutMs);
         timer.unref?.();
         this.metricsPending.set(reqId, {
-          resolve: (text) => resolve({ label: String(i), text }),
+          resolve: (text) => resolve({ label, text }),
           timer,
         });
-        worker.postMessage({ t: "metrics", reqId } satisfies ToProtocolWorker);
+        worker.postMessage({ t: "metrics", reqId });
       });
-    });
+    };
+
+    const collected = this.workers.map((worker, i) =>
+      request(worker, String(i)),
+    );
+    collected.push(request(this.indexer, "indexer"));
+
     return Promise.all(collected).then((results) =>
       results.filter((r): r is { label: string; text: string } => r !== null),
     );
@@ -292,6 +358,8 @@ export class ProtocolPool {
   async dispose(): Promise<void> {
     const workers = this.workers;
     const ready = this.workerReady;
+    const indexer = this.indexer;
+    const indexerReady = this.indexerReady;
     this.workers = [];
     this.workerReady = [];
     for (const pending of this.metricsPending.values()) {
@@ -300,10 +368,12 @@ export class ProtocolPool {
     }
     this.metricsPending.clear();
     try {
-      await Promise.all(ready);
+      await Promise.all([Promise.all(ready), indexerReady]);
     } catch (err) {
       this.log.warn("protocol_pool_ready_failed", errFields(err));
     }
+    // Protocol workers first (they stop producing writes), then the indexer.
     await Promise.all(workers.map((worker) => worker.terminate()));
+    await indexer.terminate();
   }
 }

@@ -18,6 +18,8 @@ describe("ProtocolPool", () => {
   const frames = new Map<number, unknown[][]>();
   /** Reads the mock's _search request counter (assigned in before()). */
   let countSearchRequests: () => number = () => 0;
+  /** Reads the mock's _bulk request counter (assigned in before()). */
+  let countBulkRequests: () => number = () => 0;
 
   function sendFrame(connId: number, frame: string): void {
     let list = frames.get(connId);
@@ -58,6 +60,7 @@ describe("ProtocolPool", () => {
     // Mock OpenSearch: empty results for searches, success for everything
     // else. Enough for REQ (subscription setup) and bulk writes.
     let searchRequests = 0;
+    let bulkRequests = 0;
     mockOpenSearch = serve({
       port: 0,
       fetch(req) {
@@ -70,12 +73,14 @@ describe("ProtocolPool", () => {
           });
         }
         if (url.pathname.includes("_bulk")) {
+          bulkRequests++;
           return Response.json({ took: 1, errors: false, items: [] });
         }
         return Response.json({ acknowledged: true });
       },
     });
     countSearchRequests = () => searchRequests;
+    countBulkRequests = () => bulkRequests;
 
     // Workers construct Config from their environment at module init. Bun
     // workers snapshot env at process start, so runtime process.env
@@ -166,12 +171,37 @@ describe("ProtocolPool", () => {
     );
   });
 
-  it("collects per-worker metrics exposition", async () => {
+  it("stores a valid EVENT through the indexer worker (OK true)", async () => {
+    // Kind 1 goes through the full write path: protocol worker verifies,
+    // then RPCs the indexer over its MessageChannel port; the indexer's
+    // bulk flush against the mock confirms, and OK true comes back.
+    const event = createEvent({ kind: 1, content: "hello indexer" });
+    pool.open(210);
+    pool.message(210, JSON.stringify(["EVENT", event]));
+    await until(() =>
+      (frames.get(210) ?? []).some((f) => f[0] === "OK" && f[1] === event.id),
+    );
+    const ok = (frames.get(210) ?? []).find(
+      (f) => f[0] === "OK" && f[1] === event.id,
+    ) as unknown[];
+    assert.equal(ok[2], true, `expected OK true, got: ${JSON.stringify(ok)}`);
+    assert.ok(countBulkRequests() > 0, "mock OpenSearch got no bulk request");
+  });
+
+  it("collects per-worker metrics exposition including the indexer", async () => {
     const collected = await pool.metrics();
-    assert.equal(collected.length, 2);
-    assert.deepEqual(collected.map((c) => c.label).sort(), ["0", "1"]);
-    for (const { text } of collected) {
-      assert.ok(text.includes("ditto_relay_messages_total"));
+    assert.equal(collected.length, 3);
+    assert.deepEqual(collected.map((c) => c.label).sort(), [
+      "0",
+      "1",
+      "indexer",
+    ]);
+    for (const { label, text } of collected) {
+      if (label === "indexer") {
+        assert.ok(text.includes("ditto_opensearch_bulk_queue_size"));
+      } else {
+        assert.ok(text.includes("ditto_relay_messages_total"));
+      }
     }
   });
 

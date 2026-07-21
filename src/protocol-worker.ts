@@ -25,13 +25,20 @@ import type { NostrEvent } from "nostr-tools";
 
 import { createAnalyzer } from "./analyze.ts";
 import { Config } from "./config.ts";
+import { IndexerClient } from "./indexer-client.ts";
 import { errFields, Logger } from "./log.ts";
 import { register } from "./metrics.ts";
 import { OpenSearchRelay } from "./opensearch.ts";
 import type { ClientOptions } from "./opensearch-client.ts";
 import { Client as OpenSearchClient } from "./opensearch-client.ts";
 import type { FromProtocolWorker, ToProtocolWorker } from "./protocol-pool.ts";
-import { createConnData, Relay, type RelayConn } from "./relay.ts";
+import {
+  type AnalyzableRelay,
+  createConnData,
+  Relay,
+  type RelayConn,
+  type SyncableStorage,
+} from "./relay.ts";
 
 // ---------------------------------------------------------------------------
 // Initialise from environment (same .env as the main process)
@@ -54,10 +61,10 @@ if (config.opensearchUsername && config.opensearchPassword) {
     password: config.opensearchPassword,
   };
 }
-// Separate read and write clients so bulk flushes can't starve queries —
-// same split the single-threaded server used.
+// Reads only: this worker's OpenSearchRelay serves REQ/COUNT/negentropy
+// queries. All writes go through the IndexerClient to the single indexer
+// worker, so no write client is needed here.
 const opensearchReadClient = new OpenSearchClient(opensearchClientOptions);
-const opensearchWriteClient = new OpenSearchClient(opensearchClientOptions);
 
 const opensearchRelay = new OpenSearchRelay(opensearchReadClient, {
   indexName: config.opensearchIndex,
@@ -65,13 +72,32 @@ const opensearchRelay = new OpenSearchRelay(opensearchReadClient, {
   historyKindsWhitelist: config.historyKindsWhitelist,
   historyKindsExcluded: config.historyKindsExcluded,
   authKinds: config.authKinds,
-  writeClient: opensearchWriteClient,
   tagValueMaxCountPerName: config.tagValueMaxCountPerName,
-  bulkMaxQueue: config.bulkMaxQueue,
   defaultLimit: config.defaultLimit,
   maxLimit: config.maxLimit,
   logger: log,
 });
+
+// Write half of storage: RPC to the indexer worker over a MessageChannel
+// port (transferred by the pool right after spawn — see "indexer_port"
+// below). The pending cap mirrors the indexer's bulk queue cap so
+// StorageOverloaded backpressure semantics are unchanged.
+const indexer = new IndexerClient({ maxPending: config.bulkMaxQueue });
+
+/**
+ * The storage the Relay sees: reads answered locally, writes forwarded to
+ * the indexer worker. `event()` still resolves only when the indexer's
+ * bulk flush confirms the write, so OK responses reflect durability.
+ */
+const storage: AnalyzableRelay & SyncableStorage = {
+  req: (filters, opts) => opensearchRelay.req(filters, opts),
+  query: (filters, opts) => opensearchRelay.query(filters, opts),
+  count: (filters, opts) => opensearchRelay.count(filters, opts),
+  queryItems: (filter, opts) => opensearchRelay.queryItems(filter, opts),
+  event: (event, opts) => indexer.event(event, opts?.analysis),
+  remove: (filters) => indexer.remove(filters),
+  close: () => opensearchRelay.close(),
+};
 
 // Signature verification + language/sentiment/media analysis runs inline on
 // this thread. The wasm verify is the dominant cost (~fraction of a ms) and
@@ -115,7 +141,7 @@ function flushOut(): void {
 // Relay + connection registry
 // ---------------------------------------------------------------------------
 
-const relay = new Relay(opensearchRelay, {
+const relay = new Relay(storage, {
   analyze: (event, opts) => analyze(event, opts),
   logger: log,
   relayUrl: config.relayUrl,
@@ -157,52 +183,16 @@ function openConn(id: number, ip?: string, userAgent?: string): void {
 }
 
 // ---------------------------------------------------------------------------
-// Dirty-reference forwarding for the background stats worker
-// ---------------------------------------------------------------------------
-
-if (config.statsEnabled) {
-  const pendingDirtyAddrs = new Set<string>();
-  const pendingDirtyIdentifiers = new Set<string>();
-  opensearchRelay.onDirtyAddrs = (addrs) => {
-    for (const addr of addrs) pendingDirtyAddrs.add(addr);
-  };
-  opensearchRelay.onDirtyIdentifiers = (ids) => {
-    for (const id of ids) pendingDirtyIdentifiers.add(id);
-  };
-
-  setInterval(() => {
-    const dirty = opensearchRelay.drainDirty();
-    const addrs = [...pendingDirtyAddrs];
-    pendingDirtyAddrs.clear();
-    const identifiers = [...pendingDirtyIdentifiers];
-    pendingDirtyIdentifiers.clear();
-
-    if (
-      dirty.ids.length === 0 &&
-      dirty.pubkeys.length === 0 &&
-      addrs.length === 0 &&
-      identifiers.length === 0
-    ) {
-      return;
-    }
-
-    self.postMessage({
-      t: "dirty",
-      ids: dirty.ids,
-      pubkeys: dirty.pubkeys,
-      addrs,
-      identifiers,
-    } satisfies FromProtocolWorker);
-  }, 2_000);
-}
-
-// ---------------------------------------------------------------------------
 // Message handling
 // ---------------------------------------------------------------------------
 
 self.onmessage = (event: MessageEvent<ToProtocolWorker>) => {
   const msg = event.data;
   switch (msg.t) {
+    case "indexer_port":
+      indexer.bind(msg.port);
+      break;
+
     case "open":
       openConn(msg.id, msg.ip, msg.ua);
       break;
