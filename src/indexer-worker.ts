@@ -26,7 +26,7 @@ import type {
   ToIndexerWorker,
 } from "./indexer-client.ts";
 import { Logger } from "./log.ts";
-import { register } from "./metrics.ts";
+import { register, startRuntimeMetrics } from "./metrics.ts";
 import { OpenSearchRelay } from "./opensearch.ts";
 import type { ClientOptions } from "./opensearch-client.ts";
 import { Client as OpenSearchClient } from "./opensearch-client.ts";
@@ -211,5 +211,9 @@ self.onmessage = (event: MessageEvent<ToIndexerWorker>) => {
 };
 
 self.postMessage({ t: "ready" } satisfies FromIndexerWorker);
+
+// Sample this worker's event-loop lag for /metrics (memory is process-wide
+// and reported by the main thread).
+startRuntimeMetrics(5_000, { memory: false });
 
 log.info("indexer_worker_started");

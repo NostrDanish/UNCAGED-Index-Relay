@@ -27,7 +27,7 @@ import { createAnalyzer } from "./analyze.ts";
 import { Config } from "./config.ts";
 import { IndexerClient } from "./indexer-client.ts";
 import { errFields, Logger } from "./log.ts";
-import { register } from "./metrics.ts";
+import { register, startRuntimeMetrics } from "./metrics.ts";
 import { OpenSearchRelay } from "./opensearch.ts";
 import type { ClientOptions } from "./opensearch-client.ts";
 import { Client as OpenSearchClient } from "./opensearch-client.ts";
@@ -247,5 +247,10 @@ self.postMessage({
   t: "ready",
   relayInfo: relay.getRelayInfo(),
 } satisfies FromProtocolWorker);
+
+// Sample this worker's event-loop lag for /metrics — the per-worker signal
+// for detecting a hot or wedged protocol worker. Memory is skipped: RSS is
+// process-wide and the main thread already reports it.
+startRuntimeMetrics(5_000, { memory: false });
 
 log.info("protocol_worker_started");

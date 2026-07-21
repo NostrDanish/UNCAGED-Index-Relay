@@ -532,19 +532,30 @@ export const jsHeapUsedGauge = new Gauge({
 
 /**
  * Start sampling runtime health metrics. The lag gauge measures how much
- * later than scheduled each tick fires — a direct signal of main-thread
- * event-loop saturation. Returns a function that stops sampling.
+ * later than scheduled each tick fires — a direct signal of event-loop
+ * saturation on whatever thread this runs on. Returns a function that
+ * stops sampling.
+ *
+ * @param opts.memory Sample RSS/heap too. Only the main thread should do
+ *   this: `process.memoryUsage()` is process-wide, so per-worker samples
+ *   would just duplicate the same number under every worker label.
  */
-export function startRuntimeMetrics(intervalMs = 5_000): () => void {
+export function startRuntimeMetrics(
+  intervalMs = 5_000,
+  opts?: { memory?: boolean },
+): () => void {
+  const memory = opts?.memory ?? true;
   let expected = performance.now() + intervalMs;
   const timer = setInterval(() => {
     const now = performance.now();
     eventLoopLagGauge.set(Math.max(0, (now - expected) / 1000));
     expected = now + intervalMs;
 
-    const mem = process.memoryUsage();
-    processRssGauge.set(mem.rss);
-    jsHeapUsedGauge.set(mem.heapUsed);
+    if (memory) {
+      const mem = process.memoryUsage();
+      processRssGauge.set(mem.rss);
+      jsHeapUsedGauge.set(mem.heapUsed);
+    }
   }, intervalMs);
   timer.unref?.();
   return () => clearInterval(timer);
