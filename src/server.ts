@@ -1,8 +1,6 @@
-import type { Buffer } from "node:buffer";
 import { readFile } from "node:fs/promises";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
-import type { NostrRelayInfo } from "@nostrify/nostrify";
 import type { ServerWebSocket } from "bun";
 import { serve } from "bun";
 import { Config } from "./config.ts";
@@ -39,23 +37,6 @@ interface WebSocketData {
 /** Monotonic connection ID source, unique for the process lifetime. */
 let nextConnId = 1;
 
-/** The surface the WebSocket/HTTP handlers talk to, over the ProtocolPool. */
-interface Frontend {
-  relayInfo: NostrRelayInfo;
-  open(ws: ServerWebSocket<WebSocketData>): void;
-  message(ws: ServerWebSocket<WebSocketData>, message: string | Buffer): void;
-  close(ws: ServerWebSocket<WebSocketData>): void;
-  /** Prometheus exposition text for /metrics (all threads). */
-  metrics(): Promise<string>;
-  /**
-   * Inject events (from the background stats worker) for broadcast, as
-   * serialized NostrEvent JSON — pre-stringified by the bg worker so the
-   * main thread forwards them without touching the payload.
-   */
-  broadcastExternal(events: string[]): void;
-  dispose(): Promise<void>;
-}
-
 const opensearchClientOptions: ClientOptions = {
   node: config.opensearchNode,
 };
@@ -68,8 +49,8 @@ if (config.opensearchUsername && config.opensearchPassword) {
 
 /**
  * Forwards dirty-reference batches to the background stats worker. Assigned
- * when the worker is spawned (below); frontends call it via this indirection
- * because the worker needs the frontend first (for broadcastExternal).
+ * when the worker is spawned (below); the pool calls it via this indirection
+ * because the pool is created before the worker exists.
  */
 let forwardDirty: ((dirty: DirtyBatch) => void) | undefined;
 
@@ -118,43 +99,6 @@ const pool = new ProtocolPool(workerCount, {
 const relayInfo = await pool.start();
 log.info("protocol_pool_started", { workers: workerCount });
 
-const frontend: Frontend = {
-  relayInfo,
-  open(ws) {
-    const connId = nextConnId++;
-    ws.data.connId = connId;
-    sockets.set(connId, ws);
-    pool.open(connId, ws.data.ip, ws.data.userAgent);
-  },
-  message(ws, message) {
-    const connId = ws.data.connId;
-    if (connId === undefined) return;
-    // Normalize to a string on this side of the boundary: strings cross
-    // postMessage as flat copies, and the Relay parses from string anyway.
-    pool.message(
-      connId,
-      typeof message === "string" ? message : message.toString(),
-    );
-  },
-  close(ws) {
-    const connId = ws.data.connId;
-    if (connId === undefined) return;
-    sockets.delete(connId);
-    pool.close(connId);
-  },
-  async metrics() {
-    const [main, workers] = await Promise.all([
-      register.metrics(),
-      pool.metrics(),
-    ]);
-    return mergeExposition([{ label: "main", text: main }, ...workers]);
-  },
-  broadcastExternal(events) {
-    pool.broadcastExternal(events);
-  },
-  dispose: () => pool.dispose(),
-};
-
 // ---------------------------------------------------------------------------
 // Background worker — score recomputation, NIP-85, and trends run off-thread
 // so they don't block the WebSocket event loop.
@@ -172,7 +116,7 @@ if (config.statsEnabled) {
   worker.onmessage = (event: MessageEvent) => {
     const msg = event.data;
     if (msg.type === "broadcast") {
-      frontend.broadcastExternal(msg.events);
+      pool.broadcastExternal(msg.events);
     }
   };
 
@@ -198,12 +142,8 @@ startRuntimeMetrics();
 
 // Pre-render the HTML landing page and the NIP-11 document (relay info is
 // static after startup, so both are cached as strings).
-const landingPageHtml = renderLandingPage(
-  frontend.relayInfo,
-  config.relayUrl,
-  log,
-);
-const nip11Json = JSON.stringify(frontend.relayInfo, null, 2);
+const landingPageHtml = renderLandingPage(relayInfo, config.relayUrl, log);
+const nip11Json = JSON.stringify(relayInfo, null, 2);
 
 // Pre-load static assets into memory.
 const faviconIco = await readFile(
@@ -261,9 +201,17 @@ const server = serve<WebSocketData>({
         });
       }
 
-      // Prometheus metrics endpoint
+      // Prometheus metrics endpoint: merge this thread's exposition with
+      // every protocol worker's.
       if (url.pathname === "/metrics") {
-        const metrics = await frontend.metrics();
+        const [main, workers] = await Promise.all([
+          register.metrics(),
+          pool.metrics(),
+        ]);
+        const metrics = mergeExposition([
+          { label: "main", text: main },
+          ...workers,
+        ]);
         return new Response(metrics, {
           headers: { "Content-Type": register.contentType },
         });
@@ -302,15 +250,28 @@ const server = serve<WebSocketData>({
     maxPayloadLength: config.maxMessageLength,
 
     open(ws) {
-      frontend.open(ws);
+      const connId = nextConnId++;
+      ws.data.connId = connId;
+      sockets.set(connId, ws);
+      pool.open(connId, ws.data.ip, ws.data.userAgent);
     },
 
     message(ws, message) {
-      frontend.message(ws, message);
+      const connId = ws.data.connId;
+      if (connId === undefined) return;
+      // Normalize to a string on this side of the boundary: strings cross
+      // postMessage as flat copies, and the Relay parses from string anyway.
+      pool.message(
+        connId,
+        typeof message === "string" ? message : message.toString(),
+      );
     },
 
     close(ws) {
-      frontend.close(ws);
+      const connId = ws.data.connId;
+      if (connId === undefined) return;
+      sockets.delete(connId);
+      pool.close(connId);
     },
   },
 });
@@ -327,7 +288,7 @@ async function shutdown() {
   server.stop();
   // Bounded cleanup: waiting on worker teardown keeps the exit clean, but a
   // wedged worker must never be able to hang the shutdown path.
-  const cleanup = Promise.all([frontend.dispose(), bgWorker?.terminate()]);
+  const cleanup = Promise.all([pool.dispose(), bgWorker?.terminate()]);
   const timeout = new Promise((resolve) => setTimeout(resolve, 5_000));
   await Promise.race([cleanup, timeout]);
   process.exit(0);
