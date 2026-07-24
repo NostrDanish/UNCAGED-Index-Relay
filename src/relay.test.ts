@@ -1495,10 +1495,11 @@ describe("Relay", () => {
         assert.equal(last[0], "EOSE");
       });
 
-      it("accepts REQ with unknown top-level key (silently dropped)", async () => {
-        // NSchema.filter() uses looseObject + transform that strips unknowns,
-        // so an extra key doesn't cause rejection. The key simply isn't passed
-        // downstream to OpenSearch.
+      it("rejects REQ with unknown top-level key", async () => {
+        // NSchema.filter() rejects unrecognized top-level keys rather than
+        // stripping them. Serving the subscription with the constraint
+        // silently dropped would return more events than the client asked
+        // for; NIP-01 sanctions CLOSED for a filter with unknown elements.
         mockStorage.query = async () => [];
         const message = JSON.stringify([
           "REQ",
@@ -1507,7 +1508,22 @@ describe("Relay", () => {
         ]);
         await relay.handleMessage(mockWs, message);
         const last = sentMessages[sentMessages.length - 1];
-        assert.equal(last[0], "EOSE");
+        assert.equal(last[0], "CLOSED");
+      });
+
+      it("rejects REQ with a non-string tag filter value", async () => {
+        // Regression: a `#E: [null]` filter used to pass validation and reach
+        // OpenSearch, which rejected the query with a 400. Tag filter values
+        // must be strings.
+        mockStorage.query = async () => [];
+        const message = JSON.stringify([
+          "REQ",
+          "sub1",
+          { kinds: [1111], "#E": [null] },
+        ]);
+        await relay.handleMessage(mockWs, message);
+        const last = sentMessages[sentMessages.length - 1];
+        assert.equal(last[0], "CLOSED");
       });
 
       it("rejects COUNT with invalid filter", async () => {

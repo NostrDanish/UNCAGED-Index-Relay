@@ -35,6 +35,34 @@ describe("Client", () => {
         globalThis.fetch = originalFetch;
       }
     });
+
+    it("throws on a 4xx instead of returning an error body", async () => {
+      // Regression: OpenSearch answers a malformed query with 400 and a
+      // `{error, status}` body. Returning that as a search response cast to
+      // the success type surfaced later as a TypeError on `hits.hits`.
+      const originalFetch = globalThis.fetch;
+      globalThis.fetch = Object.assign(
+        async (_input: string | URL | Request, _init?: RequestInit) =>
+          new Response(
+            JSON.stringify({
+              error: { type: "parsing_exception" },
+              status: 400,
+            }),
+            { status: 400, headers: { "Content-Type": "application/json" } },
+          ),
+        { preconnect: (_url: string | URL) => {} },
+      ) as typeof fetch;
+
+      try {
+        const client = new Client({ node: "http://localhost:9200" });
+        await assert.rejects(
+          () => client.search({ index: "test", body: {} }),
+          /responded 400/,
+        );
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    });
   });
 
   describe("msearch", () => {

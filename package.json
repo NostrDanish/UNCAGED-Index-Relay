@@ -8,7 +8,7 @@
     "lint:fix": "biome check --write ."
   },
   "dependencies": {
-    "@nostrify/nostrify": "^0.49.0",
+    "@nostrify/nostrify": "^0.54.0",
     "@opensearch-project/opensearch": "^3.5.1",
     "nostr-tools": "^2.20.0",
     "nostr-wasm": "^0.1.0",

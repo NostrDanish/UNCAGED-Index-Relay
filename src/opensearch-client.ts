@@ -211,6 +211,28 @@ export class Client {
   // Document APIs
   // ---------------------------------------------------------------------------
 
+  /**
+   * Throw unless the response carries the success shape the caller expects.
+   *
+   * `_request` deliberately lets 4xx through, because some callers treat them
+   * as data (`indices.exists` reads 404 as "no index"). Query endpoints have
+   * no such case: a 4xx means OpenSearch rejected the query and the body is
+   * `{error, status}` with none of the fields the caller is about to read.
+   * Without this, a malformed query returns an error body cast to a success
+   * type, and the failure surfaces later as a `TypeError` on a missing field.
+   */
+  private async _assertOk(
+    res: Response,
+    method: string,
+    path: string,
+  ): Promise<void> {
+    if (res.ok) return;
+    const text = await res.text();
+    throw new Error(
+      `OpenSearch ${method} ${path} responded ${res.status}: ${text}`,
+    );
+  }
+
   /** POST /{index}/_search */
   async search<TSource = unknown>(params: {
     index: string;
@@ -222,6 +244,7 @@ export class Client {
       `/${encodeURIComponent(params.index)}/_search`,
       params.body,
     );
+    await this._assertOk(res, "POST", `/${params.index}/_search`);
     const body = (await res.json()) as SearchResponseBody<TSource>;
     end();
     return { body };
@@ -258,12 +281,7 @@ export class Client {
       body: ndjson,
     });
 
-    if (res.status >= 500) {
-      const text = await res.text();
-      throw new Error(
-        `OpenSearch POST /_msearch responded ${res.status}: ${text}`,
-      );
-    }
+    await this._assertOk(res, "POST", "/_msearch");
 
     return {
       body: (await res.json()) as {
@@ -282,6 +300,7 @@ export class Client {
       `/${encodeURIComponent(params.index)}/_count`,
       params.body,
     );
+    await this._assertOk(res, "POST", `/${params.index}/_count`);
     return { body: (await res.json()) as { count: number } };
   }
 
@@ -324,12 +343,7 @@ export class Client {
     }
 
     const res = await fetch(url, init);
-    if (res.status >= 500) {
-      const text = await res.text();
-      throw new Error(
-        `OpenSearch POST /_bulk responded ${res.status}: ${text}`,
-      );
-    }
+    await this._assertOk(res, "POST", "/_bulk");
 
     return {
       body: (await res.json()) as {

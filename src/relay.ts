@@ -2082,8 +2082,8 @@ export class Relay {
           }
           const [subId, ...rawFilters] = params;
           // Validate filter shapes: enforces numeric kinds, 64-hex ids/authors,
-          // nonneg since/until/limit, array shapes on #tags. Unknown top-level
-          // keys are stripped by NSchema.filter()'s transform.
+          // nonneg since/until/limit, string arrays on #tags. Unknown
+          // top-level keys are rejected by NSchema.filter().
           const parsedFilters: Filter[] = [];
           for (const raw of rawFilters) {
             const parsed = FILTER_SCHEMA.safeParse(raw);
