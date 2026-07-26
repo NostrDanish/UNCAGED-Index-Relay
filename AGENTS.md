@@ -41,15 +41,18 @@ strings**. It never parses, validates, serializes, or queries.
   All per-message CPU lives here, including inline signature verification
   and language/sentiment/media analysis (`analyze.ts`) — no extra thread
   hop per EVENT.
-- **Indexer worker** (`indexer-worker.ts`): the single owner of OpenSearch
-  writes. Protocol workers RPC to it over dedicated MessageChannel ports
+- **Indexer worker** (`indexer-worker.ts`): owns all writes on the ingest
+  path. Protocol workers RPC to it over dedicated MessageChannel ports
   (`indexer-client.ts`), bypassing the main thread; bulk batches stay
   coalesced and replaceable-slot resolution has one writer. `event()`
   resolves on bulk-flush confirmation, so OK responses reflect durability.
 - **Background stats worker** (`background-worker.ts`): score
   recomputation, NIP-85, trends. Fed dirty references by the indexer via
   main; its published events are injected into all protocol workers for
-  broadcast.
+  broadcast. Note it holds its own OpenSearch write client and publishes
+  30382/30383 and trend labels directly rather than through the indexer,
+  so the indexer is not literally the only writer in the process — those
+  kinds bypass its slot serialization.
 
 The seam that makes this work is `RelayConn` (relay.ts): the Relay only
 sees `{id, data, send(frame)}` and emits finished NIP-01 frames as strings.
@@ -65,7 +68,7 @@ the hot path.
 │   ├── protocol-pool.ts    # Main-thread bridge: worker spawn/routing/fan-out/supervision
 │   ├── protocol-pool.test.ts # Pool integration tests (real workers, mock OpenSearch)
 │   ├── protocol-worker.ts  # Protocol worker: connections + all per-message work
-│   ├── indexer-worker.ts   # Indexer worker: single owner of OpenSearch writes
+│   ├── indexer-worker.ts   # Indexer worker: owns writes on the ingest path
 │   ├── indexer-client.ts   # Write-RPC client + port protocol (used in protocol workers)
 │   ├── relay.ts            # Relay implementation (event handling, subscriptions)
 │   ├── relay.test.ts       # Relay tests
@@ -80,6 +83,14 @@ the hot path.
 │   ├── metrics.ts          # Prometheus metrics + multi-thread exposition merging
 │   ├── metrics.test.ts     # Metrics merging tests
 │   ├── media.ts            # Media/video detection from imeta tags and URLs
+│   ├── media.test.ts       # Media detection tests
+│   ├── errors.ts           # Typed ingest-backpressure errors (StorageOverloaded)
+│   ├── landing-page.ts     # HTML landing page served on GET /
+│   ├── landing-page.test.ts # Landing page tests
+│   ├── nip85.ts            # NIP-85 Trusted Assertions publisher (kinds 30382-30385)
+│   ├── nip85.test.ts       # NIP-85 tests
+│   ├── opensearch-client.ts      # Fetch-based OpenSearch client used across src/
+│   ├── opensearch-client.test.ts # OpenSearch client tests
 │   ├── negentropy.ts       # NIP-77 Negentropy protocol codec (set reconciliation)
 │   ├── negentropy.test.ts  # Negentropy tests
 │   ├── pow.ts              # NIP-13 proof-of-work difficulty calculation
@@ -151,13 +162,23 @@ Edit `.env` to configure the application:
   filters. Intended for operator-controlled services such as bridges and
   notification servers. Default: empty (no master pubkeys).
 
-## Adding Features
+## Performance Notes
 
-### Performance Optimizations
+These are implemented, not aspirations — check them before adding a
+parallel mechanism:
 
-- Event broadcasting to active subscriptions
-- In-memory subscription cache
-- Connection pooling for OpenSearch
+- **Broadcast filter index** (`relay.ts`): live subscriptions are indexed
+  by kind (`kindIndex`) plus a `catchAll` set, so an incoming event is
+  matched against candidate filters rather than every subscription.
+- **Budgeted broadcast drain** (`relay.ts`): queued broadcasts are drained
+  in batches bounded by a 5ms budget with a `setTimeout(0)` between
+  batches, so REQ handlers interleave instead of queueing behind a burst.
+- **Split read/write clients** (`opensearch.ts`): reads and writes use
+  separate `Client` instances so bulk indexing can't head-of-line block
+  queries.
+- **Bulk write coalescing** (`indexer-worker.ts`): all ingest writes funnel
+  through one worker, so batches stay coalesced and replaceable-slot
+  resolution has a single writer.
 
 ## Code Style
 

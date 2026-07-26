@@ -870,7 +870,10 @@ export class OpenSearchRelay implements NStore, AsyncDisposable {
         ["top", "hot", "controversial", "rising", "zaps"].includes(t.value),
     );
 
-    // Multiple sort tokens - invalid query, will return 0 events
+    // Multiple sort tokens: ambiguous, so fall back to no sort. queryFilter
+    // separately rejects the query outright — it counts *all* `sort:` tokens
+    // whereas this only counts recognised ones, so the two disagree on input
+    // like `sort:bogus sort:bogus`.
     if (sortTokens.length > 1) {
       return null;
     }

@@ -35,11 +35,13 @@ const FILTER_SCHEMA = n.filter();
 /**
  * Yield the event loop so pending I/O callbacks (e.g. an OpenSearch search
  * response that a REQ is awaiting) and timer callbacks (e.g. the broadcast
- * drain's `setTimeout(0)`) can run before we continue. `setImmediate` is the
- * right primitive here: it fires after I/O callbacks in the same tick and
- * before the next round of microtasks, which is exactly what we want to give
- * REQs and broadcasts a chance to interleave with EVENT-handler
- * continuations.
+ * drain's `setTimeout(0)`) can run before we continue.
+ *
+ * `setImmediate` schedules a macrotask, so awaiting it drains the entire
+ * microtask queue and then runs the check phase — putting this continuation
+ * behind already-pending I/O and timer callbacks instead of ahead of them.
+ * That is the point: EVENT-handler continuations are microtasks, and without
+ * a macrotask boundary they starve REQs and broadcasts.
  */
 function yieldEventLoop(): Promise<void> {
   return new Promise((resolve) => setImmediate(resolve));
@@ -614,9 +616,10 @@ export class Relay {
 
   /**
    * Queue an event for broadcast to matching subscriptions.
-   * The actual broadcast work is drained asynchronously — one event at a time
-   * with `setTimeout(0)` yields between each — so pending REQ handlers can
-   * interleave and avoid p95 latency spikes caused by back-to-back broadcasts.
+   * The actual broadcast work is drained asynchronously in batches bounded by
+   * a 5ms time budget, with a `setTimeout(0)` yield between batches, so
+   * pending REQ handlers can interleave and avoid p95 latency spikes caused
+   * by back-to-back broadcasts.
    */
   broadcast(event: NostrEvent): void {
     this.broadcastQueue.push(event);
@@ -1005,8 +1008,8 @@ export class Relay {
       };
     }
 
-    // Store the event, passing pre-computed analysis results to avoid
-    // redundant detection on the main thread.
+    // Store the event, passing pre-computed analysis results so the storage
+    // layer doesn't redo detection it already has.
     try {
       const eventOpts = {
         analysis: {
