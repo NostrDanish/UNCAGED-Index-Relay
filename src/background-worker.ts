@@ -4,9 +4,11 @@
  * Runs on a separate thread so that heavy OpenSearch aggregation queries
  * don't block the main event loop that serves WebSocket REQ/EVENT traffic.
  *
+ * Configuration comes from the environment, not from the main thread — this
+ * worker reads the same .env as the parent process.
+ *
  * Communication protocol:
  * - Main → Worker:  { type: "dirty", ids: string[], pubkeys: string[], addrs: string[], identifiers: string[] }
- * - Main → Worker:  { type: "config", opensearchNode: string, opensearchIndex: string, ... }
  * - Worker → Main:  { type: "broadcast", events: string[] } — serialized
  *   NostrEvent JSON, stringified here so the main thread only moves strings
  *   (a recompute tick can emit hundreds of NIP-85 stat events).
@@ -111,44 +113,19 @@ if (trendsIntervalMs > 0) {
 }
 
 // ---------------------------------------------------------------------------
-// Dirty set accumulation
+// Message handler — receives dirty sets from the indexer via the main thread
 //
-// Cap each accumulator at MAX_DIRTY entries. Without this, a flood of
-// referencing events from the main thread can balloon these sets between
-// recompute ticks, driving `recomputeScores` to issue 6 msearches per dirty
-// id (and 1 per dirty pubkey). The cap on the main-thread relay sets
-// (OpenSearchRelay.MAX_PENDING_DIRTY) already limits what reaches us, but
-// this is a second belt-and-braces bound in case callers grow.
-// ---------------------------------------------------------------------------
-
-const MAX_DIRTY = 100_000;
-const dirtyIds = new Set<string>();
-const dirtyPubkeys = new Set<string>();
-let dirtyOverflowLogged = false;
-
-function addBounded(set: Set<string>, values: string[], label: string): void {
-  for (const v of values) {
-    if (set.size >= MAX_DIRTY) {
-      if (!dirtyOverflowLogged) {
-        log.warn("worker_dirty_overflow", { which: label, max: MAX_DIRTY });
-        dirtyOverflowLogged = true;
-      }
-      return;
-    }
-    set.add(v);
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Message handler — receives dirty sets from main thread
+// Event IDs and pubkeys go straight into the relay's own pending sets, which
+// already apply OpenSearchRelay.MAX_PENDING_DIRTY and log on overflow.
+// recomputeScores() drains them.
 // ---------------------------------------------------------------------------
 
 self.onmessage = (event: MessageEvent) => {
   const msg = event.data;
 
   if (msg.type === "dirty") {
-    addBounded(dirtyIds, msg.ids, "ids");
-    addBounded(dirtyPubkeys, msg.pubkeys, "pubkeys");
+    relay.addDirtyIds(msg.ids);
+    relay.addDirtyPubkeys(msg.pubkeys);
     if (msg.addrs.length > 0) nip85.addDirtyAddrs(new Set(msg.addrs));
     if (msg.identifiers.length > 0)
       nip85.addDirtyIdentifiers(new Set(msg.identifiers));
@@ -162,30 +139,8 @@ self.onmessage = (event: MessageEvent) => {
 const SCORE_RECOMPUTE_INTERVAL_MS = 5_000;
 
 async function recomputeLoop(): Promise<void> {
-  // Drain accumulated dirty sets.
-  const ids = dirtyIds.size > 0 ? [...dirtyIds] : [];
-  const pubkeys = dirtyPubkeys.size > 0 ? [...dirtyPubkeys] : [];
-  dirtyIds.clear();
-  dirtyPubkeys.clear();
-  dirtyOverflowLogged = false;
-
-  if (ids.length === 0 && pubkeys.length === 0) {
-    // Even with no dirty events, still flush NIP-85 addr/identifier stats
-    // that may have accumulated.
-    try {
-      await nip85.flushAddrStats();
-      await nip85.flushIdentifierStats();
-    } catch (err) {
-      log.error("nip85_flush_failed", errFields(err));
-    }
-    return;
-  }
-
   try {
-    // Inject dirty sets into the relay so recomputeScores can drain them.
-    relay.addDirtyIds(ids);
-    relay.addDirtyPubkeys(pubkeys);
-
+    // A no-op when nothing is dirty: recomputeScores() reports count 0.
     const result = await relay.recomputeScores();
     if (result.count > 0) {
       await Promise.all([
@@ -193,6 +148,8 @@ async function recomputeLoop(): Promise<void> {
         nip85.publishEventStats(result.eventScores),
       ]);
     }
+    // NIP-85 addr/identifier stats accumulate independently of dirty
+    // events, so flush them on every tick.
     await nip85.flushAddrStats();
     await nip85.flushIdentifierStats();
   } catch (err) {
@@ -210,7 +167,7 @@ setInterval(() => {
 // Trends loop (optional)
 // ---------------------------------------------------------------------------
 
-if (trends && trendsIntervalMs > 0) {
+if (trends) {
   // Narrowed const so the closure below doesn't need non-null assertions.
   const t = trends;
   const relayUrl = config.relayUrl;
