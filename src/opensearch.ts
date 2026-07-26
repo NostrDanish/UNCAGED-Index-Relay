@@ -848,6 +848,24 @@ export class OpenSearchRelay implements EventPublisher, AsyncDisposable {
   }
 
   /**
+   * The `collapse` clause implementing `distinct:author`, or undefined when
+   * the filter doesn't ask for it.
+   *
+   * Collapsing is what makes `distinct:author` return a full `limit` worth
+   * of results: OpenSearch keeps searching until it has `limit` distinct
+   * pubkeys, whereas de-duplicating the response in JS can only ever shrink
+   * an already-truncated page.
+   *
+   * Filters restricted to replaceable kinds are exempt — those already hold
+   * at most one current event per author, so collapsing buys nothing.
+   */
+  private collapseClause(filter: NostrFilter): { field: "pubkey" } | undefined {
+    if (!this.hasDistinctAuthor(filter)) return undefined;
+    if (filter.kinds?.every((k) => NKinds.replaceable(k))) return undefined;
+    return { field: "pubkey" };
+  }
+
+  /**
    * Parse NIP-50 sort mode from search tokens
    */
   private parseSortMode(
@@ -1014,16 +1032,6 @@ export class OpenSearchRelay implements EventPublisher, AsyncDisposable {
       }
     }
 
-    // Apply distinct:author — keep only the highest-scored event per pubkey
-    if (this.hasDistinctAuthor(filter)) {
-      const seenPubkeys = new Set<string>();
-      events = events.filter((event) => {
-        if (seenPubkeys.has(event.pubkey)) return false;
-        seenPubkeys.add(event.pubkey);
-        return true;
-      });
-    }
-
     return events.slice(0, limit);
   }
 
@@ -1050,6 +1058,8 @@ export class OpenSearchRelay implements EventPublisher, AsyncDisposable {
     field: "engagers" | "zap_amount_msats" | "followers",
     limit: number,
   ): Promise<NostrEvent[]> {
+    const collapse = this.collapseClause(filter);
+
     const response = await this.client.search<NostrEvent>({
       index: this.indexName,
       body: {
@@ -1060,6 +1070,7 @@ export class OpenSearchRelay implements EventPublisher, AsyncDisposable {
           { created_at: { order: "desc" as const } },
         ],
         size: limit,
+        ...(collapse && { collapse }),
       },
     });
 
@@ -1086,6 +1097,7 @@ export class OpenSearchRelay implements EventPublisher, AsyncDisposable {
   ): Promise<NostrEvent[]> {
     const now = Math.floor(Date.now() / 1000);
     const query = this.buildQuery(filter);
+    const collapse = this.collapseClause(filter);
     query.bool.must.push(
       { range: { created_at: { gte: now - DECAY_SORT_WINDOW_SECONDS } } },
       { range: { [field]: { gt: 0 } } },
@@ -1109,6 +1121,7 @@ export class OpenSearchRelay implements EventPublisher, AsyncDisposable {
           },
         },
         size: limit,
+        ...(collapse && { collapse }),
       },
     });
 
@@ -1128,6 +1141,7 @@ export class OpenSearchRelay implements EventPublisher, AsyncDisposable {
     limit: number,
   ): Promise<NostrEvent[]> {
     const query = this.buildQuery(filter);
+    const collapse = this.collapseClause(filter);
     query.bool.must.push(
       { range: { comment_cnt: { gt: 0 } } },
       { range: { reaction_cnt: { gt: 0 } } },
@@ -1151,6 +1165,7 @@ export class OpenSearchRelay implements EventPublisher, AsyncDisposable {
           },
         },
         size: limit,
+        ...(collapse && { collapse }),
       },
     });
 
@@ -1172,6 +1187,7 @@ export class OpenSearchRelay implements EventPublisher, AsyncDisposable {
   ): Promise<NostrEvent[]> {
     const now = Math.floor(Date.now() / 1000);
     const query = this.buildQuery(filter);
+    const collapse = this.collapseClause(filter);
     query.bool.must.push({
       range: { created_at: { gte: now - DECAY_SORT_WINDOW_SECONDS } },
     });
@@ -1194,6 +1210,7 @@ export class OpenSearchRelay implements EventPublisher, AsyncDisposable {
           },
         },
         size: limit,
+        ...(collapse && { collapse }),
       },
     });
 
@@ -1672,7 +1689,7 @@ export class OpenSearchRelay implements EventPublisher, AsyncDisposable {
       includeReplaced,
       includeAuthKinds,
     });
-    const distinctAuthor = this.hasDistinctAuthor(filter);
+    const collapse = this.collapseClause(filter);
 
     // Sort by created_at (newest first)
     const sort = [{ created_at: { order: "desc" as const } }];
@@ -1691,11 +1708,8 @@ export class OpenSearchRelay implements EventPublisher, AsyncDisposable {
       };
 
       // Use OpenSearch field collapsing to return only 1 event per pubkey
-      if (
-        distinctAuthor &&
-        !filter.kinds?.every((k) => NKinds.replaceable(k))
-      ) {
-        searchBody.collapse = { field: "pubkey" };
+      if (collapse) {
+        searchBody.collapse = collapse;
       }
 
       const response = await this.client.search<NostrEvent>({
@@ -2554,10 +2568,7 @@ export class OpenSearchRelay implements EventPublisher, AsyncDisposable {
           type: "count",
         });
 
-        if (
-          this.hasDistinctAuthor(filter) &&
-          !filter.kinds?.every((k) => NKinds.replaceable(k))
-        ) {
+        if (this.collapseClause(filter)) {
           // Use cardinality aggregation for distinct author count.
           // precision_threshold controls HyperLogLog++ precision: lower values
           // are significantly faster on large result sets at the cost of some

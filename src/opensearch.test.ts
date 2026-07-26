@@ -3275,6 +3275,59 @@ describe("OpenSearchRelay", () => {
       assert.equal(results[1].id, event2.id);
     });
 
+    it("fills the limit with distinct authors on a sorted query", async () => {
+      // Regression: distinct:author used to be applied by de-duplicating the
+      // response in JS, after OpenSearch had already truncated it to `limit`.
+      // If the top `limit` events all shared an author, the query returned far
+      // fewer than `limit` events. Collapsing during retrieval fixes it.
+      const { client, setScore } = createSortMockClient();
+      const relay = new OpenSearchRelay(client as unknown as Client, {
+        indexName: "test-index",
+        bulkMaxSize: 1,
+        refreshDelayMs: 0,
+      });
+
+      const prolific = generateSecretKey();
+      const sk2 = generateSecretKey();
+      const sk3 = generateSecretKey();
+      const now = Math.floor(Date.now() / 1000);
+
+      // The three highest-scoring events all belong to one author.
+      const hogs = [] as NostrEvent[];
+      for (let i = 0; i < 3; i++) {
+        const e = finalizeEvent(
+          { kind: 1, created_at: now - i, tags: [], content: `hog ${i}` },
+          prolific,
+        );
+        await relay.event(e);
+        setScore(e.id, { engagers: 100 - i });
+        hogs.push(e);
+      }
+
+      const other1 = finalizeEvent(
+        { kind: 1, created_at: now - 10, tags: [], content: "other 1" },
+        sk2,
+      );
+      const other2 = finalizeEvent(
+        { kind: 1, created_at: now - 11, tags: [], content: "other 2" },
+        sk3,
+      );
+      await relay.event(other1);
+      await relay.event(other2);
+      setScore(other1.id, { engagers: 5 });
+      setScore(other2.id, { engagers: 4 });
+
+      const results = await relay.query([
+        { kinds: [1], search: "sort:top distinct:author", limit: 3 },
+      ]);
+
+      // One event per author, and the limit is actually filled.
+      assert.equal(results.length, 3);
+      assert.equal(new Set(results.map((e) => e.pubkey)).size, 3);
+      // The prolific author is represented by their highest-scoring event.
+      assert.equal(results[0].id, hogs[0].id);
+    });
+
     it("should handle sort:zaps query", async () => {
       const { client, setScore } = createSortMockClient();
       const relay = new OpenSearchRelay(client as unknown as Client, {
