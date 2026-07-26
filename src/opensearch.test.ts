@@ -1601,6 +1601,51 @@ describe("OpenSearchRelay", () => {
       );
     });
 
+    it("should spare excluded kinds on remove (NIP-62 gift wraps)", async () => {
+      const { client, documents } = createHistoryMockClient();
+      const relay = new OpenSearchRelay(client as unknown as Client, {
+        indexName: "test-index",
+        bulkMaxSize: 1,
+        refreshDelayMs: 0,
+      });
+
+      const sk = generateSecretKey();
+      const now = Math.floor(Date.now() / 1000);
+
+      const note = finalizeEvent(
+        { kind: 1, created_at: now - 50, tags: [], content: "Hello" },
+        sk,
+      );
+      await relay.event(note);
+
+      // A gift wrap signed by the same key: it belongs to its p-tagged
+      // recipient, so a vanish request from the signer must not delete it.
+      const wrap = finalizeEvent(
+        {
+          kind: 1059,
+          created_at: now - 40,
+          tags: [["p", "f".repeat(64)]],
+          content: "sealed",
+        },
+        sk,
+      );
+      await relay.event(wrap);
+
+      await relay.remove([{ authors: [note.pubkey], until: now }], {
+        excludeKinds: [1059],
+      });
+
+      const docs = Array.from(documents.values()) as Array<
+        Record<string, unknown>
+      >;
+      const nonDeleted = docs.filter((d) => d.deleted !== true);
+      assert.deepEqual(
+        nonDeleted.map((d) => d.id),
+        [wrap.id],
+        "Only the gift wrap signed by the vanishing key should survive",
+      );
+    });
+
     it("should soft-delete addressable event history when deleting by coordinate", async () => {
       const { client, documents } = createHistoryMockClient();
       const relay = new OpenSearchRelay(client as unknown as Client, {

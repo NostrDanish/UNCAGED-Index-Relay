@@ -28,7 +28,7 @@ import type { EventAnalysis } from "./relay.ts";
 /** One write request, sent over the port inside a batch. */
 export type IndexerRequest =
   | { t: "index"; reqId: number; event: NostrEvent; analysis?: EventAnalysis }
-  | { t: "remove"; reqId: number; filters: Filter[] };
+  | { t: "remove"; reqId: number; filters: Filter[]; excludeKinds?: number[] };
 
 /** Batch envelope: protocol worker → indexer worker (over the port). */
 export interface IndexerBatch {
@@ -146,9 +146,14 @@ export class IndexerClient {
     return this.enqueue(req);
   }
 
-  /** Delete events matching the filters (NIP-09 / NIP-62). */
-  remove(filters: Filter[]): Promise<void> {
-    return this.enqueue({ t: "remove", reqId: 0, filters });
+  /**
+   * Delete events matching the filters (NIP-09 / NIP-62). Kinds listed in
+   * `excludeKinds` are spared even when they match a filter.
+   */
+  remove(filters: Filter[], opts?: { excludeKinds?: number[] }): Promise<void> {
+    const req: IndexerRequest = { t: "remove", reqId: 0, filters };
+    if (opts?.excludeKinds) req.excludeKinds = opts.excludeKinds;
+    return this.enqueue(req);
   }
 
   private enqueue(req: IndexerRequest): Promise<void> {

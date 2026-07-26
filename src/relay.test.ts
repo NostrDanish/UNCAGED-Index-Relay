@@ -353,9 +353,15 @@ describe("Relay", () => {
         sk,
       ).pubkey;
 
-      const removeCalls: Filter[][] = [];
-      mockStorage.remove = async (filters: Filter[]) => {
-        removeCalls.push(filters);
+      const removeCalls: Array<{
+        filters: Filter[];
+        opts?: { excludeKinds?: number[] };
+      }> = [];
+      mockStorage.remove = async (
+        filters: Filter[],
+        opts?: { excludeKinds?: number[] },
+      ) => {
+        removeCalls.push({ filters, opts });
       };
 
       const vanishEvent = finalizeEvent(
@@ -378,15 +384,18 @@ describe("Relay", () => {
       // Remove should be called twice: once for all events, once for gift wraps
       assert.equal(removeCalls.length, 2);
 
-      // First call: delete all events from this pubkey
-      assert.deepEqual(removeCalls[0], [
+      // First call: delete all events from this pubkey, sparing gift wraps it
+      // signed (those belong to their p-tagged recipients).
+      assert.deepEqual(removeCalls[0].filters, [
         { authors: [myPubkey], until: vanishEvent.created_at },
       ]);
+      assert.deepEqual(removeCalls[0].opts?.excludeKinds, [1059]);
 
       // Second call: delete gift wraps (kind 1059) p-tagging this pubkey
-      assert.deepEqual(removeCalls[1], [
+      assert.deepEqual(removeCalls[1].filters, [
         { kinds: [1059], "#p": [myPubkey], until: vanishEvent.created_at },
       ]);
+      assert.equal(removeCalls[1].opts?.excludeKinds, undefined);
     });
 
     it("should handle vanish request with ALL_RELAYS tag (NIP-62)", async () => {

@@ -173,7 +173,12 @@ function attachPort(port: MessagePort): void {
         }
         break;
       case "remove":
-        settle(item.reqId, opensearchRelay.remove(item.filters));
+        settle(
+          item.reqId,
+          opensearchRelay.remove(item.filters, {
+            excludeKinds: item.excludeKinds,
+          }),
+        );
         break;
     }
   }

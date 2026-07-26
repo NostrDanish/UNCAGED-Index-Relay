@@ -2726,12 +2726,18 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
    * Remove events matching the given filters (soft delete using deleted field).
    * Also soft-deletes any `replaced: true` historical versions matching the
    * same filter criteria via `updateByQuery`.
+   *
+   * Events whose kind is listed in `excludeKinds` are spared even when they
+   * match a filter. NIP-62 vanish requests use this to delete everything a
+   * pubkey authored except the gift wraps it signed, which belong to their
+   * p-tagged recipients.
    */
   async remove(
     filters: NostrFilter[],
-    opts?: { signal?: AbortSignal },
+    opts?: { signal?: AbortSignal; excludeKinds?: number[] },
   ): Promise<void> {
     const docIdsToDelete: string[] = [];
+    const excludeKinds = new Set(opts?.excludeKinds ?? []);
 
     for (const filter of filters) {
       if (opts?.signal?.aborted) {
@@ -2742,6 +2748,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
         const events = await this.queryFilter(filter, opts?.signal);
 
         for (const event of events) {
+          if (excludeKinds.has(event.kind)) continue;
           docIdsToDelete.push(this.getDocumentId(event));
         }
       } catch (error) {
@@ -2797,11 +2804,13 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
       if (opts?.signal?.aborted) break;
       try {
         const historyQuery = this.buildQuery(filter, { includeReplaced: true });
-        const wrappedQuery = {
-          bool: {
-            must: [historyQuery, { term: { replaced: true } }],
-          },
+        const bool: Record<string, unknown> = {
+          must: [historyQuery, { term: { replaced: true } }],
         };
+        if (excludeKinds.size > 0) {
+          bool.must_not = [{ terms: { kind: [...excludeKinds] } }];
+        }
+        const wrappedQuery = { bool };
         await this.writeClient.updateByQuery({
           index: this.indexName,
           body: {

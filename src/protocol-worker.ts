@@ -95,7 +95,7 @@ const storage: AnalyzableRelay & SyncableStorage = {
   count: (filters, opts) => opensearchRelay.count(filters, opts),
   queryItems: (filter, opts) => opensearchRelay.queryItems(filter, opts),
   event: (event, opts) => indexer.event(event, opts?.analysis),
-  remove: (filters) => indexer.remove(filters),
+  remove: (filters, opts) => indexer.remove(filters, opts),
   close: () => opensearchRelay.close(),
 };
 

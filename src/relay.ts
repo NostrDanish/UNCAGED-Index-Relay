@@ -118,6 +118,15 @@ export interface AnalyzableRelay extends NRelay {
     filters: Filter[],
     opts?: { signal?: AbortSignal; includeAuthKinds?: boolean },
   ): Promise<{ count: number; approximate?: boolean }>;
+  /**
+   * Remove events matching the filters. Events whose kind is listed in
+   * `excludeKinds` are spared even when they match a filter — used by NIP-62
+   * vanish requests, which must not delete gift wraps signed by the pubkey.
+   */
+  remove?(
+    filters: Filter[],
+    opts?: { signal?: AbortSignal; excludeKinds?: number[] },
+  ): Promise<void>;
 }
 
 /**
@@ -911,13 +920,19 @@ export class Relay {
         );
 
         if (isTargeted && this.storage.remove) {
-          // Delete all events from this pubkey up to created_at
-          await this.storage.remove([
-            {
-              authors: [event.pubkey],
-              until: event.created_at,
-            },
-          ]);
+          // Delete all events from this pubkey up to created_at, except gift
+          // wraps it signed. NIP-59: a gift wrap belongs to its p-tagged
+          // recipient, so its signer can't make the recipient's copy vanish —
+          // the same rule NIP-09 deletions follow above.
+          await this.storage.remove(
+            [
+              {
+                authors: [event.pubkey],
+                until: event.created_at,
+              },
+            ],
+            { excludeKinds: [1059] },
+          );
 
           // NIP-62: Relays SHOULD delete all NIP-59 Gift Wraps (kind 1059)
           // that p-tagged the pubkey.
