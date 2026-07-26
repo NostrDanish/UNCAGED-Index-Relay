@@ -16,7 +16,7 @@ import { opensearchSearchDurationHistogram } from "./metrics.ts";
 /** Options accepted by the client constructor. */
 export interface ClientOptions {
   /** Base URL of the OpenSearch node, e.g. `http://localhost:9200`. */
-  node?: string;
+  node: string;
   /** Optional basic-auth credentials. */
   auth?: { username: string; password: string };
 }
@@ -152,11 +152,11 @@ export class Client {
   private authHeader: string | undefined;
   readonly indices: IndicesApi;
 
-  constructor(opts?: ClientOptions) {
+  constructor(opts: ClientOptions) {
     // Strip trailing slash for clean URL joins.
-    this.baseUrl = (opts?.node ?? "http://localhost:9200").replace(/\/+$/, "");
+    this.baseUrl = opts.node.replace(/\/+$/, "");
 
-    if (opts?.auth) {
+    if (opts.auth) {
       const encoded = btoa(`${opts.auth.username}:${opts.auth.password}`);
       this.authHeader = `Basic ${encoded}`;
     }
@@ -314,7 +314,6 @@ export class Client {
   async bulk(params: {
     body: unknown[];
     refresh?: boolean | "wait_for" | "true" | "false";
-    signal?: AbortSignal;
   }): Promise<ApiResponse<{ errors: boolean; items: BulkResponseItem[] }>> {
     // Build NDJSON payload.
     const ndjson = `${params.body.map((obj) => JSON.stringify(obj)).join("\n")}\n`;
@@ -333,16 +332,11 @@ export class Client {
     };
     if (this.authHeader) headers.Authorization = this.authHeader;
 
-    const init: RequestInit = {
+    const res = await fetch(url, {
       method: "POST",
       headers,
       body: ndjson,
-    };
-    if (params.signal) {
-      init.signal = params.signal;
-    }
-
-    const res = await fetch(url, init);
+    });
     await this._assertOk(res, "POST", "/_bulk");
 
     return {

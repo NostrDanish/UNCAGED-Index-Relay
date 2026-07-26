@@ -88,13 +88,11 @@ const indexer = new IndexerClient({ maxPending: config.bulkMaxQueue });
  * bulk flush confirms the write, so OK responses reflect durability.
  */
 const storage: AnalyzableRelay & SyncableStorage = {
-  req: (filters, opts) => opensearchRelay.req(filters, opts),
   query: (filters, opts) => opensearchRelay.query(filters, opts),
   count: (filters, opts) => opensearchRelay.count(filters, opts),
   queryItems: (filter, opts) => opensearchRelay.queryItems(filter, opts),
   event: (event, opts) => indexer.event(event, opts?.analysis),
   remove: (filters, opts) => indexer.remove(filters, opts),
-  close: () => opensearchRelay.close(),
 };
 
 // Signature verification + language/sentiment/media analysis runs inline on

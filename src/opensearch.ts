@@ -1,11 +1,4 @@
-import type {
-  NostrEvent,
-  NostrFilter,
-  NostrRelayCLOSED,
-  NostrRelayEOSE,
-  NostrRelayEVENT,
-  NRelay,
-} from "@nostrify/nostrify";
+import type { NostrEvent, NostrFilter } from "@nostrify/nostrify";
 import { NIP50, NKinds, NSchema as n } from "@nostrify/nostrify";
 import { buildAutocompleteText } from "./autocomplete-text.ts";
 import type { Config } from "./config.ts";
@@ -183,10 +176,21 @@ export interface SyncItem {
 }
 
 /**
+ * The minimal storage contract needed to publish an event, used by the
+ * background worker's NIP-85 and trends publishers. Deliberately narrower
+ * than Nostrify's `NRelay`: those publishers only ever store events, and
+ * requiring the full interface would force implementations to carry a
+ * `req()` streaming method nobody calls.
+ */
+export interface EventPublisher {
+  event(event: NostrEvent, opts?: { signal?: AbortSignal }): Promise<void>;
+}
+
+/**
  * OpenSearch-backed Nostr relay implementation
  * Handles event storage and querying with full-text search support (NIP-50)
  */
-export class OpenSearchRelay implements NRelay, AsyncDisposable {
+export class OpenSearchRelay implements EventPublisher, AsyncDisposable {
   /** Client used for read operations (search, count). */
   private client: Client;
   /** Client used for write operations (bulk, updateByQuery, deleteByQuery). Defaults to `client`. */
@@ -2602,33 +2606,6 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
       this.log.error("sync_query_failed", errFields(error));
       throw error;
     }
-  }
-
-  /**
-   * Stream events from OpenSearch (NRelay interface)
-   */
-  async *req(
-    filters: NostrFilter[],
-    opts?: { signal?: AbortSignal },
-  ): AsyncIterable<NostrRelayEVENT | NostrRelayEOSE | NostrRelayCLOSED> {
-    // Query all filters
-    for (const filter of filters) {
-      try {
-        const events = await this.queryFilter(filter, opts?.signal);
-        for (const event of events) {
-          if (opts?.signal?.aborted) {
-            return;
-          }
-          yield ["EVENT", "req", event];
-        }
-      } catch (error) {
-        this.log.error("filter_query_failed", {
-          filters: clip(JSON.stringify(filter)),
-          ...errFields(error),
-        });
-      }
-    }
-    yield ["EOSE", "req"];
   }
 
   /**

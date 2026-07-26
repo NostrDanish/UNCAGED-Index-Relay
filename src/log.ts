@@ -35,20 +35,6 @@ const LEVEL_RANK: Record<LogLevel, number> = {
   error: 40,
 };
 
-/** Normalize a raw `LOG_LEVEL` value, defaulting to `info`. */
-export function parseLogLevel(value: string | undefined): LogLevel {
-  const lower = value?.toLowerCase();
-  if (
-    lower === "debug" ||
-    lower === "info" ||
-    lower === "warn" ||
-    lower === "error"
-  ) {
-    return lower;
-  }
-  return "info";
-}
-
 export type LogFields = Record<
   string,
   string | number | boolean | null | undefined

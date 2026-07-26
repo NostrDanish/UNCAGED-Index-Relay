@@ -1,6 +1,6 @@
 import type { Buffer } from "node:buffer";
 import { randomBytes } from "node:crypto";
-import type { NostrRelayInfo, NRelay } from "@nostrify/nostrify";
+import type { NostrRelayInfo } from "@nostrify/nostrify";
 import { NKinds, NSchema as n } from "@nostrify/nostrify";
 import type { Filter, NostrEvent } from "nostr-tools";
 import { matchFilter, verifyEvent } from "nostr-tools";
@@ -81,11 +81,6 @@ class Semaphore {
       this.available++;
     }
   }
-
-  /** Current number of waiters (does not include holders). */
-  get waiting(): number {
-    return this.queue.length;
-  }
 }
 
 /** Pre-computed analysis data that can be passed alongside an event to avoid redundant work. */
@@ -98,8 +93,13 @@ export interface EventAnalysis {
   video?: boolean;
 }
 
-/** Extended NRelay that accepts pre-computed analysis data on event ingestion. */
-export interface AnalyzableRelay extends NRelay {
+/**
+ * The storage contract the {@link Relay} depends on. Deliberately not
+ * Nostrify's `NRelay`: the relay only ever calls these four methods, and
+ * extending `NRelay` would additionally mandate a `req()` streaming method
+ * and a `close()` that nothing here invokes.
+ */
+export interface AnalyzableRelay {
   event(
     event: NostrEvent,
     opts?: { signal?: AbortSignal; analysis?: EventAnalysis },
@@ -843,7 +843,7 @@ export class Relay {
       };
     }
 
-    // Handle deletion events (kind 5) using NRelay's remove method
+    // Handle deletion events (kind 5) using the storage remove method
     // The deletion event itself is still stored below so it remains queryable.
     if (event.kind === 5) {
       try {
@@ -1328,7 +1328,7 @@ export class Relay {
       };
     }
 
-    // Query and return existing events using NRelay's query method
+    // Query and return existing events using the storage query method
     try {
       const events = await this.storage.query(
         filters.map((f) =>

@@ -1,9 +1,5 @@
-import type {
-  NostrEvent,
-  NostrFilter,
-  NostrSigner,
-  NRelay,
-} from "@nostrify/nostrify";
+import type { NostrEvent, NostrFilter, NostrSigner } from "@nostrify/nostrify";
+import type { EventPublisher } from "./opensearch.ts";
 import type { Client } from "./opensearch-client.ts";
 
 /** A single trending tag value with engagement metrics. */
@@ -23,7 +19,7 @@ export interface TrendsOpts {
   /** OpenSearch index name. */
   indexName: string;
   /** Relay instance used to publish trending label events. */
-  relay: NRelay;
+  relay: EventPublisher;
   /** Optional callback to broadcast events to connected WebSocket subscribers. */
   broadcast?: (event: NostrEvent) => void;
 }
@@ -36,7 +32,7 @@ export interface TrendsOpts {
 export class Trends {
   private client: Client;
   private indexName: string;
-  private relay: NRelay;
+  private relay: EventPublisher;
   private broadcast?: (event: NostrEvent) => void;
 
   constructor(opts: TrendsOpts) {

@@ -362,11 +362,6 @@ export class ProtocolPool {
     });
   }
 
-  /** Number of workers in the pool. */
-  get size(): number {
-    return this.workers.length;
-  }
-
   /**
    * Wait for every worker (protocol + indexer) to finish initializing.
    * Returns the relay info document (identical across workers — same

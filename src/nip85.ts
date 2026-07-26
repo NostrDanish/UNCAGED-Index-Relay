@@ -14,9 +14,9 @@
  * and queries OpenSearch to compute stats on flush.
  */
 
-import type { NostrEvent, NostrSigner, NRelay } from "@nostrify/nostrify";
+import type { NostrEvent, NostrSigner } from "@nostrify/nostrify";
 import { Logger } from "./log.ts";
-import type { EventScores } from "./opensearch.ts";
+import type { EventPublisher, EventScores } from "./opensearch.ts";
 import type { Client } from "./opensearch-client.ts";
 
 /** Options for constructing a {@link Nip85} instance. */
@@ -26,7 +26,7 @@ export interface Nip85Opts {
   /** OpenSearch index name. */
   indexName: string;
   /** Relay instance for storing NIP-85 events. */
-  relay: NRelay;
+  relay: EventPublisher;
   /** Signer for signing NIP-85 events. */
   signer: NostrSigner;
   /** Optional callback to broadcast events to connected WebSocket subscribers. */
@@ -41,7 +41,7 @@ export interface Nip85Opts {
 export class Nip85 {
   private client: Client;
   private indexName: string;
-  private relay: NRelay;
+  private relay: EventPublisher;
   private signer: NostrSigner;
   private broadcast?: (event: NostrEvent) => void;
 

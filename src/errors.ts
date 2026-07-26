@@ -14,19 +14,3 @@ export class StorageOverloaded extends Error {
     this.name = "StorageOverloaded";
   }
 }
-
-/**
- * The raw frame received from the WebSocket was unparseable JSON or did not
- * pass the off-thread structural validation. Used by the relay to translate
- * worker-reported parse failures into the same OK/NOTICE responses the
- * main-thread validator used to produce.
- */
-export class FrameParseError extends Error {
-  /** Optional 64-hex event ID we managed to extract from a partially-valid payload. */
-  readonly eventId?: string;
-  constructor(message: string, eventId?: string) {
-    super(message);
-    this.name = "FrameParseError";
-    this.eventId = eventId;
-  }
-}

@@ -98,10 +98,6 @@ const nip85 = new Nip85({
   logger: log,
 });
 
-// Wire up dirty tracking callbacks (same as server.ts did).
-relay.onDirtyAddrs = (addrs) => nip85.addDirtyAddrs(addrs);
-relay.onDirtyIdentifiers = (ids) => nip85.addDirtyIdentifiers(ids);
-
 // Trends (optional, only if interval > 0).
 const trendsIntervalMs = config.trendsIntervalMs;
 let trends: Trends | undefined;

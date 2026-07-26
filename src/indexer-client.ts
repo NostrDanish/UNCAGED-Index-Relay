@@ -88,11 +88,6 @@ export class IndexerClient {
     this.maxPending = opts?.maxPending ?? 5_000;
   }
 
-  /** Current number of in-flight + queued write requests. */
-  get pendingCount(): number {
-    return this.pending.size;
-  }
-
   /**
    * Attach the MessageChannel port to the indexer. Requests enqueued before
    * the port arrives (possible in the first ticks after worker spawn) are
@@ -183,16 +178,5 @@ export class IndexerClient {
       items: this.queue,
     } satisfies IndexerBatch);
     this.queue = [];
-  }
-
-  /** Reject all outstanding writes (worker shutdown). */
-  dispose(): void {
-    for (const pending of this.pending.values()) {
-      pending.reject(new Error("Indexer client disposed"));
-    }
-    this.pending.clear();
-    this.queue = [];
-    this.port?.close();
-    this.port = null;
   }
 }

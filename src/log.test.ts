@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { clip, errFields, Logger, parseLogLevel } from "./log.ts";
+import { clip, errFields, Logger } from "./log.ts";
 
 /** Capture console output emitted during `fn`. */
 function capture(fn: () => void): { out: string[]; err: string[] } {
@@ -88,13 +88,6 @@ test("error level suppresses warn", () => {
   });
   assert.equal(err.length, 1);
   assert.equal(JSON.parse(err[0]).msg, "store_failed");
-});
-
-test("parseLogLevel normalizes and defaults to info", () => {
-  assert.equal(parseLogLevel("debug"), "debug");
-  assert.equal(parseLogLevel("WARN"), "warn");
-  assert.equal(parseLogLevel("bogus"), "info");
-  assert.equal(parseLogLevel(undefined), "info");
 });
 
 test("errFields flattens an Error to single-line fields", () => {
