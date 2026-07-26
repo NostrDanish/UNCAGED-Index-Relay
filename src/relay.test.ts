@@ -49,7 +49,7 @@ describe("Relay", () => {
         sentMessages.push(JSON.parse(message));
       },
       data: {
-        subscriptions: new Map(),
+        subscriptions: new Set(),
         challenge: "",
         challengeSent: false,
         authedPubkeys: new Set(),
@@ -596,7 +596,7 @@ describe("Relay", () => {
           sentMessages.push(JSON.parse(message));
         },
         data: {
-          subscriptions: new Map(),
+          subscriptions: new Set(),
           challenge: "",
           authedPubkeys: new Set(),
         },
@@ -944,10 +944,7 @@ describe("Relay", () => {
     it("should reject when subscription limit reached", async () => {
       // Fill up subscriptions to the limit
       for (let i = 0; i < 20; i++) {
-        mockWs.data.subscriptions.set(`sub${i}`, {
-          id: `sub${i}`,
-          filters: [{ kinds: [1] }],
-        });
+        mockWs.data.subscriptions.add(`sub${i}`);
       }
 
       const filters: Filter[] = [{ kinds: [1] }];
@@ -995,10 +992,7 @@ describe("Relay", () => {
       const filters: Filter[] = [{ kinds: [1], authors: ["abc"] }];
       await relay.handleReq(mockWs, "sub1", filters);
 
-      const subscription = mockWs.data.subscriptions.get("sub1");
-      assert.ok(subscription);
-      assert.equal(subscription.id, "sub1");
-      assert.deepEqual(subscription.filters, filters);
+      assert.ok(mockWs.data.subscriptions.has("sub1"));
     });
 
     it("should yield to the event loop while sending a large REQ result", async () => {
@@ -1145,10 +1139,7 @@ describe("Relay", () => {
   describe("handleClose", () => {
     it("should remove subscription", () => {
       // Add a subscription
-      mockWs.data.subscriptions.set("sub1", {
-        id: "sub1",
-        filters: [{ kinds: [1] }],
-      });
+      mockWs.data.subscriptions.add("sub1");
 
       relay.handleClose(mockWs, "sub1");
 
@@ -1206,10 +1197,7 @@ describe("Relay", () => {
     });
 
     it("should handle CLOSE message", async () => {
-      mockWs.data.subscriptions.set("sub1", {
-        id: "sub1",
-        filters: [{ kinds: [1] }],
-      });
+      mockWs.data.subscriptions.add("sub1");
 
       const message = JSON.stringify(["CLOSE", "sub1"]);
       await relay.handleMessage(mockWs, message);
@@ -1891,28 +1879,12 @@ describe("Relay", () => {
 
   describe("handleCloseConnection", () => {
     it("should clear all subscriptions on connection close", () => {
-      mockWs.data.subscriptions.set("sub1", {
-        id: "sub1",
-        filters: [{ kinds: [1] }],
-      });
-      mockWs.data.subscriptions.set("sub2", {
-        id: "sub2",
-        filters: [{ kinds: [1] }],
-      });
+      mockWs.data.subscriptions.add("sub1");
+      mockWs.data.subscriptions.add("sub2");
 
       relay.handleCloseConnection(mockWs);
 
       assert.equal(mockWs.data.subscriptions.size, 0);
-    });
-
-    it("should handle undefined data gracefully", () => {
-      const wsWithNoData = {
-        data: undefined,
-      } as unknown as RelayConn;
-
-      assert.doesNotThrow(() => {
-        relay.handleCloseConnection(wsWithNoData);
-      });
     });
   });
 
@@ -1928,7 +1900,7 @@ describe("Relay", () => {
           messages.push(JSON.parse(message));
         },
         data: {
-          subscriptions: new Map(),
+          subscriptions: new Set(),
           challenge: "",
           authedPubkeys: new Set(),
         },
@@ -2900,7 +2872,7 @@ describe("Relay", () => {
           sentMessages.push(JSON.parse(message));
         },
         data: {
-          subscriptions: new Map(),
+          subscriptions: new Set(),
           challenge: "",
           authedPubkeys: new Set(),
         },
@@ -3170,7 +3142,7 @@ describe("Relay", () => {
             messages.push(JSON.parse(message));
           },
           data: {
-            subscriptions: new Map(),
+            subscriptions: new Set(),
             challenge: "",
             authedPubkeys: new Set(),
           },
@@ -3655,7 +3627,7 @@ describe("Relay with authKinds", () => {
         sentMessages.push(JSON.parse(message));
       },
       data: {
-        subscriptions: new Map(),
+        subscriptions: new Set(),
         challenge: "test-challenge",
         challengeSent: false,
         authedPubkeys: new Set(),
@@ -4006,7 +3978,7 @@ describe("Relay with authKinds", () => {
           messages.push(JSON.parse(message));
         },
         data: {
-          subscriptions: new Map(),
+          subscriptions: new Set(),
           challenge: "",
           challengeSent: false,
           authedPubkeys: new Set(),
@@ -4306,7 +4278,7 @@ describe("Relay with authKinds", () => {
           messages.push(JSON.parse(message));
         },
         data: {
-          subscriptions: new Map(),
+          subscriptions: new Set(),
           challenge: "",
           challengeSent: false,
           authedPubkeys: new Set(),
@@ -4438,7 +4410,7 @@ describe("Relay with masterPubkeys", () => {
         sentMessages.push(JSON.parse(message));
       },
       data: {
-        subscriptions: new Map(),
+        subscriptions: new Set(),
         challenge: "test-challenge",
         challengeSent: false,
         authedPubkeys: new Set(),
@@ -4522,7 +4494,7 @@ describe("Relay with masterPubkeys", () => {
     const sender = {
       send: () => {},
       data: {
-        subscriptions: new Map(),
+        subscriptions: new Set(),
         challenge: "",
         challengeSent: false,
         authedPubkeys: new Set(),

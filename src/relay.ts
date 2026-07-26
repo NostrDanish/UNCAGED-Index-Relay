@@ -204,11 +204,6 @@ export function clampLimit(
 }
 
 // Track subscriptions per connection
-export interface Subscription {
-  id: string;
-  filters: Filter[];
-}
-
 /** A stateful NIP-77 Negentropy sync session (one per NEG-OPEN subscription). */
 interface NegentropySession {
   neg: Negentropy;
@@ -217,7 +212,8 @@ interface NegentropySession {
 }
 
 export interface ConnData {
-  subscriptions: Map<string, Subscription>;
+  /** IDs of this connection's open REQ subscriptions. */
+  subscriptions: Set<string>;
   /** The current AUTH challenge string for this connection. */
   challenge: string;
   /** Whether the AUTH challenge has been sent to the client. */
@@ -268,7 +264,7 @@ export function createConnData(init?: {
   userAgent?: string;
 }): ConnData {
   return {
-    subscriptions: new Map(),
+    subscriptions: new Set(),
     challenge: "",
     challengeSent: false,
     authedPubkeys: new Set(),
@@ -1071,34 +1067,28 @@ export class Relay {
    *    backend is responsible for excluding auth-protected kinds.
    * 3. Filters with explicit `kinds` that don't include any auth kind pass through.
    *
-   * Returns the validated filters on success, or an error object.
+   * Returns null when every filter is allowed, otherwise the CLOSED/NEG-ERR
+   * message explaining the refusal. Filters are never rewritten here — the
+   * storage backend does the auth-kind exclusion.
    */
-  private checkAuthKinds(
-    ws: RelayConn,
-    subscriptionId: string,
-    filters: Filter[],
-  ):
-    | { ok: true; filters: Filter[] }
-    | { ok: false; error: { subscriptionId: string; message: string } } {
+  private checkAuthKinds(ws: RelayConn, filters: Filter[]): string | null {
     if (this.authKinds.size === 0) {
-      return { ok: true, filters };
+      return null;
     }
 
     // Master pubkeys have unconditional read access to all auth kinds; skip
     // every per-filter auth check.
     if (this.isMaster(ws)) {
-      return { ok: true, filters };
+      return null;
     }
-
-    const result: Filter[] = [];
 
     for (const filter of filters) {
       const hasExplicitKinds =
         Array.isArray(filter.kinds) && filter.kinds.length > 0;
 
       if (!hasExplicitKinds) {
-        // Catch-all or no kinds specified: exclude auth kinds silently.
-        result.push(filter);
+        // Catch-all or no kinds specified: allowed here. The storage layer
+        // strips auth kinds from filters that don't name them explicitly.
         continue;
       }
 
@@ -1107,7 +1097,6 @@ export class Relay {
 
       if (!hasAuthKind) {
         // No auth kinds in this filter — pass through.
-        result.push(filter);
         continue;
       }
 
@@ -1124,23 +1113,9 @@ export class Relay {
         const authed = ws.data.authedPubkeys;
         if (authed.size === 0) {
           this.ensureChallengeSent(ws);
-          return {
-            ok: false,
-            error: {
-              subscriptionId,
-              message:
-                "auth-required: auth-protected kinds require an authors or #p filter",
-            },
-          };
+          return "auth-required: auth-protected kinds require an authors or #p filter";
         }
-        return {
-          ok: false,
-          error: {
-            subscriptionId,
-            message:
-              "restricted: auth-protected kinds require an authors or #p filter",
-          },
-        };
+        return "restricted: auth-protected kinds require an authors or #p filter";
       }
 
       // At least one of authors / #p is present. The filter is a conjunction,
@@ -1159,21 +1134,11 @@ export class Relay {
 
       if (!authorsAuthed && !pTagsAuthed) {
         this.ensureChallengeSent(ws);
-        return {
-          ok: false,
-          error: {
-            subscriptionId,
-            message:
-              "auth-required: all authors or all #p tags must be authenticated",
-          },
-        };
+        return "auth-required: all authors or all #p tags must be authenticated";
       }
-
-      // Passed auth checks — include filter.
-      result.push(filter);
     }
 
-    return { ok: true, filters: result };
+    return null;
   }
 
   /**
@@ -1355,16 +1320,10 @@ export class Relay {
   /**
    * Validate subscription count before adding a new one
    */
-  private validateSubscriptionCount(currentCount: number): {
-    subscriptionId: string;
-    message: string;
-  } | null {
+  private validateSubscriptionCount(currentCount: number): string | null {
     const maxSubscriptions = this.relayInfo.limitation?.max_subscriptions || 20;
     if (currentCount >= maxSubscriptions) {
-      return {
-        subscriptionId: "",
-        message: "rate-limited: too many subscriptions",
-      };
+      return "rate-limited: too many subscriptions";
     }
     return null;
   }
@@ -1421,26 +1380,21 @@ export class Relay {
         data.subscriptions.size,
       );
       if (limitError) {
-        this.sendMessage(ws, ["CLOSED", subscriptionId, limitError.message]);
+        this.sendMessage(ws, ["CLOSED", subscriptionId, limitError]);
         this.log.debug("req_rejected", {
           ip: data.ip,
           sub: subscriptionId,
-          reason: limitError.message,
+          reason: limitError,
         });
         return;
       }
 
       // Guard auth-protected kinds
-      const authCheck = this.checkAuthKinds(ws, subscriptionId, filters);
-      if (!authCheck.ok) {
-        this.sendMessage(ws, [
-          "CLOSED",
-          authCheck.error.subscriptionId,
-          authCheck.error.message,
-        ]);
+      const authError = this.checkAuthKinds(ws, filters);
+      if (authError) {
+        this.sendMessage(ws, ["CLOSED", subscriptionId, authError]);
         return;
       }
-      filters = authCheck.filters;
 
       // Process the REQ message
       const result = await this.handleReqMessage(
@@ -1477,7 +1431,7 @@ export class Relay {
 
       // Store subscription (remove old one first if replacing)
       this.removeFromIndex(ws, subscriptionId);
-      data.subscriptions.set(subscriptionId, { id: subscriptionId, filters });
+      data.subscriptions.add(subscriptionId);
       this.addToIndex(ws, subscriptionId, filters);
 
       // Send existing events. Under firehose load this loop is the largest
@@ -1532,16 +1486,11 @@ export class Relay {
   async handleCount(ws: RelayConn, subscriptionId: string, filters: Filter[]) {
     try {
       // Guard auth-protected kinds
-      const authCheck = this.checkAuthKinds(ws, subscriptionId, filters);
-      if (!authCheck.ok) {
-        this.sendMessage(ws, [
-          "CLOSED",
-          authCheck.error.subscriptionId,
-          authCheck.error.message,
-        ]);
+      const authError = this.checkAuthKinds(ws, filters);
+      if (authError) {
+        this.sendMessage(ws, ["CLOSED", subscriptionId, authError]);
         return;
       }
-      filters = authCheck.filters;
 
       // Process the COUNT message
       const result = await this.handleCountMessage(
@@ -1727,7 +1676,7 @@ export class Relay {
       );
       return;
     }
-    let filter = parsed.data as Filter;
+    const filter = parsed.data as Filter;
 
     const over = this.exceedsFilterValueCap(filter);
     if (over !== null) {
@@ -1740,12 +1689,11 @@ export class Relay {
     }
 
     // Guard auth-protected kinds with the same rules as REQ/COUNT.
-    const authCheck = this.checkAuthKinds(ws, subscriptionId, [filter]);
-    if (!authCheck.ok) {
-      this.sendNegErr(ws, subscriptionId, authCheck.error.message);
+    const authError = this.checkAuthKinds(ws, [filter]);
+    if (authError) {
+      this.sendNegErr(ws, subscriptionId, authError);
       return;
     }
-    filter = authCheck.filters[0];
 
     let initialMessage: Uint8Array;
     try {
@@ -2285,10 +2233,10 @@ export class Relay {
     } catch (error) {
       if (error instanceof SyntaxError) {
         // Malformed JSON from a client — traffic noise, not a server fault.
-        this.log.debug("invalid_json", { ip: ws.data?.ip });
+        this.log.debug("invalid_json", { ip: ws.data.ip });
       } else {
         this.log.error("message_error", {
-          ip: ws.data?.ip,
+          ip: ws.data.ip,
           ...errFields(error),
         });
       }
@@ -2325,21 +2273,21 @@ export class Relay {
     const data = ws.data;
     if (this.log.levelEnabled("debug")) {
       this.log.debug("ws_close", {
-        ip: data?.ip,
-        ua: data?.userAgent,
-        dur_s: data?.openedAt
+        ip: data.ip,
+        ua: data.userAgent,
+        dur_s: data.openedAt
           ? Math.round((Date.now() - data.openedAt) / 1000)
           : undefined,
-        msgs: data?.messageCount ?? 0,
-        reqs: data?.reqCount ?? 0,
-        events: data?.eventCount ?? 0,
-        subs: data?.subscriptions.size ?? 0,
+        msgs: data.messageCount,
+        reqs: data.reqCount,
+        events: data.eventCount,
+        subs: data.subscriptions.size,
       });
     }
     this.connections.delete(ws);
     relayConnectionsGauge.set(this.connections.size);
     this.removeFromIndex(ws);
     this.clearNegSessions(ws);
-    ws.data?.subscriptions.clear();
+    data.subscriptions.clear();
   }
 }

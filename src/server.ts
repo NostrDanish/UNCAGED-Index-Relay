@@ -30,8 +30,8 @@ const log = new Logger(config.logLevel);
 interface WebSocketData {
   ip?: string;
   userAgent?: string;
-  /** Routing key for the protocol pool. */
-  connId?: number;
+  /** Routing key for the protocol pool, assigned at upgrade time. */
+  connId: number;
 }
 
 /** Monotonic connection ID source, unique for the process lifetime. */
@@ -173,7 +173,7 @@ const server = serve<WebSocketData>({
       const userAgent = req.headers.get("user-agent") ?? undefined;
 
       const upgraded = server.upgrade(req, {
-        data: { ip, userAgent },
+        data: { ip, userAgent, connId: nextConnId++ },
       });
 
       if (!upgraded) {
@@ -250,28 +250,22 @@ const server = serve<WebSocketData>({
     maxPayloadLength: config.maxMessageLength,
 
     open(ws) {
-      const connId = nextConnId++;
-      ws.data.connId = connId;
-      sockets.set(connId, ws);
-      pool.open(connId, ws.data.ip, ws.data.userAgent);
+      sockets.set(ws.data.connId, ws);
+      pool.open(ws.data.connId, ws.data.ip, ws.data.userAgent);
     },
 
     message(ws, message) {
-      const connId = ws.data.connId;
-      if (connId === undefined) return;
       // Normalize to a string on this side of the boundary: strings cross
       // postMessage as flat copies, and the Relay parses from string anyway.
       pool.message(
-        connId,
+        ws.data.connId,
         typeof message === "string" ? message : message.toString(),
       );
     },
 
     close(ws) {
-      const connId = ws.data.connId;
-      if (connId === undefined) return;
-      sockets.delete(connId);
-      pool.close(connId);
+      sockets.delete(ws.data.connId);
+      pool.close(ws.data.connId);
     },
   },
 });
