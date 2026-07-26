@@ -8049,3 +8049,142 @@ describe("OpenSearchRelay", () => {
     });
   });
 });
+
+describe("OpenSearchRelay.recomputeScores", () => {
+  /**
+   * Mock client covering just the three request shapes recomputeScores
+   * issues: the Phase 1 dirty-id lookup (search), the Phase 2 engagement
+   * fan-out (msearch), and the Phase 4 write-back (bulk).
+   *
+   * `referencing` describes the events pointing at the target, so the mock
+   * can answer each engagement sub-query by evaluating its kind set and
+   * tags_map field rather than by relying on msearch ordering — otherwise
+   * the test would just re-assert the ordering the code already assumes.
+   */
+  const createScoreMockClient = (opts: {
+    dirty: Array<{ id: string; kind: number; pubkey: string }>;
+    referencing: Array<{ kind: number; pubkey: string; via: "e" | "q" }>;
+  }) => {
+    const written: Array<{ id: string; doc: Record<string, unknown> }> = [];
+
+    const client = {
+      search: async () => ({
+        body: { hits: { hits: opts.dirty.map((d) => ({ _source: d })) } },
+      }),
+      // biome-ignore lint/suspicious/noExplicitAny: test mock
+      msearch: async (requests: Array<{ body: any }>) => ({
+        body: {
+          responses: requests.map((req) => {
+            const must = req.body.query.bool.must as Array<
+              Record<string, unknown>
+            >;
+            const kinds = (
+              must.find((c) => "terms" in c) as
+                | { terms: { kind: number[] } }
+                | undefined
+            )?.terms?.kind;
+            const tagClause = must.find(
+              (c) =>
+                "term" in c &&
+                Object.keys(
+                  (c as { term: Record<string, unknown> }).term,
+                )[0].startsWith("tags_map."),
+            ) as { term: Record<string, unknown> } | undefined;
+            const via = Object.keys(tagClause?.term ?? {})[0]?.slice(
+              "tags_map.".length,
+            );
+
+            const matched = opts.referencing.filter(
+              (r) => kinds?.includes(r.kind) && r.via === via,
+            );
+
+            const aggs: Record<string, { value: number }> = {};
+            if (req.body.aggs?.total_msats) {
+              // Every zap in this fixture carries 1000 msats.
+              aggs.total_msats = { value: matched.length * 1000 };
+            }
+            if (req.body.aggs?.unique_authors) {
+              aggs.unique_authors = {
+                value: new Set(matched.map((r) => r.pubkey)).size,
+              };
+            }
+
+            return {
+              hits: { total: { value: matched.length } },
+              ...(Object.keys(aggs).length > 0 && { aggregations: aggs }),
+            };
+          }),
+        },
+      }),
+      bulk: async ({ body }: { body: unknown[] }) => {
+        for (let i = 0; i < body.length; i += 2) {
+          const action = body[i] as { update?: { _id: string } };
+          const payload = body[i + 1] as { doc: Record<string, unknown> };
+          if (action.update) {
+            written.push({ id: action.update._id, doc: payload.doc });
+          }
+        }
+        return { body: { errors: false, items: [] } };
+      },
+    };
+
+    return { client, written };
+  };
+
+  it("maps each engagement sub-query onto its score field", async () => {
+    const targetId = "a".repeat(64);
+    const { client, written } = createScoreMockClient({
+      dirty: [{ id: targetId, kind: 1, pubkey: "b".repeat(64) }],
+      referencing: [
+        // 2 comments (kinds 1 and 1111 via `e`)
+        { kind: 1, pubkey: "c".repeat(64), via: "e" },
+        { kind: 1111, pubkey: "d".repeat(64), via: "e" },
+        // 3 reactions (kind 7 via `e`)
+        { kind: 7, pubkey: "c".repeat(64), via: "e" },
+        { kind: 7, pubkey: "d".repeat(64), via: "e" },
+        { kind: 7, pubkey: "e".repeat(64), via: "e" },
+        // 1 repost (kind 6 via `e`)
+        { kind: 6, pubkey: "f".repeat(64), via: "e" },
+        // 2 zaps (kinds 9735 + 8333 via `e`) => 2000 msats
+        { kind: 9735, pubkey: "c".repeat(64), via: "e" },
+        { kind: 8333, pubkey: "f".repeat(64), via: "e" },
+        // 1 quote (kind 1 via `q`)
+        { kind: 1, pubkey: "e".repeat(64), via: "q" },
+      ],
+    });
+
+    const relay = new OpenSearchRelay(client as unknown as Client, {
+      indexName: "test-index",
+    });
+    relay.addDirtyIds([targetId]);
+
+    const result = await relay.recomputeScores();
+
+    assert.equal(result.count, 1);
+    const scores = result.eventScores.get(targetId);
+    assert.ok(scores);
+    assert.equal(scores.comment_cnt, 2);
+    assert.equal(scores.reaction_cnt, 3);
+    assert.equal(scores.repost_cnt, 1);
+    assert.equal(scores.quote_cnt, 1);
+    assert.equal(scores.zap_cnt, 2);
+    assert.equal(scores.zap_amount_msats, 2000);
+
+    // Unique engagers spans all `e`-referencing engagement kinds:
+    // pubkeys c, d, e, f.
+    const write = written.find((w) => w.id === targetId);
+    assert.ok(write);
+    assert.equal(write.doc.engagers, 4);
+  });
+
+  it("returns early when nothing is dirty", async () => {
+    const { client } = createScoreMockClient({ dirty: [], referencing: [] });
+    const relay = new OpenSearchRelay(client as unknown as Client, {
+      indexName: "test-index",
+    });
+
+    const result = await relay.recomputeScores();
+    assert.equal(result.count, 0);
+    assert.equal(result.eventScores.size, 0);
+  });
+});

@@ -40,6 +40,34 @@ const NOSTR_EVENT_FIELDS = [
 ] as const;
 
 /**
+ * The score fields maintained by {@link OpenSearchRelay.recomputeScores}.
+ *
+ * Single source of truth: the zeroing document, the equivalent painless
+ * script and the per-event score record are all derived from this list, so
+ * adding a score field can't leave one of them stale.
+ */
+const SCORE_FIELDS = [
+  "followers",
+  "engagers",
+  "comment_cnt",
+  "reaction_cnt",
+  "repost_cnt",
+  "quote_cnt",
+  "zap_amount_msats",
+  "zap_cnt",
+] as const;
+
+type ScoreField = (typeof SCORE_FIELDS)[number];
+
+/** All score fields set to zero. */
+type Scores = Record<ScoreField, number>;
+
+/** A fresh {@link Scores} with every field at zero. */
+function zeroScores(): Scores {
+  return Object.fromEntries(SCORE_FIELDS.map((f) => [f, 0])) as Scores;
+}
+
+/**
  * Partial document applied to losers during Phase 2 history-preserving
  * cleanup. Marks the doc as replaced and zeroes its score fields so it
  * doesn't contribute to engagement aggregations. Frozen because it's
@@ -47,15 +75,64 @@ const NOSTR_EVENT_FIELDS = [
  */
 const REPLACED_DOC: Readonly<Record<string, unknown>> = Object.freeze({
   replaced: true,
-  followers: 0,
-  engagers: 0,
-  comment_cnt: 0,
-  reaction_cnt: 0,
-  repost_cnt: 0,
-  quote_cnt: 0,
-  zap_amount_msats: 0,
-  zap_cnt: 0,
+  ...zeroScores(),
 });
+
+/**
+ * The painless equivalent of {@link REPLACED_DOC}, for the update_by_query
+ * deep-history sweep that can't send a partial document.
+ */
+const REPLACED_PAINLESS = [
+  "ctx._source.replaced = true;",
+  ...SCORE_FIELDS.map((f) => `ctx._source.${f} = 0;`),
+].join("\n");
+
+/**
+ * The per-event engagement sub-queries issued by `recomputeScores()` Phase
+ * 2b, in msearch order. Each counts referencing events of some kinds that
+ * point at the target via `tags_map.<tag>`; `agg` adds an aggregation whose
+ * value is read instead of (or alongside) the hit count.
+ *
+ * Kept as a table because all six differ only in these three fields, and
+ * the readout below indexes into the responses by the same order.
+ */
+const ENGAGEMENT_QUERIES = [
+  /** 0: comments */
+  { field: "comment_cnt", kinds: [1, 1111], tag: "e" },
+  /** 1: reactions */
+  { field: "reaction_cnt", kinds: [7], tag: "e" },
+  /** 2: reposts */
+  { field: "repost_cnt", kinds: [6, 16], tag: "e" },
+  /** 3: zaps — Lightning (9735) and onchain (8333); count plus amount sum */
+  {
+    field: "zap_cnt",
+    kinds: [9735, 8333],
+    tag: "e",
+    agg: {
+      name: "total_msats",
+      body: { sum: { field: "amount_msats" } },
+      into: "zap_amount_msats",
+    },
+  },
+  /** 4: quotes — kind 1 referencing via a `q` tag */
+  { field: "quote_cnt", kinds: [1], tag: "q" },
+  /** 5: unique engagers — cardinality, so no hit count is read */
+  {
+    field: undefined,
+    kinds: [1, 6, 7, 16, 1111, 9735, 8333],
+    tag: "e",
+    agg: {
+      name: "unique_authors",
+      body: { cardinality: { field: "pubkey" } },
+      into: "engagers",
+    },
+  },
+] as const satisfies ReadonlyArray<{
+  field?: ScoreField;
+  kinds: readonly number[];
+  tag: "e" | "q";
+  agg?: { name: string; body: unknown; into: ScoreField };
+}>;
 
 /**
  * Time window for decay-based script_score sorts (sort:hot, sort:rising).
@@ -169,6 +246,18 @@ export interface SyncItem {
 }
 
 /**
+ * The shape {@link OpenSearchRelay.buildQuery} always returns. Declared
+ * concretely (rather than `Record<string, unknown>`) so callers that need to
+ * append clauses can reach `bool.must` without casting.
+ */
+interface BoolQuery {
+  bool: {
+    must: Record<string, unknown>[];
+    must_not?: Record<string, unknown>[];
+  };
+}
+
+/**
  * The minimal storage contract needed to publish an event, used by the
  * background worker's NIP-85 and trends publishers. Deliberately narrower
  * than Nostrify's `NRelay`: those publishers only ever store events, and
@@ -279,14 +368,8 @@ export class OpenSearchRelay implements EventPublisher, AsyncDisposable {
    * Used by the background worker to inject dirty state received from the
    * main thread via `postMessage`.
    */
-  addDirtyIds(ids: string[]): void {
-    for (const id of ids) {
-      if (this.pendingDirtyIds.size >= OpenSearchRelay.MAX_PENDING_DIRTY) {
-        this.warnDirtyOverflow("ids");
-        return;
-      }
-      this.pendingDirtyIds.add(id);
-    }
+  addDirtyIds(ids: Iterable<string>): void {
+    for (const id of ids) this.addDirtyId(id);
   }
 
   /**
@@ -295,14 +378,28 @@ export class OpenSearchRelay implements EventPublisher, AsyncDisposable {
    * Used by the background worker to inject dirty state received from the
    * main thread via `postMessage`.
    */
-  addDirtyPubkeys(pubkeys: string[]): void {
-    for (const pk of pubkeys) {
-      if (this.pendingDirtyPubkeys.size >= OpenSearchRelay.MAX_PENDING_DIRTY) {
-        this.warnDirtyOverflow("pubkeys");
-        return;
-      }
-      this.pendingDirtyPubkeys.add(pk);
+  addDirtyPubkeys(pubkeys: Iterable<string>): void {
+    for (const pk of pubkeys) this.addDirtyPubkey(pk);
+  }
+
+  /** Add one event ID, respecting the cap. Returns false once capped. */
+  private addDirtyId(id: string): boolean {
+    if (this.pendingDirtyIds.size >= OpenSearchRelay.MAX_PENDING_DIRTY) {
+      this.warnDirtyOverflow("ids");
+      return false;
     }
+    this.pendingDirtyIds.add(id);
+    return true;
+  }
+
+  /** Add one pubkey, respecting the cap. Returns false once capped. */
+  private addDirtyPubkey(pubkey: string): boolean {
+    if (this.pendingDirtyPubkeys.size >= OpenSearchRelay.MAX_PENDING_DIRTY) {
+      this.warnDirtyOverflow("pubkeys");
+      return false;
+    }
+    this.pendingDirtyPubkeys.add(pubkey);
+    return true;
   }
 
   /** Log once per drain cycle when a dirty set hits the cap. */
@@ -322,12 +419,8 @@ export class OpenSearchRelay implements EventPublisher, AsyncDisposable {
    * collect dirty state after flush and forward it to the background worker.
    */
   drainDirty(): { ids: string[]; pubkeys: string[] } {
-    const ids = [...this.pendingDirtyIds];
-    this.pendingDirtyIds = new Set();
-    const pubkeys = [...this.pendingDirtyPubkeys];
-    this.pendingDirtyPubkeys = new Set();
-    this.dirtyOverflowWarned = false;
-    return { ids, pubkeys };
+    const { ids, pubkeys } = this.drainPendingDirty();
+    return { ids: [...ids], pubkeys: [...pubkeys] };
   }
 
   /** Kinds excluded from queries that don't explicitly request them (e.g. DMs, gift wraps). */
@@ -849,75 +942,79 @@ export class OpenSearchRelay implements EventPublisher, AsyncDisposable {
    * are applied directly in the query, so results are correct for any
    * filter narrowing (kinds, tags, full-text search, etc.).
    *
-   * When the filter targets only kind 0 (profile metadata), sort queries
-   * use follower-count and author-based ranking instead. See the
-   * `querySortTopKind0` etc. methods.
+   * When the filter targets only kind 0 (profiles), sort queries rank by
+   * `followers` instead of `engagers`, and the modes that don't apply to a
+   * profile directly (controversial, rising, zaps) derive an author
+   * ordering from a non-kind-0 query first.
    */
   private async querySortedEvents(
     filter: NostrFilter,
     sortMode: "top" | "hot" | "controversial" | "rising" | "zaps",
     limit: number,
   ): Promise<NostrEvent[]> {
-    try {
-      let events: NostrEvent[];
+    let events: NostrEvent[];
 
-      if (this.isKind0OnlyFilter(filter)) {
-        switch (sortMode) {
-          case "top":
-            events = await this.querySortTopKind0(filter, limit);
-            break;
-          case "hot":
-            events = await this.querySortHotKind0(filter, limit);
-            break;
-          case "controversial":
-            events = await this.querySortControversialKind0(filter, limit);
-            break;
-          case "rising":
-            events = await this.querySortRisingKind0(filter, limit);
-            break;
-          case "zaps":
-            events = await this.querySortZapsKind0(filter, limit);
-            break;
-          default:
-            return [];
-        }
-      } else {
-        switch (sortMode) {
-          case "top":
-            events = await this.querySortTop(filter, limit);
-            break;
-          case "hot":
-            events = await this.querySortHot(filter, limit);
-            break;
-          case "controversial":
-            events = await this.querySortControversial(filter, limit);
-            break;
-          case "rising":
-            events = await this.querySortRising(filter, limit);
-            break;
-          case "zaps":
-            events = await this.querySortZaps(filter, limit);
-            break;
-          default:
-            return [];
-        }
+    if (this.isKind0OnlyFilter(filter)) {
+      switch (sortMode) {
+        case "top":
+          events = await this.querySortByField(filter, "followers", limit);
+          break;
+        case "hot":
+          events = await this.querySortByDecay(filter, "followers", limit);
+          break;
+        case "controversial":
+          events = await this.querySortKind0ByAuthors(
+            filter,
+            limit,
+            this.querySortControversial.bind(this),
+          );
+          break;
+        case "rising":
+          events = await this.querySortKind0ByAuthors(
+            filter,
+            limit,
+            this.querySortRising.bind(this),
+          );
+          break;
+        case "zaps":
+          events = await this.querySortZapsKind0(filter, limit);
+          break;
       }
-
-      // Apply distinct:author — keep only the highest-scored event per pubkey
-      if (this.hasDistinctAuthor(filter)) {
-        const seenPubkeys = new Set<string>();
-        events = events.filter((event) => {
-          if (seenPubkeys.has(event.pubkey)) return false;
-          seenPubkeys.add(event.pubkey);
-          return true;
-        });
+    } else {
+      switch (sortMode) {
+        case "top":
+          events = await this.querySortByField(filter, "engagers", limit);
+          break;
+        case "hot":
+          events = await this.querySortByDecay(filter, "engagers", limit);
+          break;
+        case "controversial":
+          events = await this.querySortControversial(filter, limit);
+          break;
+        case "rising":
+          events = await this.querySortRising(filter, limit);
+          break;
+        case "zaps":
+          events = await this.querySortByField(
+            filter,
+            "zap_amount_msats",
+            limit,
+          );
+          break;
       }
-
-      return events.slice(0, limit);
-    } catch (error) {
-      this.log.error("sorted_query_failed", errFields(error));
-      throw error;
     }
+
+    // Apply distinct:author — keep only the highest-scored event per pubkey
+    if (this.hasDistinctAuthor(filter)) {
+      const seenPubkeys = new Set<string>();
+      events = events.filter((event) => {
+        if (seenPubkeys.has(event.pubkey)) return false;
+        seenPubkeys.add(event.pubkey);
+        return true;
+      });
+    }
+
+    return events.slice(0, limit);
   }
 
   /**
@@ -932,25 +1029,24 @@ export class OpenSearchRelay implements EventPublisher, AsyncDisposable {
   }
 
   /**
-   * Query top events — sorted by precomputed `engagers` (unique authors
-   * who referenced this event). Single OpenSearch query with the user's
-   * filter applied directly.
+   * Sort by a precomputed score field, descending, tie-broken by recency.
+   *
+   * Backs `sort:top` (engagers — unique authors who referenced the event),
+   * `sort:zaps` (zap_amount_msats) and the kind-0 form of `sort:top`
+   * (followers). The user's filter is applied directly in the query.
    */
-  private async querySortTop(
+  private async querySortByField(
     filter: NostrFilter,
+    field: "engagers" | "zap_amount_msats" | "followers",
     limit: number,
   ): Promise<NostrEvent[]> {
-    const query = this.buildQuery(filter) as {
-      bool: { must: Record<string, unknown>[] };
-    };
-
     const response = await this.client.search<NostrEvent>({
       index: this.indexName,
       body: {
         _source: NOSTR_EVENT_FIELDS,
-        query,
+        query: this.buildQuery(filter),
         sort: [
-          { engagers: { order: "desc" as const } },
+          { [field]: { order: "desc" as const } },
           { created_at: { order: "desc" as const } },
         ],
         size: limit,
@@ -961,27 +1057,28 @@ export class OpenSearchRelay implements EventPublisher, AsyncDisposable {
   }
 
   /**
-   * Query hot events — engagers weighted by exponential time decay.
-   * Score = engagers * 0.5^(age_in_hours / 24).
-   * Uses a script_score query so OpenSearch computes and sorts server-side.
+   * Sort by a score field weighted by exponential time decay:
+   * `score = field * 0.5^(age_in_hours / 24)`. Uses a script_score query so
+   * OpenSearch computes and sorts server-side.
    *
-   * Filters `created_at >= now - DECAY_SORT_WINDOW_SECONDS` and
-   * `engagers > 0` so the painless script only runs on documents that can
-   * actually score. Without these bounds every matching document in the
-   * index (tens of millions) is script-scored per request, which can pin
-   * every OpenSearch CPU core.
+   * Backs `sort:hot` (engagers) and its kind-0 form (followers).
+   *
+   * Filters `created_at >= now - DECAY_SORT_WINDOW_SECONDS` and `field > 0`
+   * so the painless script only runs on documents that can actually score.
+   * Without these bounds every matching document in the index (tens of
+   * millions) is script-scored per request, which can pin every OpenSearch
+   * CPU core.
    */
-  private async querySortHot(
+  private async querySortByDecay(
     filter: NostrFilter,
+    field: "engagers" | "followers",
     limit: number,
   ): Promise<NostrEvent[]> {
     const now = Math.floor(Date.now() / 1000);
-    const query = this.buildQuery(filter) as {
-      bool: { must: Record<string, unknown>[] };
-    };
+    const query = this.buildQuery(filter);
     query.bool.must.push(
       { range: { created_at: { gte: now - DECAY_SORT_WINDOW_SECONDS } } },
-      { range: { engagers: { gt: 0 } } },
+      { range: { [field]: { gt: 0 } } },
     );
 
     const response = await this.client.search<NostrEvent>({
@@ -993,9 +1090,9 @@ export class OpenSearchRelay implements EventPublisher, AsyncDisposable {
             query,
             script: {
               source: `
-                double engagers = doc['engagers'].value;
+                double score = doc['${field}'].value;
                 double ageHours = (params.now - doc['created_at'].value) / 3600.0;
-                return engagers * Math.pow(0.5, ageHours / 24.0);
+                return score * Math.pow(0.5, ageHours / 24.0);
               `,
               params: { now },
             },
@@ -1020,9 +1117,7 @@ export class OpenSearchRelay implements EventPublisher, AsyncDisposable {
     filter: NostrFilter,
     limit: number,
   ): Promise<NostrEvent[]> {
-    const query = this.buildQuery(filter) as {
-      bool: { must: Record<string, unknown>[] };
-    };
+    const query = this.buildQuery(filter);
     query.bool.must.push(
       { range: { comment_cnt: { gt: 0 } } },
       { range: { reaction_cnt: { gt: 0 } } },
@@ -1066,9 +1161,7 @@ export class OpenSearchRelay implements EventPublisher, AsyncDisposable {
     limit: number,
   ): Promise<NostrEvent[]> {
     const now = Math.floor(Date.now() / 1000);
-    const query = this.buildQuery(filter) as {
-      bool: { must: Record<string, unknown>[] };
-    };
+    const query = this.buildQuery(filter);
     query.bool.must.push({
       range: { created_at: { gte: now - DECAY_SORT_WINDOW_SECONDS } },
     });
@@ -1097,33 +1190,6 @@ export class OpenSearchRelay implements EventPublisher, AsyncDisposable {
     return this.hitsToEvents(response);
   }
 
-  /**
-   * Query most-zapped events — sorted by precomputed `zap_amount_msats`.
-   */
-  private async querySortZaps(
-    filter: NostrFilter,
-    limit: number,
-  ): Promise<NostrEvent[]> {
-    const query = this.buildQuery(filter) as {
-      bool: { must: Record<string, unknown>[] };
-    };
-
-    const response = await this.client.search<NostrEvent>({
-      index: this.indexName,
-      body: {
-        _source: NOSTR_EVENT_FIELDS,
-        query,
-        sort: [
-          { zap_amount_msats: { order: "desc" as const } },
-          { created_at: { order: "desc" as const } },
-        ],
-        size: limit,
-      },
-    });
-
-    return this.hitsToEvents(response);
-  }
-
   // ---------------------------------------------------------------------------
   // Kind-0 (profile) sort methods
   //
@@ -1133,107 +1199,6 @@ export class OpenSearchRelay implements EventPublisher, AsyncDisposable {
   // two-step query: first find top events by the sort mode across all kinds,
   // then return the kind 0 events for those authors.
   // ---------------------------------------------------------------------------
-
-  /**
-   * Sort kind 0 events by follower count.
-   */
-  private async querySortTopKind0(
-    filter: NostrFilter,
-    limit: number,
-  ): Promise<NostrEvent[]> {
-    const query = this.buildQuery(filter) as {
-      bool: { must: Record<string, unknown>[] };
-    };
-
-    const response = await this.client.search<NostrEvent>({
-      index: this.indexName,
-      body: {
-        _source: NOSTR_EVENT_FIELDS,
-        query,
-        sort: [
-          { followers: { order: "desc" as const } },
-          { created_at: { order: "desc" as const } },
-        ],
-        size: limit,
-      },
-    });
-
-    return this.hitsToEvents(response);
-  }
-
-  /**
-   * Sort kind 0 events by follower count with time decay.
-   * Score = followers * 0.5^(age_hours / 24).
-   *
-   * Filters `created_at >= now - DECAY_SORT_WINDOW_SECONDS` and
-   * `followers > 0` so the script only scores documents that can rank.
-   */
-  private async querySortHotKind0(
-    filter: NostrFilter,
-    limit: number,
-  ): Promise<NostrEvent[]> {
-    const now = Math.floor(Date.now() / 1000);
-    const query = this.buildQuery(filter) as {
-      bool: { must: Record<string, unknown>[] };
-    };
-    query.bool.must.push(
-      { range: { created_at: { gte: now - DECAY_SORT_WINDOW_SECONDS } } },
-      { range: { followers: { gt: 0 } } },
-    );
-
-    const response = await this.client.search<NostrEvent>({
-      index: this.indexName,
-      body: {
-        _source: NOSTR_EVENT_FIELDS,
-        query: {
-          script_score: {
-            query,
-            script: {
-              source: `
-                double followers = doc['followers'].value;
-                double ageHours = (params.now - doc['created_at'].value) / 3600.0;
-                return followers * Math.pow(0.5, ageHours / 24.0);
-              `,
-              params: { now },
-            },
-          },
-        },
-        size: limit,
-      },
-    });
-
-    return this.hitsToEvents(response);
-  }
-
-  /**
-   * Two-step sort: find the most controversial events across all kinds,
-   * extract unique author pubkeys, then return their kind 0 events
-   * (respecting any search-text filter on the kind 0 content).
-   */
-  private async querySortControversialKind0(
-    filter: NostrFilter,
-    limit: number,
-  ): Promise<NostrEvent[]> {
-    return this.querySortKind0ByAuthors(
-      filter,
-      limit,
-      this.querySortControversial.bind(this),
-    );
-  }
-
-  /**
-   * Two-step sort: find rising events, extract authors, return kind 0s.
-   */
-  private async querySortRisingKind0(
-    filter: NostrFilter,
-    limit: number,
-  ): Promise<NostrEvent[]> {
-    return this.querySortKind0ByAuthors(
-      filter,
-      limit,
-      this.querySortRising.bind(this),
-    );
-  }
 
   /**
    * Sort kind 0 events by the total zap amount received across all of
@@ -1399,7 +1364,7 @@ export class OpenSearchRelay implements EventPublisher, AsyncDisposable {
       includeAuthKinds?: boolean;
       includeExpired?: boolean;
     },
-  ): Record<string, unknown> {
+  ): BoolQuery {
     const must: Record<string, unknown>[] = [
       { term: { deleted: false } }, // Always exclude deleted events
     ];
@@ -1637,7 +1602,7 @@ export class OpenSearchRelay implements EventPublisher, AsyncDisposable {
       }
     }
 
-    const bool: Record<string, unknown> = { must };
+    const bool: BoolQuery["bool"] = { must };
     if (mustNot.length > 0) {
       bool.must_not = mustNot;
     }
@@ -1685,12 +1650,9 @@ export class OpenSearchRelay implements EventPublisher, AsyncDisposable {
         type: "sort",
       });
       try {
-        const result = await this.querySortedEvents(filter, sortMode, limit);
+        return await this.querySortedEvents(filter, sortMode, limit);
+      } finally {
         sortEnd();
-        return result;
-      } catch (error) {
-        sortEnd();
-        throw error;
       }
     }
 
@@ -1730,13 +1692,10 @@ export class OpenSearchRelay implements EventPublisher, AsyncDisposable {
         index: this.indexName,
         body: searchBody,
       });
-      queryEnd();
 
       return this.hitsToEvents(response);
-    } catch (error) {
+    } finally {
       queryEnd();
-      this.log.error("query_failed", errFields(error));
-      throw error;
     }
   }
 
@@ -2284,17 +2243,7 @@ export class OpenSearchRelay implements EventPublisher, AsyncDisposable {
               },
             },
             script: {
-              source: `
-                ctx._source.replaced = true;
-                ctx._source.followers = 0;
-                ctx._source.engagers = 0;
-                ctx._source.comment_cnt = 0;
-                ctx._source.reaction_cnt = 0;
-                ctx._source.repost_cnt = 0;
-                ctx._source.quote_cnt = 0;
-                ctx._source.zap_amount_msats = 0;
-                ctx._source.zap_cnt = 0;
-              `,
+              source: REPLACED_PAINLESS,
               lang: "painless",
             },
           },
@@ -2348,18 +2297,10 @@ export class OpenSearchRelay implements EventPublisher, AsyncDisposable {
     // so a single flood of referencing events cannot amplify into unbounded
     // recomputeScores() work.
     const addDirtyId = (id: string): void => {
-      if (this.pendingDirtyIds.size >= OpenSearchRelay.MAX_PENDING_DIRTY) {
-        this.warnDirtyOverflow("ids");
-        return;
-      }
-      this.pendingDirtyIds.add(id);
+      this.addDirtyId(id);
     };
     const addDirtyPubkey = (pk: string): void => {
-      if (this.pendingDirtyPubkeys.size >= OpenSearchRelay.MAX_PENDING_DIRTY) {
-        this.warnDirtyOverflow("pubkeys");
-        return;
-      }
-      this.pendingDirtyPubkeys.add(pk);
+      this.addDirtyPubkey(pk);
     };
 
     for (const entry of entries) {
@@ -3061,31 +3002,10 @@ export class OpenSearchRelay implements EventPublisher, AsyncDisposable {
     }
 
     // Build score maps — initialize all dirty IDs with zeros.
-    const scores = new Map<
-      string,
-      {
-        followers: number;
-        engagers: number;
-        comment_cnt: number;
-        reaction_cnt: number;
-        repost_cnt: number;
-        quote_cnt: number;
-        zap_amount_msats: number;
-        zap_cnt: number;
-      }
-    >();
+    const scores = new Map<string, Scores>();
 
     for (const id of allDirtyIds) {
-      scores.set(id, {
-        followers: 0,
-        engagers: 0,
-        comment_cnt: 0,
-        reaction_cnt: 0,
-        repost_cnt: 0,
-        quote_cnt: 0,
-        zap_amount_msats: 0,
-        zap_cnt: 0,
-      });
+      scores.set(id, zeroScores());
     }
 
     // Phase 2a: Compute follower counts for dirty kind 0 events.
@@ -3131,7 +3051,7 @@ export class OpenSearchRelay implements EventPublisher, AsyncDisposable {
     //   4: quote count (kind 1 via tags_map.q)
     //   5: unique engagers (all engagement kinds via tags_map.e, cardinality agg)
     if (dirtyNonKind0Ids.length > 0) {
-      const QUERIES_PER_EVENT = 6;
+      const QUERIES_PER_EVENT = ENGAGEMENT_QUERIES.length;
       const baseMust = [
         { term: { deleted: false } },
         { term: { replaced: false } },
@@ -3140,123 +3060,26 @@ export class OpenSearchRelay implements EventPublisher, AsyncDisposable {
       const engagementSearches: Array<{ index: string; body: unknown }> = [];
 
       for (const eventId of dirtyNonKind0Ids) {
-        // 0: comments (kind 1, 1111)
-        engagementSearches.push({
-          index: this.indexName,
-          body: {
-            query: {
-              bool: {
-                must: [
-                  ...baseMust,
-                  { terms: { kind: [1, 1111] } },
-                  { term: { "tags_map.e": eventId } },
-                ],
+        for (const q of ENGAGEMENT_QUERIES) {
+          engagementSearches.push({
+            index: this.indexName,
+            body: {
+              query: {
+                bool: {
+                  must: [
+                    ...baseMust,
+                    { terms: { kind: q.kinds } },
+                    { term: { [`tags_map.${q.tag}`]: eventId } },
+                  ],
+                },
               },
+              size: 0,
+              // Only queries whose hit count is read need an exact total.
+              ...(q.field !== undefined && { track_total_hits: true }),
+              ...("agg" in q && { aggs: { [q.agg.name]: q.agg.body } }),
             },
-            size: 0,
-            track_total_hits: true,
-          },
-        });
-
-        // 1: reactions (kind 7)
-        engagementSearches.push({
-          index: this.indexName,
-          body: {
-            query: {
-              bool: {
-                must: [
-                  ...baseMust,
-                  { term: { kind: 7 } },
-                  { term: { "tags_map.e": eventId } },
-                ],
-              },
-            },
-            size: 0,
-            track_total_hits: true,
-          },
-        });
-
-        // 2: reposts (kind 6, 16)
-        engagementSearches.push({
-          index: this.indexName,
-          body: {
-            query: {
-              bool: {
-                must: [
-                  ...baseMust,
-                  { terms: { kind: [6, 16] } },
-                  { term: { "tags_map.e": eventId } },
-                ],
-              },
-            },
-            size: 0,
-            track_total_hits: true,
-          },
-        });
-
-        // 3: zaps (kind 9735 Lightning + kind 8333 onchain) — need sum
-        // aggregation for amount_msats
-        engagementSearches.push({
-          index: this.indexName,
-          body: {
-            query: {
-              bool: {
-                must: [
-                  ...baseMust,
-                  { terms: { kind: [9735, 8333] } },
-                  { term: { "tags_map.e": eventId } },
-                ],
-              },
-            },
-            size: 0,
-            track_total_hits: true,
-            aggs: {
-              total_msats: {
-                sum: { field: "amount_msats" },
-              },
-            },
-          },
-        });
-
-        // 4: quotes (kind 1 via tags_map.q)
-        engagementSearches.push({
-          index: this.indexName,
-          body: {
-            query: {
-              bool: {
-                must: [
-                  ...baseMust,
-                  { term: { kind: 1 } },
-                  { term: { "tags_map.q": eventId } },
-                ],
-              },
-            },
-            size: 0,
-            track_total_hits: true,
-          },
-        });
-
-        // 5: unique engagers (cardinality on pubkey)
-        engagementSearches.push({
-          index: this.indexName,
-          body: {
-            query: {
-              bool: {
-                must: [
-                  ...baseMust,
-                  { terms: { kind: [1, 6, 7, 16, 1111, 9735, 8333] } },
-                  { term: { "tags_map.e": eventId } },
-                ],
-              },
-            },
-            size: 0,
-            aggs: {
-              unique_authors: {
-                cardinality: { field: "pubkey" },
-              },
-            },
-          },
-        });
+          });
+        }
       }
 
       const engagementResult = await this.client.msearch(engagementSearches);
@@ -3268,33 +3091,18 @@ export class OpenSearchRelay implements EventPublisher, AsyncDisposable {
 
         const base = i * QUERIES_PER_EVENT;
 
-        const getCount = (resp: MsearchResponseItem | undefined): number => {
-          return resp?.hits?.total?.value ?? 0;
-        };
-
-        // 0: comments
-        s.comment_cnt = getCount(responses[base]);
-        // 1: reactions
-        s.reaction_cnt = getCount(responses[base + 1]);
-        // 2: reposts
-        s.repost_cnt = getCount(responses[base + 2]);
-        // 3: zaps (count + sum)
-        s.zap_cnt = getCount(responses[base + 3]);
-        s.zap_amount_msats =
-          (
-            responses[base + 3]?.aggregations as {
-              total_msats?: { value?: number };
-            }
-          )?.total_msats?.value ?? 0;
-        // 4: quotes
-        s.quote_cnt = getCount(responses[base + 4]);
-        // 5: unique engagers
-        s.engagers =
-          (
-            responses[base + 5]?.aggregations as {
-              unique_authors?: { value?: number };
-            }
-          )?.unique_authors?.value ?? 0;
+        ENGAGEMENT_QUERIES.forEach((q, j) => {
+          const resp: MsearchResponseItem | undefined = responses[base + j];
+          if (q.field !== undefined) {
+            s[q.field] = resp?.hits?.total?.value ?? 0;
+          }
+          if ("agg" in q) {
+            const aggs = resp?.aggregations as
+              | Record<string, { value?: number } | undefined>
+              | undefined;
+            s[q.agg.into] = aggs?.[q.agg.name]?.value ?? 0;
+          }
+        });
       }
     }
 
