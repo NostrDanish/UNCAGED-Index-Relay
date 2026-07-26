@@ -1425,7 +1425,11 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
    */
   private buildQuery(
     filter: NostrFilter,
-    opts?: { includeReplaced?: boolean; includeAuthKinds?: boolean },
+    opts?: {
+      includeReplaced?: boolean;
+      includeAuthKinds?: boolean;
+      includeExpired?: boolean;
+    },
   ): Record<string, unknown> {
     const must: Record<string, unknown>[] = [
       { term: { deleted: false } }, // Always exclude deleted events
@@ -1437,11 +1441,14 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
       mustNot.push({ term: { replaced: true } });
     }
 
-    // NIP-40: Exclude expired events
-    const now = Math.floor(Date.now() / 1000);
-    mustNot.push({
-      range: { "tags_map.expiration": { lte: String(now) } },
-    });
+    // NIP-40: Exclude expired events. Deletion opts out — an expired event is
+    // still stored, and a vanish request must reach it.
+    if (!opts?.includeExpired) {
+      const now = Math.floor(Date.now() / 1000);
+      mustNot.push({
+        range: { "tags_map.expiration": { lte: String(now) } },
+      });
+    }
 
     // ID filter
     if (filter.ids && filter.ids.length > 0) {
@@ -2718,108 +2725,64 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
   }
 
   /**
-   * Remove events matching the given filters (soft delete using deleted field).
-   * Also soft-deletes any `replaced: true` historical versions matching the
-   * same filter criteria via `updateByQuery`.
+   * Remove events matching the given filters (soft delete by setting the
+   * `deleted` field), including historical (`replaced: true`) versions.
+   *
+   * Deletion runs entirely server-side as one `updateByQuery` per filter, so
+   * it is not bounded by the search result window: NIP-62 requires a vanish
+   * request to delete *everything* the pubkey wrote, however much that is.
+   * For the same reason it looks past the visibility rules a REQ obeys —
+   * auth-protected kinds (the author's own DMs) and expired-but-stored events
+   * are still matched.
    *
    * Events whose kind is listed in `excludeKinds` are spared even when they
    * match a filter. NIP-62 vanish requests use this to delete everything a
    * pubkey authored except the gift wraps it signed, which belong to their
    * p-tagged recipients.
+   *
+   * A filter's `limit` is ignored — deletion is defined by what a filter
+   * matches, not by how many events a client may read.
    */
   async remove(
     filters: NostrFilter[],
     opts?: { signal?: AbortSignal; excludeKinds?: number[] },
   ): Promise<void> {
-    const docIdsToDelete: string[] = [];
-    const excludeKinds = new Set(opts?.excludeKinds ?? []);
+    const excludeKinds = opts?.excludeKinds ?? [];
 
-    for (const filter of filters) {
-      if (opts?.signal?.aborted) {
-        break;
-      }
-
-      try {
-        const events = await this.queryFilter(filter, opts?.signal);
-
-        for (const event of events) {
-          if (excludeKinds.has(event.kind)) continue;
-          docIdsToDelete.push(this.getDocumentId(event));
-        }
-      } catch (error) {
-        this.log.error("remove_query_failed", errFields(error));
-      }
-    }
-
-    // Remove duplicates
-    const uniqueDocIds = [...new Set(docIdsToDelete)];
-
-    // Soft delete all matching documents by setting deleted: true
-    if (uniqueDocIds.length > 0) {
-      const body: Array<Record<string, unknown>> = [];
-
-      for (const docId of uniqueDocIds) {
-        body.push({
-          update: {
-            _index: this.indexName,
-            _id: docId,
-          },
-        });
-        body.push({
-          doc: { deleted: true },
-        });
-      }
-
-      try {
-        const response = await this.writeClient.bulk({
-          body,
-          refresh: true, // Refresh to make deletions visible immediately
-          signal: opts?.signal,
-        });
-
-        if (response.body.errors) {
-          const erroredDocuments = response.body.items.filter(
-            (item) => item.update?.error,
-          );
-          this.log.error("soft_delete_bulk_errors", {
-            count: erroredDocuments.length,
-            errors: JSON.stringify(erroredDocuments.slice(0, 5)),
-          });
-        } else {
-          this.log.debug("soft_deleted", { count: uniqueDocIds.length });
-        }
-      } catch (error) {
-        this.log.error("soft_delete_bulk_failed", errFields(error));
-        throw error;
-      }
-    }
-
-    // Also soft-delete historical (replaced) versions matching these filters.
     for (const filter of filters) {
       if (opts?.signal?.aborted) break;
+
+      const bool: Record<string, unknown> = {
+        must: [
+          this.buildQuery(filter, {
+            includeReplaced: true,
+            includeAuthKinds: true,
+            includeExpired: true,
+          }),
+        ],
+      };
+      if (excludeKinds.length > 0) {
+        bool.must_not = [{ terms: { kind: excludeKinds } }];
+      }
+
       try {
-        const historyQuery = this.buildQuery(filter, { includeReplaced: true });
-        const bool: Record<string, unknown> = {
-          must: [historyQuery, { term: { replaced: true } }],
-        };
-        if (excludeKinds.size > 0) {
-          bool.must_not = [{ terms: { kind: [...excludeKinds] } }];
-        }
-        const wrappedQuery = { bool };
-        await this.writeClient.updateByQuery({
+        const response = await this.writeClient.updateByQuery({
           index: this.indexName,
           body: {
-            query: wrappedQuery,
+            query: { bool },
             script: {
               source: "ctx._source.deleted = true",
               lang: "painless",
             },
           },
-          refresh: true,
+          refresh: true, // Make deletions visible immediately
           conflicts: "proceed",
         });
+        const { updated } = (response.body ?? {}) as { updated?: number };
+        this.log.debug("soft_deleted", { count: updated ?? 0 });
       } catch (error) {
-        this.log.error("history_delete_failed", errFields(error));
+        this.log.error("soft_delete_failed", errFields(error));
+        throw error;
       }
     }
   }

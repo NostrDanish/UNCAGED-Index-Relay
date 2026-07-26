@@ -7,6 +7,370 @@ import { OpenSearchRelay } from "./opensearch.ts";
 import type { Client } from "./opensearch-client.ts";
 
 describe("OpenSearchRelay", () => {
+  // Shared mock OpenSearch client. It evaluates queries for real (rather than
+  // returning whatever is stored), so tests exercise actual filter matching —
+  // which is the whole point when the thing under test is a query builder.
+
+  /** Helper: extract filter criteria from a bool query (flat or nested). */
+  const extractFilters = (
+    boolQuery: Record<string, unknown>,
+  ): {
+    authorFilter?: string[];
+    kindFilter?: number[];
+    idFilter?: string[];
+    excludeIds?: string[];
+    excludeKinds?: number[];
+    /** NIP-40: exclude docs whose `expiration` tag is at or before this time. */
+    excludeExpiredAt?: number;
+    requireReplaced: boolean;
+    requireReplacedFalse: boolean;
+    excludeReplaced: boolean;
+    untilFilter?: number;
+    tagFilters: Map<string, string[]>;
+  } => {
+    let authorFilter: string[] | undefined;
+    let kindFilter: number[] | undefined;
+    let idFilter: string[] | undefined;
+    let excludeIds: string[] | undefined;
+    let excludeKinds: number[] | undefined;
+    let excludeExpiredAt: number | undefined;
+    let requireReplaced = false;
+    let requireReplacedFalse = false;
+    let excludeReplaced = false;
+    let untilFilter: number | undefined;
+    const tagFilters = new Map<string, string[]>();
+
+    /**
+     * Collect exclusions from a `must_not` array. Applies at any depth: a
+     * `buildQuery` result nested inside an outer bool (as deletion does)
+     * carries its exclusions with it.
+     */
+    const processMustNot = (
+      clauses: Array<Record<string, unknown>>,
+      nested: boolean,
+    ) => {
+      for (const clause of clauses) {
+        const term = clause.term as Record<string, unknown> | undefined;
+        const terms = clause.terms as Record<string, unknown> | undefined;
+
+        if (term?.replaced === true) {
+          // Nested, this negates an outer `must: replaced` rather than
+          // standing on its own.
+          if (nested) requireReplaced = false;
+          else excludeReplaced = true;
+        }
+        if (term?.id) {
+          excludeIds = excludeIds || [];
+          excludeIds.push(term.id as string);
+        }
+        if (terms?.id) {
+          excludeIds = excludeIds || [];
+          excludeIds.push(...(terms.id as string[]));
+        }
+        if (terms?.kind) {
+          excludeKinds = excludeKinds || [];
+          excludeKinds.push(...(terms.kind as number[]));
+        }
+        const expiration = (
+          clause.range as Record<string, unknown> | undefined
+        )?.["tags_map.expiration"] as { lte?: string } | undefined;
+        if (expiration?.lte !== undefined) {
+          excludeExpiredAt = Number(expiration.lte);
+        }
+      }
+    };
+
+    const processClauses = (clauses: Array<Record<string, unknown>>) => {
+      for (const clause of clauses) {
+        // Direct term/terms at this level
+        const terms = clause.terms as Record<string, unknown> | undefined;
+        const term = clause.term as Record<string, unknown> | undefined;
+
+        if (term?.replaced === true) requireReplaced = true;
+        if (term?.replaced === false) requireReplacedFalse = true;
+        if (term?.deleted === false) {
+          /* always excluded by default */
+        }
+        if (terms?.pubkey) authorFilter = terms.pubkey as string[];
+        if (terms?.kind) kindFilter = (terms.kind as number[]).map(Number);
+        if (terms?.id) idFilter = terms.id as string[];
+        if (term?.kind !== undefined) kindFilter = [Number(term.kind)];
+        if (term?.pubkey) authorFilter = [term.pubkey as string];
+        if (clause.range) {
+          const createdAt = (clause.range as Record<string, unknown>)
+            .created_at as { lte?: number } | undefined;
+          if (createdAt?.lte) untilFilter = createdAt.lte;
+        }
+
+        // Extract tags_map filters
+        if (terms) {
+          for (const [key, val] of Object.entries(terms)) {
+            if (key.startsWith("tags_map.")) {
+              tagFilters.set(key.replace("tags_map.", ""), val as string[]);
+            }
+          }
+        }
+        if (term) {
+          for (const [key, val] of Object.entries(term)) {
+            if (key.startsWith("tags_map.")) {
+              tagFilters.set(key.replace("tags_map.", ""), [val as string]);
+            }
+          }
+        }
+
+        // Recurse into nested bool
+        if (clause.bool) {
+          const nested = clause.bool as Record<string, unknown>;
+          if (nested.must)
+            processClauses(nested.must as Array<Record<string, unknown>>);
+          if (nested.must_not) {
+            processMustNot(
+              nested.must_not as Array<Record<string, unknown>>,
+              true,
+            );
+          }
+        }
+      }
+    };
+
+    const must = (boolQuery.must as Array<Record<string, unknown>>) || [];
+    const mustNot =
+      (boolQuery.must_not as Array<Record<string, unknown>>) || [];
+
+    processClauses(must);
+    processMustNot(mustNot, false);
+
+    return {
+      authorFilter,
+      kindFilter,
+      idFilter,
+      excludeIds,
+      excludeKinds,
+      excludeExpiredAt,
+      requireReplaced,
+      requireReplacedFalse,
+      excludeReplaced,
+      untilFilter,
+      tagFilters,
+    };
+  };
+
+  /** Helper: test whether a document matches extracted filters. */
+  const matchesFilters = (
+    d: NostrEvent & {
+      deleted?: boolean;
+      replaced?: boolean;
+      tags_map?: Record<string, string[]>;
+    },
+    filters: ReturnType<typeof extractFilters>,
+  ): boolean => {
+    if (d.deleted) return false;
+    if (filters.excludeReplaced && d.replaced) return false;
+    if (filters.requireReplaced && !d.replaced) return false;
+    if (filters.requireReplacedFalse && d.replaced) return false;
+    if (filters.authorFilter && !filters.authorFilter.includes(d.pubkey))
+      return false;
+    if (filters.kindFilter && !filters.kindFilter.includes(d.kind))
+      return false;
+    if (filters.idFilter && !filters.idFilter.includes(d.id)) return false;
+    if (filters.excludeIds?.includes(d.id)) return false;
+    if (filters.excludeKinds?.includes(d.kind)) return false;
+    if (filters.excludeExpiredAt !== undefined) {
+      const expiration = d.tags_map?.expiration?.[0];
+      if (
+        expiration !== undefined &&
+        Number(expiration) <= filters.excludeExpiredAt
+      )
+        return false;
+    }
+    if (filters.untilFilter && d.created_at > filters.untilFilter) return false;
+
+    for (const [tagName, values] of filters.tagFilters) {
+      const docValues = d.tags_map?.[tagName] ?? [];
+      if (!values.some((v) => docValues.includes(v))) return false;
+    }
+    return true;
+  };
+
+  /**
+   * Match a document against a `bool` query, handling `must`, `must_not`,
+   * `should`, and `ids` clauses. Recurses for batched slot-cleanup queries
+   * that combine multiple per-slot `bool.must` clauses inside `bool.should`.
+   */
+  const matchesQueryBool = (
+    d: NostrEvent & {
+      deleted?: boolean;
+      replaced?: boolean;
+      tags_map?: Record<string, string[]>;
+    },
+    // biome-ignore lint/suspicious/noExplicitAny: mock accepts any query shape
+    bool: any,
+  ): boolean => {
+    // must_not: { ids: { values: [...] } } excludes specific docs by ID.
+    const mustNot = (bool.must_not ?? []) as Array<Record<string, unknown>>;
+    for (const clause of mustNot) {
+      const ids = (clause.ids as { values?: string[] } | undefined)?.values;
+      if (ids?.includes(d.id)) return false;
+    }
+
+    // should: [{ bool: {...} }, ...] with minimum_should_match: 1 means at
+    // least one inner bool must match.
+    const should = bool.should as Array<Record<string, unknown>> | undefined;
+    if (should && should.length > 0) {
+      const min = (bool.minimum_should_match as number | undefined) ?? 1;
+      let matched = 0;
+      for (const clause of should) {
+        const inner = clause.bool as Record<string, unknown> | undefined;
+        if (inner && matchesQueryBool(d, inner)) {
+          matched++;
+          if (matched >= min) break;
+        }
+      }
+      if (matched < min) return false;
+    }
+
+    // Fall back to the flat-must/must_not extractor for the leaf bool case.
+    const filters = extractFilters(bool);
+    return matchesFilters(d, filters);
+  };
+
+  const createHistoryMockClient = () => {
+    const documents = new Map<string, unknown>();
+    // biome-ignore lint/suspicious/noExplicitAny: shared search impl reused by msearch
+    const runSearch = (body: any) => {
+      const results: unknown[] = [];
+      const filters = extractFilters(body.query.bool);
+
+      for (const [_id, doc] of documents.entries()) {
+        const d = doc as NostrEvent & {
+          deleted?: boolean;
+          replaced?: boolean;
+          tags_map?: Record<string, string[]>;
+        };
+        if (!matchesFilters(d, filters)) continue;
+        results.push(doc);
+      }
+
+      results.sort(
+        (a, b) => (b as NostrEvent).created_at - (a as NostrEvent).created_at,
+      );
+
+      const size = body.size ?? results.length;
+      return {
+        hits: {
+          hits: results.slice(0, size).map((doc) => ({ _source: doc })),
+        },
+      };
+    };
+    return {
+      documents,
+      client: {
+        // biome-ignore lint/suspicious/noExplicitAny: mock accepts any query shape
+        search: async ({ body }: { body: any }) => {
+          return { body: runSearch(body) };
+        },
+        // biome-ignore lint/suspicious/noExplicitAny: mock accepts any query shape
+        msearch: async (requests: Array<{ body: any }>) => {
+          const responses = requests.map((req) => runSearch(req.body));
+          return { body: { responses } };
+        },
+        bulk: async ({ body }: { body: unknown[] }) => {
+          const items: Array<Record<string, unknown>> = [];
+          for (let i = 0; i < body.length; i += 2) {
+            const action = body[i] as {
+              index?: { _id: string };
+              update?: { _id: string };
+            };
+            const payload = body[i + 1] as Record<string, unknown>;
+
+            if (action.index) {
+              documents.set(action.index._id, payload);
+              items.push({ index: {} });
+            } else if (action.update) {
+              if (payload.doc) {
+                const existing = documents.get(action.update._id);
+                if (existing) {
+                  documents.set(action.update._id, {
+                    ...existing,
+                    ...(payload.doc as Record<string, unknown>),
+                  });
+                }
+              }
+              items.push({ update: {} });
+            }
+          }
+          return { body: { errors: false, items } };
+        },
+        get: async ({ id }: { id: string }) => {
+          const doc = documents.get(id);
+          if (doc) return { body: { found: true, _source: doc } };
+          return { body: { found: false }, statusCode: 404 };
+        },
+        // biome-ignore lint/suspicious/noExplicitAny: mock accepts any query shape
+        deleteByQuery: async ({ body }: { body: any }) => {
+          const matchesQuery = (
+            d: NostrEvent & {
+              deleted?: boolean;
+              replaced?: boolean;
+              tags_map?: Record<string, string[]>;
+            },
+          ): boolean => matchesQueryBool(d, body.query.bool);
+          let deleted = 0;
+
+          for (const [id, doc] of documents.entries()) {
+            const d = doc as NostrEvent & {
+              deleted?: boolean;
+              replaced?: boolean;
+              tags_map?: Record<string, string[]>;
+            };
+            if (!matchesQuery(d)) continue;
+            documents.delete(id);
+            deleted++;
+          }
+
+          return { body: { deleted } };
+        },
+        // biome-ignore lint/suspicious/noExplicitAny: mock accepts any query shape
+        updateByQuery: async ({ body }: { body: any }) => {
+          let updated = 0;
+
+          for (const [_id, doc] of documents.entries()) {
+            const d = doc as NostrEvent & {
+              deleted?: boolean;
+              replaced?: boolean;
+              tags_map?: Record<string, string[]>;
+            };
+            if (!matchesQueryBool(d, body.query.bool)) continue;
+
+            const script = body.script.source as string;
+            if (script.includes("ctx._source.deleted = true")) {
+              (d as Record<string, unknown>).deleted = true;
+              updated++;
+            } else if (script.includes("ctx._source.replaced = true")) {
+              (d as Record<string, unknown>).replaced = true;
+              (d as Record<string, unknown>).followers = 0;
+              (d as Record<string, unknown>).engagers = 0;
+              (d as Record<string, unknown>).comment_cnt = 0;
+              (d as Record<string, unknown>).reaction_cnt = 0;
+              (d as Record<string, unknown>).repost_cnt = 0;
+              (d as Record<string, unknown>).quote_cnt = 0;
+              (d as Record<string, unknown>).zap_amount_msats = 0;
+              (d as Record<string, unknown>).zap_cnt = 0;
+              updated++;
+            }
+          }
+
+          return { body: { updated } };
+        },
+        indices: {
+          exists: async () => ({ body: true }),
+          create: async () => ({ body: {} }),
+        },
+        close: async () => {},
+      },
+    };
+  };
+
   /** Minimum env required to construct a Config (RELAY_URL and NOSTR_NSEC are mandatory). */
   const baseEnv = (...overrides: [string, string][]): Map<string, string> =>
     new Map<string, string>([
@@ -50,184 +414,8 @@ describe("OpenSearchRelay", () => {
   });
 
   describe("event deletion", () => {
-    // Mock OpenSearch client for deletion tests
-    const createMockClient = () => {
-      const documents = new Map<string, unknown>();
-      return {
-        documents,
-        client: {
-          search: async ({
-            body,
-          }: {
-            body: {
-              query: {
-                bool: {
-                  must: Array<{
-                    terms?: { pubkey?: string[] };
-                    term?: { deleted?: boolean };
-                  }>;
-                  must_not?: Array<{
-                    term?: { replaced?: boolean };
-                  }>;
-                };
-              };
-            };
-          }) => {
-            // Return stored documents that match the filter
-            const results: unknown[] = [];
-
-            // Extract author filter if present
-            let authorFilter: string[] | undefined;
-            for (const clause of body.query.bool.must) {
-              if (clause.terms?.pubkey) {
-                authorFilter = clause.terms.pubkey;
-              }
-            }
-
-            // Check if replaced events should be excluded
-            const excludeReplaced = body.query.bool.must_not?.some(
-              (clause) => clause.term?.replaced === true,
-            );
-
-            for (const [_id, doc] of documents.entries()) {
-              const docTyped = doc as NostrEvent & {
-                deleted?: boolean;
-                replaced?: boolean;
-              };
-
-              // Skip deleted events
-              if (docTyped.deleted) {
-                continue;
-              }
-
-              // Skip replaced events if excluded
-              if (excludeReplaced && docTyped.replaced) {
-                continue;
-              }
-
-              // Filter by author if specified
-              if (authorFilter && !authorFilter.includes(docTyped.pubkey)) {
-                continue;
-              }
-
-              results.push(doc);
-            }
-            return {
-              body: {
-                hits: {
-                  hits: results.map((doc) => ({ _source: doc })),
-                },
-              },
-            };
-          },
-          bulk: async ({ body }: { body: unknown[] }) => {
-            const items: Array<Record<string, unknown>> = [];
-            for (let i = 0; i < body.length; i += 2) {
-              const action = body[i] as {
-                index?: { _id: string };
-                update?: { _id: string };
-              };
-              const payload = body[i + 1] as Record<string, unknown>;
-
-              if (action.index) {
-                documents.set(action.index._id, payload);
-                items.push({ index: {} });
-              } else if (action.update) {
-                if (payload.doc) {
-                  // Partial update (used by remove)
-                  const existing = documents.get(action.update._id);
-                  if (existing) {
-                    documents.set(action.update._id, {
-                      ...existing,
-                      ...(payload.doc as Record<string, unknown>),
-                    });
-                  }
-                } else if (payload.upsert) {
-                  // Scripted upsert (used by replaceable events)
-                  const existing = documents.get(action.update._id);
-                  if (!existing) {
-                    documents.set(action.update._id, payload.upsert);
-                  } else {
-                    // Simulate the Painless replaceable upsert script
-                    const existingDoc = existing as Record<string, unknown>;
-                    const newDoc = (
-                      payload.script as {
-                        params: { event: Record<string, unknown> };
-                      }
-                    ).params.event;
-                    if (existingDoc.deleted === true) {
-                      // noop
-                    } else if (
-                      (newDoc.created_at as number) >
-                        (existingDoc.created_at as number) ||
-                      ((newDoc.created_at as number) ===
-                        (existingDoc.created_at as number) &&
-                        (newDoc.id as string) < (existingDoc.id as string))
-                    ) {
-                      // Preserve stats fields across replacement
-                      const statsFields = [
-                        "followers",
-                        "engagers",
-                        "comment_cnt",
-                        "reaction_cnt",
-                        "repost_cnt",
-                        "zap_amount_msats",
-                      ];
-                      const preserved: Record<string, unknown> = {};
-                      for (const field of statsFields) {
-                        preserved[field] = existingDoc[field];
-                      }
-                      documents.set(action.update._id, {
-                        ...newDoc,
-                        ...preserved,
-                      });
-                    }
-                  }
-                }
-                items.push({ update: {} });
-              }
-            }
-            return {
-              body: {
-                errors: false,
-                items,
-              },
-            };
-          },
-          mget: async ({ body }: { body: { ids: string[] } }) => {
-            const docs = body.ids.map((id) => {
-              const doc = documents.get(id);
-              if (doc) {
-                return { found: true, _id: id, _source: doc };
-              }
-              return { found: false, _id: id };
-            });
-            return { body: { docs } };
-          },
-          get: async ({ id }: { id: string }) => {
-            const doc = documents.get(id);
-            if (doc) {
-              return { body: { found: true, _source: doc } };
-            }
-            return { body: { found: false }, statusCode: 404 };
-          },
-          updateByQuery: async () => ({ body: { updated: 0 } }),
-          msearch: async (requests: unknown[]) => ({
-            body: {
-              responses: requests.map(() => ({ hits: { hits: [] } })),
-            },
-          }),
-          indices: {
-            exists: async () => ({ body: true }),
-            create: async () => ({ body: {} }),
-          },
-          close: async () => {},
-        },
-      };
-    };
-
     it("should delete events by e-tag (event ID)", async () => {
-      const { client, documents } = createMockClient();
+      const { client, documents } = createHistoryMockClient();
       const relay = new OpenSearchRelay(client as unknown as Client, {
         indexName: "test-index",
         bulkMaxSize: 1,
@@ -262,7 +450,7 @@ describe("OpenSearchRelay", () => {
     });
 
     it("should delete addressable events by a-tag", async () => {
-      const { client, documents } = createMockClient();
+      const { client, documents } = createHistoryMockClient();
       const relay = new OpenSearchRelay(client as unknown as Client, {
         indexName: "test-index",
         bulkMaxSize: 1,
@@ -304,7 +492,7 @@ describe("OpenSearchRelay", () => {
     });
 
     it("should delete replaceable events by kind and author", async () => {
-      const { client, documents } = createMockClient();
+      const { client, documents } = createHistoryMockClient();
       const relay = new OpenSearchRelay(client as unknown as Client, {
         indexName: "test-index",
         bulkMaxSize: 1,
@@ -344,7 +532,7 @@ describe("OpenSearchRelay", () => {
     });
 
     it("should not delete events from different authors", async () => {
-      const { client, documents } = createMockClient();
+      const { client, documents } = createHistoryMockClient();
       const relay = new OpenSearchRelay(client as unknown as Client, {
         indexName: "test-index",
         bulkMaxSize: 1,
@@ -388,7 +576,7 @@ describe("OpenSearchRelay", () => {
     });
 
     it("should delete replaceable events using a-tag with empty d-identifier", async () => {
-      const { client, documents } = createMockClient();
+      const { client, documents } = createHistoryMockClient();
       const relay = new OpenSearchRelay(client as unknown as Client, {
         indexName: "test-index",
         bulkMaxSize: 1,
@@ -428,7 +616,7 @@ describe("OpenSearchRelay", () => {
     });
 
     it("should index new replaceable event as a separate document", async () => {
-      const { client, documents } = createMockClient();
+      const { client, documents } = createHistoryMockClient();
       const relay = new OpenSearchRelay(client as unknown as Client, {
         indexName: "test-index",
         bulkMaxSize: 1,
@@ -484,331 +672,6 @@ describe("OpenSearchRelay", () => {
   });
 
   describe("replaceable event history", () => {
-    // Reuse the deletion mock client (supports mget, search, bulk with
-    // scripted upsert, and partial doc update).
-    /** Helper: extract filter criteria from a bool query (flat or nested). */
-    const extractFilters = (
-      boolQuery: Record<string, unknown>,
-    ): {
-      authorFilter?: string[];
-      kindFilter?: number[];
-      idFilter?: string[];
-      excludeIds?: string[];
-      requireReplaced: boolean;
-      requireReplacedFalse: boolean;
-      excludeReplaced: boolean;
-      untilFilter?: number;
-      tagFilters: Map<string, string[]>;
-    } => {
-      let authorFilter: string[] | undefined;
-      let kindFilter: number[] | undefined;
-      let idFilter: string[] | undefined;
-      let excludeIds: string[] | undefined;
-      let requireReplaced = false;
-      let requireReplacedFalse = false;
-      let excludeReplaced = false;
-      let untilFilter: number | undefined;
-      const tagFilters = new Map<string, string[]>();
-
-      const processClauses = (clauses: Array<Record<string, unknown>>) => {
-        for (const clause of clauses) {
-          // Direct term/terms at this level
-          const terms = clause.terms as Record<string, unknown> | undefined;
-          const term = clause.term as Record<string, unknown> | undefined;
-
-          if (term?.replaced === true) requireReplaced = true;
-          if (term?.replaced === false) requireReplacedFalse = true;
-          if (term?.deleted === false) {
-            /* always excluded by default */
-          }
-          if (terms?.pubkey) authorFilter = terms.pubkey as string[];
-          if (terms?.kind) kindFilter = (terms.kind as number[]).map(Number);
-          if (terms?.id) idFilter = terms.id as string[];
-          if (term?.kind !== undefined) kindFilter = [Number(term.kind)];
-          if (term?.pubkey) authorFilter = [term.pubkey as string];
-          if (clause.range) {
-            const createdAt = (clause.range as Record<string, unknown>)
-              .created_at as { lte?: number } | undefined;
-            if (createdAt?.lte) untilFilter = createdAt.lte;
-          }
-
-          // Extract tags_map filters
-          if (terms) {
-            for (const [key, val] of Object.entries(terms)) {
-              if (key.startsWith("tags_map.")) {
-                tagFilters.set(key.replace("tags_map.", ""), val as string[]);
-              }
-            }
-          }
-          if (term) {
-            for (const [key, val] of Object.entries(term)) {
-              if (key.startsWith("tags_map.")) {
-                tagFilters.set(key.replace("tags_map.", ""), [val as string]);
-              }
-            }
-          }
-
-          // Recurse into nested bool
-          if (clause.bool) {
-            const nested = clause.bool as Record<string, unknown>;
-            if (nested.must)
-              processClauses(nested.must as Array<Record<string, unknown>>);
-            if (nested.must_not) {
-              for (const neg of nested.must_not as Array<
-                Record<string, unknown>
-              >) {
-                if ((neg.term as Record<string, unknown>)?.replaced === true)
-                  requireReplaced = false; // must_not replaced:true means exclude replaced
-                if (neg.term && (neg.term as Record<string, unknown>).id) {
-                  excludeIds = excludeIds || [];
-                  excludeIds.push(
-                    (neg.term as Record<string, unknown>).id as string,
-                  );
-                }
-              }
-            }
-          }
-        }
-      };
-
-      const must = (boolQuery.must as Array<Record<string, unknown>>) || [];
-      const mustNot =
-        (boolQuery.must_not as Array<Record<string, unknown>>) || [];
-
-      processClauses(must);
-
-      for (const clause of mustNot) {
-        const term = clause.term as Record<string, unknown> | undefined;
-        if (term?.replaced === true) {
-          excludeReplaced = true;
-        }
-        if (term?.id) {
-          excludeIds = excludeIds || [];
-          excludeIds.push(term.id as string);
-        }
-      }
-
-      return {
-        authorFilter,
-        kindFilter,
-        idFilter,
-        excludeIds,
-        requireReplaced,
-        requireReplacedFalse,
-        excludeReplaced,
-        untilFilter,
-        tagFilters,
-      };
-    };
-
-    /** Helper: test whether a document matches extracted filters. */
-    const matchesFilters = (
-      d: NostrEvent & {
-        deleted?: boolean;
-        replaced?: boolean;
-        tags_map?: Record<string, string[]>;
-      },
-      filters: ReturnType<typeof extractFilters>,
-    ): boolean => {
-      if (d.deleted) return false;
-      if (filters.excludeReplaced && d.replaced) return false;
-      if (filters.requireReplaced && !d.replaced) return false;
-      if (filters.requireReplacedFalse && d.replaced) return false;
-      if (filters.authorFilter && !filters.authorFilter.includes(d.pubkey))
-        return false;
-      if (filters.kindFilter && !filters.kindFilter.includes(d.kind))
-        return false;
-      if (filters.idFilter && !filters.idFilter.includes(d.id)) return false;
-      if (filters.excludeIds?.includes(d.id)) return false;
-      if (filters.untilFilter && d.created_at > filters.untilFilter)
-        return false;
-
-      for (const [tagName, values] of filters.tagFilters) {
-        const docValues = d.tags_map?.[tagName] ?? [];
-        if (!values.some((v) => docValues.includes(v))) return false;
-      }
-      return true;
-    };
-
-    /**
-     * Match a document against a `bool` query, handling `must`, `must_not`,
-     * `should`, and `ids` clauses. Recurses for batched slot-cleanup queries
-     * that combine multiple per-slot `bool.must` clauses inside `bool.should`.
-     */
-    const matchesQueryBool = (
-      d: NostrEvent & {
-        deleted?: boolean;
-        replaced?: boolean;
-        tags_map?: Record<string, string[]>;
-      },
-      // biome-ignore lint/suspicious/noExplicitAny: mock accepts any query shape
-      bool: any,
-    ): boolean => {
-      // must_not: { ids: { values: [...] } } excludes specific docs by ID.
-      const mustNot = (bool.must_not ?? []) as Array<Record<string, unknown>>;
-      for (const clause of mustNot) {
-        const ids = (clause.ids as { values?: string[] } | undefined)?.values;
-        if (ids?.includes(d.id)) return false;
-      }
-
-      // should: [{ bool: {...} }, ...] with minimum_should_match: 1 means at
-      // least one inner bool must match.
-      const should = bool.should as Array<Record<string, unknown>> | undefined;
-      if (should && should.length > 0) {
-        const min = (bool.minimum_should_match as number | undefined) ?? 1;
-        let matched = 0;
-        for (const clause of should) {
-          const inner = clause.bool as Record<string, unknown> | undefined;
-          if (inner && matchesQueryBool(d, inner)) {
-            matched++;
-            if (matched >= min) break;
-          }
-        }
-        if (matched < min) return false;
-      }
-
-      // Fall back to the flat-must/must_not extractor for the leaf bool case.
-      const filters = extractFilters(bool);
-      return matchesFilters(d, filters);
-    };
-
-    const createHistoryMockClient = () => {
-      const documents = new Map<string, unknown>();
-      // biome-ignore lint/suspicious/noExplicitAny: shared search impl reused by msearch
-      const runSearch = (body: any) => {
-        const results: unknown[] = [];
-        const filters = extractFilters(body.query.bool);
-
-        for (const [_id, doc] of documents.entries()) {
-          const d = doc as NostrEvent & {
-            deleted?: boolean;
-            replaced?: boolean;
-            tags_map?: Record<string, string[]>;
-          };
-          if (!matchesFilters(d, filters)) continue;
-          results.push(doc);
-        }
-
-        results.sort(
-          (a, b) => (b as NostrEvent).created_at - (a as NostrEvent).created_at,
-        );
-
-        const size = body.size ?? results.length;
-        return {
-          hits: {
-            hits: results.slice(0, size).map((doc) => ({ _source: doc })),
-          },
-        };
-      };
-      return {
-        documents,
-        client: {
-          // biome-ignore lint/suspicious/noExplicitAny: mock accepts any query shape
-          search: async ({ body }: { body: any }) => {
-            return { body: runSearch(body) };
-          },
-          // biome-ignore lint/suspicious/noExplicitAny: mock accepts any query shape
-          msearch: async (requests: Array<{ body: any }>) => {
-            const responses = requests.map((req) => runSearch(req.body));
-            return { body: { responses } };
-          },
-          bulk: async ({ body }: { body: unknown[] }) => {
-            const items: Array<Record<string, unknown>> = [];
-            for (let i = 0; i < body.length; i += 2) {
-              const action = body[i] as {
-                index?: { _id: string };
-                update?: { _id: string };
-              };
-              const payload = body[i + 1] as Record<string, unknown>;
-
-              if (action.index) {
-                documents.set(action.index._id, payload);
-                items.push({ index: {} });
-              } else if (action.update) {
-                if (payload.doc) {
-                  const existing = documents.get(action.update._id);
-                  if (existing) {
-                    documents.set(action.update._id, {
-                      ...existing,
-                      ...(payload.doc as Record<string, unknown>),
-                    });
-                  }
-                }
-                items.push({ update: {} });
-              }
-            }
-            return { body: { errors: false, items } };
-          },
-          get: async ({ id }: { id: string }) => {
-            const doc = documents.get(id);
-            if (doc) return { body: { found: true, _source: doc } };
-            return { body: { found: false }, statusCode: 404 };
-          },
-          // biome-ignore lint/suspicious/noExplicitAny: mock accepts any query shape
-          deleteByQuery: async ({ body }: { body: any }) => {
-            const matchesQuery = (
-              d: NostrEvent & {
-                deleted?: boolean;
-                replaced?: boolean;
-                tags_map?: Record<string, string[]>;
-              },
-            ): boolean => matchesQueryBool(d, body.query.bool);
-            let deleted = 0;
-
-            for (const [id, doc] of documents.entries()) {
-              const d = doc as NostrEvent & {
-                deleted?: boolean;
-                replaced?: boolean;
-                tags_map?: Record<string, string[]>;
-              };
-              if (!matchesQuery(d)) continue;
-              documents.delete(id);
-              deleted++;
-            }
-
-            return { body: { deleted } };
-          },
-          // biome-ignore lint/suspicious/noExplicitAny: mock accepts any query shape
-          updateByQuery: async ({ body }: { body: any }) => {
-            let updated = 0;
-
-            for (const [_id, doc] of documents.entries()) {
-              const d = doc as NostrEvent & {
-                deleted?: boolean;
-                replaced?: boolean;
-                tags_map?: Record<string, string[]>;
-              };
-              if (!matchesQueryBool(d, body.query.bool)) continue;
-
-              const script = body.script.source as string;
-              if (script.includes("ctx._source.deleted = true")) {
-                (d as Record<string, unknown>).deleted = true;
-                updated++;
-              } else if (script.includes("ctx._source.replaced = true")) {
-                (d as Record<string, unknown>).replaced = true;
-                (d as Record<string, unknown>).followers = 0;
-                (d as Record<string, unknown>).engagers = 0;
-                (d as Record<string, unknown>).comment_cnt = 0;
-                (d as Record<string, unknown>).reaction_cnt = 0;
-                (d as Record<string, unknown>).repost_cnt = 0;
-                (d as Record<string, unknown>).quote_cnt = 0;
-                (d as Record<string, unknown>).zap_amount_msats = 0;
-                (d as Record<string, unknown>).zap_cnt = 0;
-                updated++;
-              }
-            }
-
-            return { body: { updated } };
-          },
-          indices: {
-            exists: async () => ({ body: true }),
-            create: async () => ({ body: {} }),
-          },
-          close: async () => {},
-        },
-      };
-    };
-
     it("should archive old version when a replaceable event is replaced", async () => {
       const { client, documents } = createHistoryMockClient();
       const relay = new OpenSearchRelay(client as unknown as Client, {
@@ -1643,6 +1506,110 @@ describe("OpenSearchRelay", () => {
         nonDeleted.map((d) => d.id),
         [wrap.id],
         "Only the gift wrap signed by the vanishing key should survive",
+      );
+    });
+
+    it("should delete the author's own auth-kind events on vanish", async () => {
+      const { client, documents } = createHistoryMockClient();
+      const relay = new OpenSearchRelay(client as unknown as Client, {
+        indexName: "test-index",
+        bulkMaxSize: 1,
+        refreshDelayMs: 0,
+        authKinds: new Set([4, 1059]),
+      });
+
+      const sk = generateSecretKey();
+      const now = Math.floor(Date.now() / 1000);
+
+      // A kind 4 DM the vanishing user wrote. Auth kinds are hidden from
+      // catch-all REQ filters, but deletion must still reach them.
+      const dm = finalizeEvent(
+        {
+          kind: 4,
+          created_at: now - 30,
+          tags: [["p", "f".repeat(64)]],
+          content: "ciphertext",
+        },
+        sk,
+      );
+      await relay.event(dm);
+
+      await relay.remove([{ authors: [dm.pubkey], until: now }]);
+
+      const docs = Array.from(documents.values()) as Array<
+        Record<string, unknown>
+      >;
+      assert.equal(docs.length, 1);
+      assert.equal(docs[0].deleted, true, "The author's own DM should be gone");
+    });
+
+    it("should delete expired events on vanish", async () => {
+      const { client, documents } = createHistoryMockClient();
+      const relay = new OpenSearchRelay(client as unknown as Client, {
+        indexName: "test-index",
+        bulkMaxSize: 1,
+        refreshDelayMs: 0,
+      });
+
+      const sk = generateSecretKey();
+      const now = Math.floor(Date.now() / 1000);
+
+      // NIP-40 expired: invisible to REQ, but still stored, so a vanish
+      // request has to reach it.
+      const expired = finalizeEvent(
+        {
+          kind: 1,
+          created_at: now - 100,
+          tags: [["expiration", String(now - 10)]],
+          content: "gone by now",
+        },
+        sk,
+      );
+      await relay.event(expired);
+
+      await relay.remove([{ authors: [expired.pubkey], until: now }]);
+
+      const docs = Array.from(documents.values()) as Array<
+        Record<string, unknown>
+      >;
+      assert.equal(docs.length, 1);
+      assert.equal(docs[0].deleted, true, "The expired event should be gone");
+    });
+
+    it("should not stop at a client-facing page size on vanish", async () => {
+      const { client, documents } = createHistoryMockClient();
+      const relay = new OpenSearchRelay(client as unknown as Client, {
+        indexName: "test-index",
+        bulkMaxSize: 1,
+        refreshDelayMs: 0,
+      });
+
+      const sk = generateSecretKey();
+      const now = Math.floor(Date.now() / 1000);
+
+      for (let i = 0; i < 150; i++) {
+        await relay.event(
+          finalizeEvent(
+            { kind: 1, created_at: now - i, tags: [], content: `e${i}` },
+            sk,
+          ),
+        );
+      }
+      const { pubkey } = finalizeEvent(
+        { kind: 1, created_at: now, tags: [], content: "x" },
+        sk,
+      );
+
+      await relay.remove([{ authors: [pubkey], until: now }]);
+
+      const docs = Array.from(documents.values()) as Array<
+        Record<string, unknown>
+      >;
+      assert.equal(docs.length, 150);
+      assert.equal(
+        docs.filter((d) => d.deleted !== true).length,
+        0,
+        "Every event should be deleted, not just the first page",
       );
     });
 
