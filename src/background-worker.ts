@@ -157,10 +157,24 @@ async function recomputeLoop(): Promise<void> {
   }
 }
 
+/** Guards against overlapping ticks; see the comment in the timer below. */
+let recomputeInFlight = false;
+
 setInterval(() => {
-  recomputeLoop().catch((err) =>
-    log.error("recompute_loop_error", errFields(err)),
-  );
+  // The interval is a floor, not a guarantee: a large dirty set takes longer
+  // than one tick to process. Without this guard, slow ticks overlap and pile
+  // concurrent aggregations onto OpenSearch, which makes every subsequent tick
+  // slower still.
+  if (recomputeInFlight) {
+    log.debug("recompute_skipped_overlap");
+    return;
+  }
+  recomputeInFlight = true;
+  recomputeLoop()
+    .catch((err) => log.error("recompute_loop_error", errFields(err)))
+    .finally(() => {
+      recomputeInFlight = false;
+    });
 }, SCORE_RECOMPUTE_INTERVAL_MS);
 
 // ---------------------------------------------------------------------------
@@ -190,10 +204,20 @@ if (trends) {
     log.info("trends_updated");
   };
 
+  /** Guards against overlapping trend updates, as in the recompute loop. */
+  let trendsInFlight = false;
+
   setInterval(() => {
-    updateAllTrends().catch((err) =>
-      log.error("trends_update_failed", errFields(err)),
-    );
+    if (trendsInFlight) {
+      log.debug("trends_skipped_overlap");
+      return;
+    }
+    trendsInFlight = true;
+    updateAllTrends()
+      .catch((err) => log.error("trends_update_failed", errFields(err)))
+      .finally(() => {
+        trendsInFlight = false;
+      });
   }, trendsIntervalMs);
 
   log.info("trends_scheduled", {

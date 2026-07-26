@@ -53,6 +53,16 @@ export class Nip85 {
    */
   static readonly MAX_DIRTY = 100_000;
 
+  /**
+   * Pubkeys per {@link getPostCounts} aggregation query. Aggregation cost
+   * grows superlinearly with the number of pubkeys, so one large query is far
+   * more expensive than the equivalent chunked queries: measured against a
+   * 193M-doc index, 14k pubkeys in a single query cost ~3.4s, versus ~106ms
+   * per 1k-pubkey chunk (~1.6s total). Chunking also keeps any one query from
+   * monopolizing a search thread for seconds at a time.
+   */
+  static readonly POST_COUNT_CHUNK = 1_000;
+
   /** Addressable event addresses (`<kind>:<pubkey>:<d-tag>`) needing stats refresh. */
   private dirtyAddrs = new Set<string>();
   /** NIP-73 external identifiers needing stats refresh. */
@@ -319,41 +329,54 @@ export class Nip85 {
     const result = new Map<string, number>();
     if (pubkeys.length === 0) return result;
 
-    const response = await this.client.search({
-      index: this.indexName,
-      body: {
-        query: {
-          bool: {
-            must: [
-              { term: { deleted: false } },
-              { term: { replaced: false } },
-              { term: { kind: 1 } },
-              { terms: { pubkey: pubkeys } },
-            ],
+    for (let i = 0; i < pubkeys.length; i += Nip85.POST_COUNT_CHUNK) {
+      const chunk = pubkeys.slice(i, i + Nip85.POST_COUNT_CHUNK);
+
+      const response = await this.client.search({
+        index: this.indexName,
+        body: {
+          query: {
+            bool: {
+              must: [
+                { term: { deleted: false } },
+                { term: { replaced: false } },
+                { term: { kind: 1 } },
+                { terms: { pubkey: chunk } },
+              ],
+            },
           },
-        },
-        size: 0,
-        aggs: {
-          by_author: {
-            terms: {
-              field: "pubkey",
-              size: pubkeys.length,
-              include: pubkeys,
+          size: 0,
+          aggs: {
+            by_author: {
+              terms: {
+                field: "pubkey",
+                size: chunk.length,
+                // No `include` here: `pubkey` is single-valued, so the `terms`
+                // filter above already guarantees every bucket key is in
+                // `chunk`. Repeating it doubles the request body and makes
+                // OpenSearch compile a redundant match automaton over every
+                // value, which measured ~2x slower on its own.
+                //
+                // `map` builds buckets from matching docs instead of the
+                // field's global ordinals, which a continuously-indexed relay
+                // invalidates on every refresh.
+                execution_hint: "map",
+              },
             },
           },
         },
-      },
-    });
+      });
 
-    const buckets =
-      (
-        response.body.aggregations?.by_author as unknown as {
-          buckets?: Array<{ key: string; doc_count: number }>;
-        }
-      )?.buckets || [];
+      const buckets =
+        (
+          response.body.aggregations?.by_author as unknown as {
+            buckets?: Array<{ key: string; doc_count: number }>;
+          }
+        )?.buckets || [];
 
-    for (const bucket of buckets) {
-      result.set(bucket.key, bucket.doc_count);
+      for (const bucket of buckets) {
+        result.set(bucket.key, bucket.doc_count);
+      }
     }
 
     return result;
