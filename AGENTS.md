@@ -92,23 +92,17 @@ the hot path.
 │   └── trends.test.ts      # Trends tests
 ├── scripts/
 │   ├── analyze-client.ts          # Analyze a client's users (active/inactive, engagement, cohorts)
-│   ├── backfill-autocomplete.ts   # Backfill autocomplete_text field for existing events
 │   ├── backfill-client-address.ts # Backfill client field (NIP-89 client address) for existing events
-│   ├── backfill-language.ts       # Backfill language field for existing events
-│   ├── backfill-media.ts          # Backfill media/video fields for existing events
-│   ├── backfill-pow.ts            # Backfill pow field (NIP-13 difficulty) for existing events
-│   ├── backfill-protocol.ts       # Backfill protocol field for NIP-48 events
-│   ├── backfill-search.ts         # Backfill search field for existing events
-│   ├── backfill-sentiment.ts      # Backfill sentiment field for existing events
-│   ├── backfill-zap-amounts.ts    # Backfill zap amount fields for kind 9735
-│   ├── delete-ephemeral-events.ts # Delete ephemeral events from storage
+│   ├── backfill-followers.ts      # Aggregate kind 3 p-tags into the followers field on kind 0 docs
+│   ├── backfill-scores.ts         # Recompute engagement/zap/quote score fields from tags_map.e
+│   ├── delete-events.ts           # Delete events matching a NIP-01 filter
 │   ├── delete-expired-events.ts   # Delete expired events (NIP-40)
-│   ├── delete-incomplete-events.ts # Delete events with missing fields
 │   ├── export.ts                  # Export events from the index
+│   ├── painless.ts                # Shared library: generates Painless scripts from src/ rules
 │   ├── refresh-nip85.ts           # Refresh NIP-85 stats for events matching a filter
 │   ├── reindex-tags-map.ts        # Reindex tags_map for existing documents
 │   ├── reindex-to-clean-index.ts  # Reindex into a fresh index
-│   └── update-trends.ts          # Compute and publish trending tags
+│   └── update-trends.ts           # Compute and publish trending tags
 ├── package.json       # Dependencies and scripts
 ├── tsconfig.json      # TypeScript configuration
 ├── biome.json         # Biome linter/formatter configuration
