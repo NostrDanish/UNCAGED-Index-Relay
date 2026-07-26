@@ -1613,6 +1613,156 @@ describe("OpenSearchRelay", () => {
       );
     });
 
+    describe("remove with a filter limit", () => {
+      /** Three kind 1 events from one key, newest last in the returned array. */
+      const seed = async (relay: OpenSearchRelay, sk: Uint8Array) => {
+        const now = Math.floor(Date.now() / 1000);
+        const events = [];
+        for (let i = 0; i < 3; i++) {
+          const event = finalizeEvent(
+            { kind: 1, created_at: now - 100 + i, tags: [], content: `e${i}` },
+            sk,
+          );
+          await relay.event(event);
+          events.push(event);
+        }
+        return events;
+      };
+
+      it("deletes only the newest N matching events", async () => {
+        const { client, documents } = createHistoryMockClient();
+        const relay = new OpenSearchRelay(client as unknown as Client, {
+          indexName: "test-index",
+          bulkMaxSize: 1,
+          refreshDelayMs: 0,
+        });
+
+        const sk = generateSecretKey();
+        const [oldest, middle, newest] = await seed(relay, sk);
+
+        await relay.remove([
+          { kinds: [1], authors: [newest.pubkey], limit: 1 },
+        ]);
+
+        const deleted = (Array.from(documents.values()) as NostrEvent[])
+          .filter((d) => (d as { deleted?: boolean }).deleted === true)
+          .map((d) => d.id);
+        assert.deepEqual(
+          deleted,
+          [newest.id],
+          "Only the newest event should be deleted",
+        );
+        assert.ok(!deleted.includes(middle.id));
+        assert.ok(!deleted.includes(oldest.id));
+      });
+
+      it("deletes nothing and issues no request when the limit is 0", async () => {
+        const { client, documents } = createHistoryMockClient();
+        const relay = new OpenSearchRelay(client as unknown as Client, {
+          indexName: "test-index",
+          bulkMaxSize: 1,
+          refreshDelayMs: 0,
+        });
+
+        const sk = generateSecretKey();
+        const [event] = await seed(relay, sk);
+
+        // Spy after seeding, so only the removal's traffic is counted.
+        let requests = 0;
+        const { search, updateByQuery } = client;
+        // biome-ignore lint/suspicious/noExplicitAny: mock accepts any query shape
+        client.search = async (params: any) => {
+          requests++;
+          return search(params);
+        };
+        // biome-ignore lint/suspicious/noExplicitAny: mock accepts any query shape
+        client.updateByQuery = async (params: any) => {
+          requests++;
+          return updateByQuery(params);
+        };
+
+        await relay.remove([{ kinds: [1], authors: [event.pubkey], limit: 0 }]);
+
+        const docs = Array.from(documents.values()) as Array<
+          Record<string, unknown>
+        >;
+        assert.equal(docs.filter((d) => d.deleted === true).length, 0);
+        assert.equal(requests, 0, "limit 0 should not touch OpenSearch at all");
+      });
+
+      it("deletes every match when the limit exceeds the match count", async () => {
+        const { client, documents } = createHistoryMockClient();
+        const relay = new OpenSearchRelay(client as unknown as Client, {
+          indexName: "test-index",
+          bulkMaxSize: 1,
+          refreshDelayMs: 0,
+        });
+
+        const sk = generateSecretKey();
+        const [event] = await seed(relay, sk);
+
+        await relay.remove([
+          { kinds: [1], authors: [event.pubkey], limit: 100 },
+        ]);
+
+        const docs = Array.from(documents.values()) as Array<
+          Record<string, unknown>
+        >;
+        assert.equal(docs.filter((d) => d.deleted !== true).length, 0);
+      });
+
+      it("skips excluded kinds while selecting, not after", async () => {
+        const { client, documents } = createHistoryMockClient();
+        const relay = new OpenSearchRelay(client as unknown as Client, {
+          indexName: "test-index",
+          bulkMaxSize: 1,
+          refreshDelayMs: 0,
+        });
+
+        const sk = generateSecretKey();
+        const now = Math.floor(Date.now() / 1000);
+
+        const older = finalizeEvent(
+          { kind: 1, created_at: now - 90, tags: [], content: "older" },
+          sk,
+        );
+        await relay.event(older);
+
+        const note = finalizeEvent(
+          { kind: 1, created_at: now - 50, tags: [], content: "note" },
+          sk,
+        );
+        await relay.event(note);
+
+        // Newer than the note, but excluded — so `limit: 1` should fall
+        // through to the note rather than selecting the wrap and dropping it.
+        const wrap = finalizeEvent(
+          {
+            kind: 1059,
+            created_at: now - 10,
+            tags: [["p", "f".repeat(64)]],
+            content: "sealed",
+          },
+          sk,
+        );
+        await relay.event(wrap);
+
+        await relay.remove([{ authors: [note.pubkey], limit: 1 }], {
+          excludeKinds: [1059],
+        });
+
+        const deleted = (Array.from(documents.values()) as NostrEvent[])
+          .filter((d) => (d as { deleted?: boolean }).deleted === true)
+          .map((d) => d.id);
+        assert.deepEqual(
+          deleted,
+          [note.id],
+          "The newest non-excluded event, and only it, should be deleted",
+        );
+        assert.ok(!deleted.includes(older.id));
+      });
+    });
+
     it("should soft-delete addressable event history when deleting by coordinate", async () => {
       const { client, documents } = createHistoryMockClient();
       const relay = new OpenSearchRelay(client as unknown as Client, {

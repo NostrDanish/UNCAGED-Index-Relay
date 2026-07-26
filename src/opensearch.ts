@@ -2725,6 +2725,36 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
   }
 
   /**
+   * Resolve the ids a limited {@link remove} should delete: the newest
+   * `filter.limit` events matching `query`, newest first. The index is sorted
+   * `created_at` desc, so this is a top-N read rather than a full scan.
+   */
+  private async resolveRemoveIds(
+    filter: NostrFilter,
+    query: Record<string, unknown>,
+  ): Promise<string[]> {
+    const size = Math.min(
+      filter.limit ?? OpenSearchRelay.MAX_RESULT_WINDOW,
+      OpenSearchRelay.MAX_RESULT_WINDOW,
+    );
+
+    const response = await this.client.search<{ id: string }>({
+      index: this.indexName,
+      body: {
+        _source: ["id"],
+        query: { bool: query },
+        sort: [{ created_at: { order: "desc" as const } }],
+        size,
+        track_total_hits: false,
+      },
+    });
+
+    return response.body.hits.hits
+      .map((hit) => hit._source?.id)
+      .filter((id): id is string => typeof id === "string");
+  }
+
+  /**
    * Remove events matching the given filters (soft delete by setting the
    * `deleted` field), including historical (`replaced: true`) versions.
    *
@@ -2740,8 +2770,12 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
    * pubkey authored except the gift wraps it signed, which belong to their
    * p-tagged recipients.
    *
-   * A filter's `limit` is ignored — deletion is defined by what a filter
-   * matches, not by how many events a client may read.
+   * A filter's `limit` is honored: `limit: N` deletes only the N newest
+   * matching events (excluded kinds are skipped during selection, not after),
+   * and `limit: 0` deletes nothing. A filter with no `limit` — what NIP-09
+   * and NIP-62 send — deletes everything it matches, history included.
+   * Limiting narrows the selection to live events; archived versions of a
+   * replaceable event are only swept up by an unlimited filter.
    */
   async remove(
     filters: NostrFilter[],
@@ -2751,11 +2785,16 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
 
     for (const filter of filters) {
       if (opts?.signal?.aborted) break;
+      if (filter.limit === 0) continue;
+
+      const limited = typeof filter.limit === "number";
 
       const bool: Record<string, unknown> = {
         must: [
           this.buildQuery(filter, {
-            includeReplaced: true,
+            // A limited delete names live events; an unlimited one is a
+            // sweep, so it takes replaced history with it.
+            includeReplaced: !limited,
             includeAuthKinds: true,
             includeExpired: true,
           }),
@@ -2765,11 +2804,20 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
         bool.must_not = [{ terms: { kind: excludeKinds } }];
       }
 
+      // A limited delete resolves the newest N ids first and then names them
+      // directly; the mutation stays a single updateByQuery either way.
+      let query: Record<string, unknown> = { bool };
+      if (limited) {
+        const ids = await this.resolveRemoveIds(filter, bool);
+        if (ids.length === 0) continue;
+        query = { bool: { must: [{ terms: { id: ids } }] } };
+      }
+
       try {
         const response = await this.writeClient.updateByQuery({
           index: this.indexName,
           body: {
-            query: { bool },
+            query,
             script: {
               source: "ctx._source.deleted = true",
               lang: "painless",
