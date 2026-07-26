@@ -1,4 +1,4 @@
-import type { NostrEvent, NostrFilter } from "@nostrify/nostrify";
+import type { NostrEvent, NostrFilter, NStore } from "@nostrify/nostrify";
 import { NIP50, NKinds } from "@nostrify/nostrify";
 import { buildAutocompleteText } from "./autocomplete-text.ts";
 import type { Config } from "./config.ts";
@@ -268,21 +268,10 @@ interface BoolQuery {
 }
 
 /**
- * The minimal storage contract needed to publish an event, used by the
- * background worker's NIP-85 and trends publishers. Deliberately narrower
- * than Nostrify's `NRelay`: those publishers only ever store events, and
- * requiring the full interface would force implementations to carry a
- * `req()` streaming method nobody calls.
- */
-export interface EventPublisher {
-  event(event: NostrEvent, opts?: { signal?: AbortSignal }): Promise<void>;
-}
-
-/**
  * OpenSearch-backed Nostr relay implementation
  * Handles event storage and querying with full-text search support (NIP-50)
  */
-export class OpenSearchRelay implements EventPublisher, AsyncDisposable {
+export class OpenSearchRelay implements NStore, AsyncDisposable {
   /** Client used for read operations (search, count). */
   private client: Client;
   /** Client used for write operations (bulk, updateByQuery, deleteByQuery). Defaults to `client`. */

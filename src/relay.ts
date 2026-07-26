@@ -1,6 +1,6 @@
 import type { Buffer } from "node:buffer";
 import { randomBytes } from "node:crypto";
-import type { NostrRelayInfo } from "@nostrify/nostrify";
+import type { NostrRelayInfo, NStore } from "@nostrify/nostrify";
 import { NKinds, NSchema as n } from "@nostrify/nostrify";
 import type { Filter, NostrEvent } from "nostr-tools";
 import { matchFilter, verifyEvent } from "nostr-tools";
@@ -94,12 +94,12 @@ export interface EventAnalysis {
 }
 
 /**
- * The storage contract the {@link Relay} depends on. Deliberately not
- * Nostrify's `NRelay`: the relay only ever calls these four methods, and
- * extending `NRelay` would additionally mandate a `req()` streaming method
- * and a `close()` that nothing here invokes.
+ * Nostrify's `NStore` widened with the extra options this relay passes:
+ * pre-computed analysis on ingest, and auth-kind/kind-exclusion overrides
+ * on reads. `NStore` rather than `NRelay` because the relay never opens a
+ * `req()` subscription against its storage — it queries and broadcasts.
  */
-export interface AnalyzableRelay {
+export interface AnalyzableRelay extends NStore {
   event(
     event: NostrEvent,
     opts?: { signal?: AbortSignal; analysis?: EventAnalysis },
