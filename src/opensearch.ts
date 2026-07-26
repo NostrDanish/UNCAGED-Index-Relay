@@ -1,5 +1,5 @@
 import type { NostrEvent, NostrFilter } from "@nostrify/nostrify";
-import { NIP50, NKinds, NSchema as n } from "@nostrify/nostrify";
+import { NIP50, NKinds } from "@nostrify/nostrify";
 import { buildAutocompleteText } from "./autocomplete-text.ts";
 import type { Config } from "./config.ts";
 import { StorageOverloaded } from "./errors.ts";
@@ -105,13 +105,6 @@ interface NostrEventDocument extends NostrEvent {
    * `pow:<n>` extension (matches events with difficulty >= n).
    */
   pow: number;
-  /** Parsed profile metadata fields for kind 0 events (name search). */
-  metadata?: {
-    name?: string;
-    display_name?: string;
-    nip05?: string;
-    about?: string;
-  };
   /** Number of followers (kind 0 profiles). */
   followers: number;
   /** Count of unique authors who engaged with this event (non-kind-0). */
@@ -650,30 +643,6 @@ export class OpenSearchRelay implements EventPublisher, AsyncDisposable {
   static detectMedia = detectMedia;
 
   /**
-   * Parse profile metadata from a kind 0 event's JSON content.
-   * Returns an object with `name`, `display_name`, `nip05`, and `about`
-   * fields, or `undefined` for non-kind-0 events or unparseable content.
-   */
-  static parseMetadata(
-    event: NostrEvent,
-  ):
-    | { name?: string; display_name?: string; nip05?: string; about?: string }
-    | undefined {
-    if (event.kind !== 0) return undefined;
-    const result = n.json().pipe(n.metadata()).safeParse(event.content);
-    if (!result.success) return undefined;
-    const { name, display_name, nip05, about } = result.data;
-    // Only return if at least one field is present.
-    if (!name && !display_name && !nip05 && !about) return undefined;
-    return {
-      ...(name && { name }),
-      ...(display_name && { display_name }),
-      ...(nip05 && { nip05 }),
-      ...(about && { about }),
-    };
-  }
-
-  /**
    * Convert NostrEvent to OpenSearch document.
    * When `analysis` is provided (from the worker pool), those pre-computed
    * values are used directly instead of detecting on the main thread.
@@ -729,9 +698,6 @@ export class OpenSearchRelay implements EventPublisher, AsyncDisposable {
         ? { media: analysis.media, video: analysis.video }
         : OpenSearchRelay.detectMedia(event);
 
-    // Extract profile metadata for kind 0 events (name search).
-    const metadata = OpenSearchRelay.parseMetadata(event);
-
     // Use pre-computed autocomplete text from the analyze worker when
     // available; otherwise build on the main thread (direct event() calls,
     // tests). Only set the field when non-empty so events with no
@@ -754,7 +720,6 @@ export class OpenSearchRelay implements EventPublisher, AsyncDisposable {
       media: mediaResult.media ?? false,
       video: mediaResult.video ?? false,
       pow: getPow(event),
-      ...(metadata && { metadata }),
       followers: 0,
       engagers: 0,
       comment_cnt: 0,
@@ -2884,23 +2849,6 @@ export class OpenSearchRelay implements EventPublisher, AsyncDisposable {
     media: { type: "boolean" },
     video: { type: "boolean" },
     pow: { type: "integer" },
-    metadata: {
-      type: "object",
-      properties: {
-        name: {
-          type: "text",
-          analyzer: "edge_ngram_analyzer",
-          search_analyzer: "standard",
-        },
-        display_name: {
-          type: "text",
-          analyzer: "edge_ngram_analyzer",
-          search_analyzer: "standard",
-        },
-        nip05: { type: "keyword" },
-        about: { type: "text", analyzer: "standard" },
-      },
-    },
     followers: { type: "integer" },
     engagers: { type: "integer" },
     comment_cnt: { type: "integer" },

@@ -2515,7 +2515,7 @@ describe("OpenSearchRelay", () => {
             const terms = matchQuery.toLowerCase().split(/\s+/);
             if (!terms.every((t: string) => text.includes(t))) return false;
           }
-          // Handle multi_match (edge-ngram prefix matching on metadata fields)
+          // Handle multi_match (search_text / search_text.url)
           if (clause.multi_match) {
             const mm = clause.multi_match as {
               query: string;
@@ -3998,7 +3998,7 @@ describe("OpenSearchRelay", () => {
             const terms = matchQuery.toLowerCase().split(/\s+/);
             if (!terms.every((t: string) => text.includes(t))) return false;
           }
-          // Handle multi_match (edge-ngram prefix matching on metadata fields)
+          // Handle multi_match (search_text / search_text.url)
           if (clause.multi_match) {
             const mm = clause.multi_match as {
               query: string;
@@ -4863,7 +4863,7 @@ describe("OpenSearchRelay", () => {
       assert.equal(results[0].id, profile1.id);
     });
 
-    it("should not use metadata matching for non-kind-0 searches", async () => {
+    it("should match non-kind-0 searches via search_text", async () => {
       const { client, setScore } = createKind0SortMockClient();
       const relay = new OpenSearchRelay(client as unknown as Client, {
         indexName: "test-index",
@@ -4888,7 +4888,7 @@ describe("OpenSearchRelay", () => {
       await relay.event(post);
       setScore(post.id, { engagers: 10 });
 
-      // Kind 1 search should match via content, not metadata
+      // Kind 1 search matches via search_text built from content
       const results = await relay.query([{ kinds: [1], search: "jack" }]);
 
       assert.equal(results.length, 1);
@@ -7555,7 +7555,6 @@ describe("OpenSearchRelay", () => {
         "media",
         "video",
         "pow",
-        "metadata",
         "followers",
         "engagers",
         "comment_cnt",
