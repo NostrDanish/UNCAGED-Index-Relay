@@ -13,10 +13,10 @@
  */
 
 import process from "node:process";
-import type { ClientOptions } from "@opensearch-project/opensearch";
-import { Client as OpenSearchClient } from "@opensearch-project/opensearch";
 import { Config } from "../src/config.ts";
 import { OpenSearchRelay } from "../src/opensearch.ts";
+import type { ClientOptions } from "../src/opensearch-client.ts";
+import { Client as OpenSearchClient } from "../src/opensearch-client.ts";
 
 const BATCH_SIZE = 5000;
 
@@ -122,7 +122,6 @@ async function main() {
 
     const response = await withRetry(
       () =>
-        // @ts-expect-error: composite aggregation not in client types
         client.search({
           index: indexName,
           body: {

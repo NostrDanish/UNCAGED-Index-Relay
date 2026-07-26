@@ -7,10 +7,10 @@
  */
 
 import process from "node:process";
-import type { ClientOptions } from "@opensearch-project/opensearch";
-import { Client as OpenSearchClient } from "@opensearch-project/opensearch";
 import { Config } from "../src/config.ts";
 import { OpenSearchRelay } from "../src/opensearch.ts";
+import type { ClientOptions } from "../src/opensearch-client.ts";
+import { Client as OpenSearchClient } from "../src/opensearch-client.ts";
 import { Trends } from "../src/trends.ts";
 
 async function main() {

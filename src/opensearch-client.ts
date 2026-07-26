@@ -41,6 +41,8 @@ export interface SearchResponseBody<TSource = unknown> {
     hits: Array<SearchHit<TSource>>;
   };
   aggregations?: Record<string, unknown>;
+  /** Present when the search was opened with a `scroll` keep-alive. */
+  _scroll_id?: string;
 }
 
 /**
@@ -97,6 +99,21 @@ class IndicesApi {
       "PUT",
       `/${encodeURIComponent(params.index)}`,
       params.body,
+    );
+    return { body: await res.json() };
+  }
+
+  /** POST /{index}/_cache/clear */
+  async clearCache(params: {
+    index: string;
+    /** Also evict the fielddata cache (global ordinals). */
+    fielddata?: boolean;
+  }): Promise<ApiResponse<unknown>> {
+    const res = await this._request(
+      "POST",
+      `/${encodeURIComponent(params.index)}/_cache/clear`,
+      undefined,
+      params.fielddata ? { fielddata: "true" } : undefined,
     );
     return { body: await res.json() };
   }
@@ -237,17 +254,48 @@ export class Client {
   async search<TSource = unknown>(params: {
     index: string;
     body: unknown;
+    /** Keep-alive for a scrolled search, e.g. "5m". */
+    scroll?: string;
   }): Promise<ApiResponse<SearchResponseBody<TSource>>> {
     const end = opensearchSearchDurationHistogram.startTimer();
-    const res = await this._request(
-      "POST",
-      `/${encodeURIComponent(params.index)}/_search`,
-      params.body,
-    );
-    await this._assertOk(res, "POST", `/${params.index}/_search`);
-    const body = (await res.json()) as SearchResponseBody<TSource>;
-    end();
-    return { body };
+    try {
+      const res = await this._request(
+        "POST",
+        `/${encodeURIComponent(params.index)}/_search`,
+        params.body,
+        params.scroll ? { scroll: params.scroll } : undefined,
+      );
+      await this._assertOk(res, "POST", `/${params.index}/_search`);
+      return { body: (await res.json()) as SearchResponseBody<TSource> };
+    } finally {
+      // In a finally so a failed search still records its latency —
+      // otherwise the histogram only ever sees successes, and latency looks
+      // best exactly when things are breaking.
+      end();
+    }
+  }
+
+  /** POST /_search/scroll — fetch the next page of a scrolled search. */
+  async scroll<TSource = unknown>(params: {
+    scroll_id: string;
+    scroll: string;
+  }): Promise<ApiResponse<SearchResponseBody<TSource>>> {
+    const res = await this._request("POST", "/_search/scroll", {
+      scroll_id: params.scroll_id,
+      scroll: params.scroll,
+    });
+    await this._assertOk(res, "POST", "/_search/scroll");
+    return { body: (await res.json()) as SearchResponseBody<TSource> };
+  }
+
+  /** DELETE /_search/scroll — release a scroll context. */
+  async clearScroll(params: {
+    scroll_id: string;
+  }): Promise<ApiResponse<unknown>> {
+    const res = await this._request("DELETE", "/_search/scroll", {
+      scroll_id: params.scroll_id,
+    });
+    return { body: await res.json() };
   }
 
   /**

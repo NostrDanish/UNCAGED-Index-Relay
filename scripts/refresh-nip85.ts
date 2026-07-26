@@ -19,13 +19,12 @@
 
 import process from "node:process";
 import type { NostrFilter } from "@nostrify/nostrify";
-import type { ClientOptions } from "@opensearch-project/opensearch";
-import { Client as OpenSearchClient } from "@opensearch-project/opensearch";
-
 import { Config } from "../src/config.ts";
 import { Nip85 } from "../src/nip85.ts";
 import type { EventScores } from "../src/opensearch.ts";
 import { OpenSearchRelay } from "../src/opensearch.ts";
+import type { ClientOptions } from "../src/opensearch-client.ts";
+import { Client as OpenSearchClient } from "../src/opensearch-client.ts";
 
 const SCROLL_SIZE = 1000;
 const SCROLL_TTL = "5m";
