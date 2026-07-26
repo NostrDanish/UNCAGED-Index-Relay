@@ -59,6 +59,16 @@ const SCORE_FIELDS = [
 
 type ScoreField = (typeof SCORE_FIELDS)[number];
 
+/** Score fields that only apply to kind 0 profiles (computed in Phase 2a). */
+const PROFILE_SCORE_FIELDS = [
+  "followers",
+] as const satisfies readonly ScoreField[];
+
+/** Score fields that only apply to non-kind-0 events (computed in Phase 2b). */
+const ENGAGEMENT_SCORE_FIELDS = SCORE_FIELDS.filter(
+  (f): f is Exclude<ScoreField, "followers"> => f !== "followers",
+);
+
 /** All score fields set to zero. */
 type Scores = Record<ScoreField, number>;
 
@@ -2905,6 +2915,15 @@ export class OpenSearchRelay implements EventPublisher, AsyncDisposable {
    * the number of unique kind 3 (contact list) events whose `p` tags
    * include this profile's pubkey.
    *
+   * The two halves are disjoint by kind: Phase 2a computes `followers` for
+   * kind 0 only, Phase 2b computes the engagement fields for everything
+   * else, and Phase 4 writes back only the half that applies. Note this
+   * leaves kind 0 engagement counts uncomputed — nothing aggregates
+   * reactions or zaps *on a profile event*, so a mixed-kind or catch-all
+   * `sort:top` ranks profiles by whatever `engagers` they were indexed
+   * with (0). Fixing that means running Phase 2b over kind 0 too, at six
+   * more sub-queries per dirty profile.
+   *
    * Designed to be called periodically (e.g. via setInterval).
    * Returns the computed scores so callers (e.g. NIP-85) can publish them.
    */
@@ -3107,9 +3126,21 @@ export class OpenSearchRelay implements EventPublisher, AsyncDisposable {
     }
 
     // Phase 4: Bulk update the dirty events with computed scores.
+    //
+    // Write back only the fields this phase actually computed for the
+    // document's kind: `followers` comes from Phase 2a and applies to kind 0
+    // profiles, the engagement fields come from Phase 2b and apply to
+    // everything else. Writing the full set for every document meant each
+    // recompute overwrote a kind 0 doc's engagement counts with zeros (Phase
+    // 2b skips kind 0) and every other doc's `followers` with zero.
+    const kind0Ids = new Set(dirtyKind0.map((d) => d.id));
     const body: Array<Record<string, unknown>> = [];
 
     for (const [id, s] of scores) {
+      const fields = kind0Ids.has(id)
+        ? PROFILE_SCORE_FIELDS
+        : ENGAGEMENT_SCORE_FIELDS;
+
       body.push({
         update: {
           _index: this.indexName,
@@ -3117,16 +3148,7 @@ export class OpenSearchRelay implements EventPublisher, AsyncDisposable {
         },
       });
       body.push({
-        doc: {
-          followers: s.followers,
-          engagers: s.engagers,
-          comment_cnt: s.comment_cnt,
-          reaction_cnt: s.reaction_cnt,
-          repost_cnt: s.repost_cnt,
-          quote_cnt: s.quote_cnt,
-          zap_amount_msats: s.zap_amount_msats,
-          zap_cnt: s.zap_cnt,
-        },
+        doc: Object.fromEntries(fields.map((f) => [f, s[f]])),
       });
     }
 

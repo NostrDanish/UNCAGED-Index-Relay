@@ -8177,6 +8177,40 @@ describe("OpenSearchRelay.recomputeScores", () => {
     assert.equal(write.doc.engagers, 4);
   });
 
+  it("writes back only the fields computed for the document's kind", async () => {
+    const profileId = "a".repeat(64);
+    const noteId = "b".repeat(64);
+    const author = "c".repeat(64);
+
+    const { client, written } = createScoreMockClient({
+      dirty: [
+        { id: profileId, kind: 0, pubkey: author },
+        { id: noteId, kind: 1, pubkey: author },
+      ],
+      referencing: [{ kind: 7, pubkey: "d".repeat(64), via: "e" }],
+    });
+
+    const relay = new OpenSearchRelay(client as unknown as Client, {
+      indexName: "test-index",
+    });
+    relay.addDirtyIds([profileId, noteId]);
+
+    await relay.recomputeScores();
+
+    // Phase 2b skips kind 0, so a profile must not have engagement counts
+    // written at all — previously they were overwritten with zeros on every
+    // recompute.
+    const profileWrite = written.find((w) => w.id === profileId);
+    assert.ok(profileWrite);
+    assert.deepEqual(Object.keys(profileWrite.doc), ["followers"]);
+
+    // Symmetrically, a non-kind-0 event has no follower count to write.
+    const noteWrite = written.find((w) => w.id === noteId);
+    assert.ok(noteWrite);
+    assert.ok(!("followers" in noteWrite.doc));
+    assert.equal(noteWrite.doc.reaction_cnt, 1);
+  });
+
   it("returns early when nothing is dirty", async () => {
     const { client } = createScoreMockClient({ dirty: [], referencing: [] });
     const relay = new OpenSearchRelay(client as unknown as Client, {
