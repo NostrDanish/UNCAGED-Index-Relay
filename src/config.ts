@@ -78,13 +78,13 @@ export class Config {
   readonly maxFilterValues: number;
   /**
    * Default number of events returned for a REQ filter that omits `limit`.
-   * Applied by the storage layer's per-filter clamp. Default: 100.
+   * Applied to incoming REQ filters by the relay. Default: 100.
    */
   readonly defaultLimit: number;
   /**
    * Maximum number of events returned for a single REQ filter, regardless of
-   * the client-supplied `limit`. Enforced by the storage layer's per-filter
-   * clamp and advertised to clients as NIP-11 `limitation.max_limit` so the
+   * the client-supplied `limit`. Applied to incoming REQ filters by the relay
+   * and advertised to clients as NIP-11 `limitation.max_limit` so the
    * advertised value matches what is enforced. Default: 1000.
    */
   readonly maxLimit: number;

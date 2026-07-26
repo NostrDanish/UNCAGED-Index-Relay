@@ -13,6 +13,7 @@ import {
 } from "./negentropy.ts";
 import {
   type AnalyzableRelay,
+  clampLimit,
   clampUntil,
   Relay,
   type RelayConn,
@@ -280,9 +281,10 @@ describe("Relay", () => {
       assert.equal(sentMessages.length, 1);
       assert.deepEqual(sentMessages[0], ["OK", deletionEvent.id, true, ""]);
 
-      // The deletion resolves the e-tagged ids with a single id-keyed query.
+      // The deletion resolves the e-tagged ids with a single id-keyed query,
+      // limited to the id count so no e-tag is silently dropped.
       assert.equal(queryFilters.length, 1);
-      assert.deepEqual(queryFilters[0], { ids: ["giftwrap123"] });
+      assert.deepEqual(queryFilters[0], { ids: ["giftwrap123"], limit: 1 });
 
       // The gift wrap is p-tagged to the deleter, so it is removed by id.
       assert.equal(removeFilters.length, 1);
@@ -2982,6 +2984,119 @@ describe("Relay", () => {
       const result = clampUntil(filter);
       assert.equal(filter.until, undefined);
       assert.notStrictEqual(result, filter);
+    });
+  });
+
+  describe("clampLimit", () => {
+    it("should apply the default when limit is omitted", () => {
+      assert.equal(clampLimit({ kinds: [1] }, 100, 1000).limit, 100);
+    });
+
+    it("should cap a limit above the maximum", () => {
+      assert.equal(
+        clampLimit({ kinds: [1], limit: 5000 }, 100, 1000).limit,
+        1000,
+      );
+    });
+
+    it("should honor a limit below the maximum", () => {
+      assert.equal(clampLimit({ kinds: [1], limit: 3 }, 100, 1000).limit, 3);
+    });
+
+    it("should preserve limit 0 (realtime-only subscription)", () => {
+      assert.equal(clampLimit({ kinds: [1], limit: 0 }, 100, 1000).limit, 0);
+    });
+
+    it("should not mutate the original filter", () => {
+      const filter: Filter = { kinds: [1] };
+      const result = clampLimit(filter, 100, 1000);
+      assert.equal(filter.limit, undefined);
+      assert.notStrictEqual(result, filter);
+    });
+
+    it("should return the same object when the limit already conforms", () => {
+      const filter: Filter = { kinds: [1], limit: 10 };
+      assert.strictEqual(clampLimit(filter, 100, 1000), filter);
+    });
+  });
+
+  describe("REQ limit enforcement", () => {
+    it("applies defaultLimit and maxLimit to every REQ filter", async () => {
+      const queried: Filter[][] = [];
+      mockStorage.query = async (filters: Filter[]) => {
+        queried.push(filters);
+        return [];
+      };
+
+      const limitedRelay = new Relay(mockStorage, {
+        relayUrl: "wss://relay.test/",
+        defaultLimit: 5,
+        maxLimit: 10,
+      });
+
+      await limitedRelay.handleReq(mockWs, "sub1", [
+        { kinds: [1] },
+        { kinds: [1], limit: 5000 },
+        { kinds: [1], limit: 3 },
+        { kinds: [1], limit: 0 },
+      ]);
+
+      assert.equal(queried.length, 1);
+      assert.deepEqual(
+        queried[0].map((f) => f.limit),
+        [5, 10, 3, 0],
+      );
+    });
+
+    it("caps defaultLimit at maxLimit when misconfigured", async () => {
+      const queried: Filter[][] = [];
+      mockStorage.query = async (filters: Filter[]) => {
+        queried.push(filters);
+        return [];
+      };
+
+      const limitedRelay = new Relay(mockStorage, {
+        relayUrl: "wss://relay.test/",
+        defaultLimit: 500,
+        maxLimit: 10,
+      });
+
+      await limitedRelay.handleReq(mockWs, "sub1", [{ kinds: [1] }]);
+
+      assert.equal(queried[0][0].limit, 10);
+    });
+
+    it("does not cap the internal e-tag lookup behind a kind 5 deletion", async () => {
+      const sk = generateSecretKey();
+      const queried: Filter[][] = [];
+      mockStorage.query = async (filters: Filter[]) => {
+        queried.push(filters);
+        return [];
+      };
+
+      const limitedRelay = new Relay(mockStorage, {
+        relayUrl: "wss://relay.test/",
+        defaultLimit: 5,
+        maxLimit: 10,
+      });
+
+      const ids = Array.from({ length: 50 }, (_, i) =>
+        createHash("sha256").update(`e${i}`).digest("hex"),
+      );
+      const deletion = finalizeEvent(
+        {
+          kind: 5,
+          created_at: Math.floor(Date.now() / 1000),
+          tags: ids.map((id) => ["e", id]),
+          content: "",
+        },
+        sk,
+      );
+
+      await limitedRelay.handleEvent(mockWs, deletion);
+
+      assert.equal(queried.length, 1);
+      assert.equal(queried[0][0].limit, 50);
     });
   });
 

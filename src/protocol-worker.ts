@@ -73,8 +73,6 @@ const opensearchRelay = new OpenSearchRelay(opensearchReadClient, {
   historyKindsExcluded: config.historyKindsExcluded,
   authKinds: config.authKinds,
   tagValueMaxCountPerName: config.tagValueMaxCountPerName,
-  defaultLimit: config.defaultLimit,
-  maxLimit: config.maxLimit,
   logger: log,
 });
 
@@ -151,6 +149,7 @@ const relay = new Relay(storage, {
   maxMessageLength: config.maxMessageLength,
   maxFilterValues: config.maxFilterValues,
   maxLimit: config.maxLimit,
+  defaultLimit: config.defaultLimit,
   maxEventTags: config.tagValueMaxCountPerName,
   maxInflightPerConn: config.maxInflightPerConn,
   bannedHashtags: config.bannedHashtags,

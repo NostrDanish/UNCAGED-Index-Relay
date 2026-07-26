@@ -344,11 +344,6 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
   /** Per-instance override of TAG_VALUE_MAX_COUNT_PER_NAME. */
   private tagValueMaxCountPerName: number;
 
-  /** Default per-filter event limit when the filter omits `limit`. */
-  private defaultLimit: number;
-  /** Maximum per-filter event limit, clamping any client-supplied `limit`. */
-  private maxLimit: number;
-
   /**
    * Maximum number of events permitted to sit in the bulk queue. When
    * exceeded, {@link event} rejects new events with {@link StorageOverloaded}
@@ -387,16 +382,6 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
        */
       tagValueMaxCountPerName?: number;
       /**
-       * Default number of events returned for a REQ filter that omits
-       * `limit`. Default: 100.
-       */
-      defaultLimit?: number;
-      /**
-       * Maximum number of events returned for a single REQ filter, clamping
-       * any client-supplied `limit`. Default: 1000.
-       */
-      maxLimit?: number;
-      /**
        * Structured logger. Defaults to a fresh `info`-level Logger; entry
        * points inject one built from `Config.logLevel`.
        */
@@ -419,8 +404,6 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
     this.tagValueMaxCountPerName =
       opts?.tagValueMaxCountPerName ??
       OpenSearchRelay.TAG_VALUE_MAX_COUNT_PER_NAME;
-    this.defaultLimit = opts?.defaultLimit ?? 100;
-    this.maxLimit = opts?.maxLimit ?? 1000;
   }
 
   /**
@@ -446,8 +429,6 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
       historyKindsExcluded: config.historyKindsExcluded,
       authKinds: config.authKinds,
       tagValueMaxCountPerName: config.tagValueMaxCountPerName,
-      defaultLimit: config.defaultLimit,
-      maxLimit: config.maxLimit,
       logger: new Logger(config.logLevel),
     });
   }
@@ -507,6 +488,15 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
    * correctness is preserved — only the searchable projection is clipped.
    */
   static readonly TAG_VALUE_MAX_COUNT_PER_NAME = 5000;
+
+  /**
+   * Hard ceiling on how many hits a single search may return, mirroring the
+   * `index.max_result_window` setting applied at index creation. This is a
+   * mechanical OpenSearch constraint, not relay policy: client-facing
+   * `limit` defaults and caps (NIP-11 `limitation.max_limit`) are applied by
+   * the relay before filters reach this class.
+   */
+  static readonly MAX_RESULT_WINDOW = 100000;
 
   /**
    * Check whether a tag name is indexable.
@@ -1691,8 +1681,13 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
       return [];
     }
 
-    // Clamp to the configured default (when unset) and maximum.
-    const limit = Math.min(filter.limit || this.defaultLimit, this.maxLimit);
+    // Honor the filter's `limit` verbatim, bounded only by the index's result
+    // window. Client-facing defaults and caps are applied by the relay before
+    // filters get here (see `clampLimit` in relay.ts).
+    const limit = Math.min(
+      filter.limit ?? OpenSearchRelay.MAX_RESULT_WINDOW,
+      OpenSearchRelay.MAX_RESULT_WINDOW,
+    );
 
     // Check if this is a sort query
     const sortMode = this.parseSortMode(filter);
@@ -2995,7 +2990,7 @@ export class OpenSearchRelay implements NRelay, AsyncDisposable {
             "sort.order": "desc",
             number_of_shards: 3,
             number_of_replicas: 1,
-            "index.max_result_window": 100000,
+            "index.max_result_window": OpenSearchRelay.MAX_RESULT_WINDOW,
             ...OpenSearchRelay.ANALYZER_SETTINGS,
           },
           mappings: {

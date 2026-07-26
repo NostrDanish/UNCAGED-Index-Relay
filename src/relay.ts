@@ -184,6 +184,25 @@ export function clampUntil(filter: Filter, fuzz = 0): Filter {
   return { ...filter, until: now + fuzz };
 }
 
+/**
+ * Apply the relay's client-facing `limit` policy to a filter: fill in
+ * `defaultLimit` when the client omits `limit`, and cap anything larger than
+ * `maxLimit` (the value advertised as NIP-11 `limitation.max_limit`).
+ *
+ * This is the single enforcement point — storage honors whatever `limit` a
+ * filter carries, so internal queries (deletions, e-tag lookups) are not
+ * bound by client policy.
+ */
+export function clampLimit(
+  filter: Filter,
+  defaultLimit: number,
+  maxLimit: number,
+): Filter {
+  const limit = Math.min(filter.limit ?? defaultLimit, maxLimit);
+  if (filter.limit === limit) return filter;
+  return { ...filter, limit };
+}
+
 // Track subscriptions per connection
 export interface Subscription {
   id: string;
@@ -280,6 +299,10 @@ export class Relay {
   private masterPubkeys: Set<string>;
   /** Maximum number of entries allowed in any single filter array field. */
   private maxFilterValues: number;
+  /** Events returned for a REQ filter that omits `limit`. */
+  private defaultLimit: number;
+  /** Maximum events returned for a single REQ filter (NIP-11 `max_limit`). */
+  private maxLimit: number;
   /** Lowercased `t` tag values that cause an event to be rejected at ingestion. */
   private bannedHashtags: Set<string>;
   /** Kind numbers that are rejected at ingestion regardless of other policy. */
@@ -389,11 +412,16 @@ export class Relay {
        */
       maxFilterValues?: number;
       /**
-       * Maximum number of events returned for a single REQ filter. Advertised
-       * via NIP-11 `limitation.max_limit`. Must match the storage layer's
-       * clamp so the advertised value is actually enforced. Default: 1000.
+       * Maximum number of events returned for a single REQ filter. Enforced
+       * on incoming filters by {@link clampLimit} and advertised via NIP-11
+       * `limitation.max_limit`. Default: 1000.
        */
       maxLimit?: number;
+      /**
+       * Number of events returned for a REQ filter that omits `limit`.
+       * Must not exceed {@link maxLimit}. Default: 100.
+       */
+      defaultLimit?: number;
       /**
        * Maximum number of tags on a single event that the indexer will fully
        * project into `tags_map`. Only advertised via NIP-11
@@ -449,6 +477,8 @@ export class Relay {
     this.authKinds = opts.authKinds ?? new Set();
     this.masterPubkeys = opts.masterPubkeys ?? new Set();
     this.maxFilterValues = opts.maxFilterValues ?? 5000;
+    this.maxLimit = opts.maxLimit ?? 1000;
+    this.defaultLimit = Math.min(opts.defaultLimit ?? 100, this.maxLimit);
     this.maxInflightPerConn = opts.maxInflightPerConn ?? 32;
     this.bannedHashtags = opts.bannedHashtags ?? new Set();
     this.rejectedKinds = opts.rejectedKinds ?? new Set();
@@ -463,7 +493,7 @@ export class Relay {
         max_message_length: opts.maxMessageLength ?? 4_000_000,
         max_subscriptions: 20,
         max_filters: 100,
-        max_limit: opts.maxLimit ?? 1000,
+        max_limit: this.maxLimit,
         max_subid_length: 100,
         max_event_tags: opts.maxEventTags ?? 5000,
         min_pow_difficulty: 0,
@@ -853,7 +883,11 @@ export class Relay {
         // single id-keyed query covers both cases: the deleter's own events
         // (regular NIP-09 deletion) and gift wraps addressed to the deleter.
         if (eTagValues.length > 0) {
-          const matched = await this.storage.query([{ ids: eTagValues }]);
+          // Internal lookup: every e-tagged event must be considered, so the
+          // limit is the id count rather than the client-facing default.
+          const matched = await this.storage.query([
+            { ids: eTagValues, limit: eTagValues.length },
+          ]);
           const deletableIds = matched
             .filter((e) => {
               // NIP-59: A gift wrap (kind 1059) may only be deleted by the
@@ -1297,7 +1331,9 @@ export class Relay {
     // Query and return existing events using NRelay's query method
     try {
       const events = await this.storage.query(
-        filters.map((f) => clampUntil(f)),
+        filters.map((f) =>
+          clampLimit(clampUntil(f), this.defaultLimit, this.maxLimit),
+        ),
         { includeAuthKinds },
       );
       return { success: true, events };

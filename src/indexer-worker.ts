@@ -66,8 +66,6 @@ const opensearchRelay = new OpenSearchRelay(
     writeClient: new OpenSearchClient(opensearchClientOptions),
     tagValueMaxCountPerName: config.tagValueMaxCountPerName,
     bulkMaxQueue: config.bulkMaxQueue,
-    defaultLimit: config.defaultLimit,
-    maxLimit: config.maxLimit,
     logger: log,
   },
 );
