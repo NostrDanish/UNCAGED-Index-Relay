@@ -5,9 +5,10 @@
  * by the single indexer worker (indexer-worker.ts) so that bulk batches stay
  * coalesced and replaceable-slot resolution has one writer instead of racing
  * across N protocol workers. (The background stats worker writes its NIP-85
- * and trend events through its own client, outside this path.) Each protocol worker talks to the indexer over a
- * dedicated MessageChannel port (transferred by the pool at spawn), so
- * indexing traffic never touches the main thread.
+ * and trend events through its own client, outside this path.) Each protocol
+ * worker talks to the indexer over a dedicated MessageChannel port
+ * (transferred by the pool at spawn), so indexing traffic never touches the
+ * main thread.
  *
  * Requests are batched per event-loop tick (same setImmediate pattern as
  * the other pools) and correlated by reqId. `event()` resolves when the
