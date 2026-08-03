@@ -183,7 +183,10 @@ const server = serve<WebSocketData>({
       return undefined;
     }
 
-    if (req.method === "GET") {
+    // HEAD is served by the same handlers as GET: Bun strips the body from
+    // the response and keeps the headers, which is what HEAD callers
+    // (`curl -I`, health checks, NIP-11 probes) expect.
+    if (req.method === "GET" || req.method === "HEAD") {
       // Serve static assets
       if (url.pathname === "/favicon.ico") {
         return new Response(faviconIco, {
