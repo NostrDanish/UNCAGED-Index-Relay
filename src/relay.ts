@@ -291,6 +291,17 @@ export class Relay {
   /** Kinds that require AUTH for REQ/COUNT queries and are excluded from unscoped queries. */
   private authKinds: Set<number>;
   /**
+   * Auth kinds served WITHOUT authentication to filters that name their
+   * authors explicitly (non-empty `authors`). Meant for kinds whose author is
+   * an unguessable ephemeral or derived pubkey rather than a user identity —
+   * NIP-59 gift wraps (kind 1059): knowing the wrap author to ask for is
+   * itself the read capability, and readers of write-restricted streams
+   * (e.g. Concord's staff-signed control plane) hold the address without its
+   * secret, so they can never authenticate as it. `#p`-scoped and unscoped
+   * queries stay auth-gated — that is where DM metadata harvesting lives.
+   */
+  private authorExemptKinds: Set<number>;
+  /**
    * Pubkeys with unconditional read access to auth-protected kinds. A
    * connection authenticated as any of these bypasses all auth-kind gating.
    */
@@ -389,6 +400,14 @@ export class Relay {
       relayUrl: string;
       authKinds?: Set<number>;
       /**
+       * Subset of `authKinds` served WITHOUT authentication to filters that
+       * name their authors explicitly (non-empty `authors`, every auth kind
+       * in the filter exempt). For these kinds the author pubkey is an
+       * unguessable ephemeral/derived key, so naming it proves the client
+       * already holds the read capability. Default: empty.
+       */
+      authorExemptKinds?: Set<number>;
+      /**
        * Pubkeys granted unconditional read access to auth-protected kinds.
        * A connection authenticated (NIP-42) as any of these bypasses all
        * auth-kind gating on REQ/COUNT/NEG-OPEN and live subscriptions.
@@ -473,6 +492,7 @@ export class Relay {
     this.analyze = opts.analyze ?? defaultAnalyze;
     this.relayUrl = opts.relayUrl;
     this.authKinds = opts.authKinds ?? new Set();
+    this.authorExemptKinds = opts.authorExemptKinds ?? new Set();
     this.masterPubkeys = opts.masterPubkeys ?? new Set();
     this.maxFilterValues = opts.maxFilterValues ?? 5000;
     this.maxLimit = opts.maxLimit ?? 1000;
@@ -713,7 +733,15 @@ export class Relay {
       if (this.authKinds.has(event.kind) && !this.isMaster(entry.ws)) {
         const hasKind = entry.filter.kinds?.includes(event.kind);
         if (!hasKind) return;
-        if (!this.isAuthorizedForEvent(entry.ws, event)) return;
+        // An author-exempt kind delivers when the subscription named the
+        // event's author explicitly — the same capability rule as the REQ
+        // gate (naming the unguessable wrap author IS the read capability).
+        const authorExempt =
+          this.authorExemptKinds.has(event.kind) &&
+          (entry.filter.authors?.includes(event.pubkey) ?? false);
+        if (!authorExempt && !this.isAuthorizedForEvent(entry.ws, event)) {
+          return;
+        }
       }
 
       if (!matchFilter(clampUntil(entry.filter, TIME_FUZZ), event)) return;
@@ -1103,6 +1131,15 @@ export class Relay {
         continue;
       }
 
+      // Author-exempt kinds: a filter that names its authors explicitly is
+      // served without auth when every auth kind it touches is exempt. The
+      // author of such an event is an unguessable ephemeral/derived key, so
+      // a client naming it already holds the read capability — and a reader
+      // holding only the address (not its secret) could never AUTH as it.
+      if (this.isAuthorExemptFilter(filter)) {
+        continue;
+      }
+
       // Filter contains auth kind(s). Check authors / #p.
       const authors: string[] | undefined = filter.authors;
       const pTags: string[] | undefined = filter["#p"];
@@ -1142,6 +1179,37 @@ export class Relay {
     }
 
     return null;
+  }
+
+  /**
+   * Whether `filter` qualifies for the author-exempt read: it names a
+   * non-empty `authors` list and every auth kind it includes is
+   * author-exempt (see {@link authorExemptKinds}). Such a filter is served
+   * without NIP-42.
+   */
+  private isAuthorExemptFilter(filter: Filter): boolean {
+    if (this.authorExemptKinds.size === 0) return false;
+    if (!filter.authors || filter.authors.length === 0) return false;
+    if (!Array.isArray(filter.kinds) || filter.kinds.length === 0) {
+      return false;
+    }
+    return filter.kinds.every(
+      (k) => !this.authKinds.has(k) || this.authorExemptKinds.has(k),
+    );
+  }
+
+  /**
+   * The authors explicitly named by a REQ's author-exempt filters — the
+   * pubkeys the per-result auth check may admit for author-exempt kinds.
+   */
+  private authorExemptGrants(filters: Filter[]): Set<string> {
+    const granted = new Set<string>();
+    for (const filter of filters) {
+      if (this.isAuthorExemptFilter(filter)) {
+        for (const pk of filter.authors ?? []) granted.add(pk);
+      }
+    }
+    return granted;
   }
 
   /**
@@ -1416,11 +1484,19 @@ export class Relay {
       }
 
       // Check if any returned events are auth-kind events the client can't see.
-      // If so, reject the entire request — don't send partial results.
+      // If so, reject the entire request — don't send partial results. An
+      // author-exempt event is visible when the REQ's exempt filters named
+      // its author explicitly — the same capability rule checkAuthKinds
+      // admitted the filter under.
+      const exemptAuthors = this.authorExemptGrants(filters);
       if (
         result.events.some(
           (e) =>
-            this.authKinds.has(e.kind) && !this.isAuthorizedForEvent(ws, e),
+            this.authKinds.has(e.kind) &&
+            !this.isAuthorizedForEvent(ws, e) &&
+            !(
+              this.authorExemptKinds.has(e.kind) && exemptAuthors.has(e.pubkey)
+            ),
         )
       ) {
         this.ensureChallengeSent(ws);

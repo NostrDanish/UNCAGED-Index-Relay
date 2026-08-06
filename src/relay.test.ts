@@ -4532,3 +4532,194 @@ describe("Relay with masterPubkeys", () => {
     assert.notEqual(lastQueryOpts?.includeAuthKinds, true);
   });
 });
+
+describe("Relay with authorExemptKinds", () => {
+  let relay: Relay;
+  let mockStorage: AnalyzableRelay;
+  let mockWs: RelayConn;
+  let sentMessages: unknown[][];
+  let streamSk: Uint8Array;
+  let streamPk: string;
+  let otherPk: string;
+
+  const wrapBy = (sk: Uint8Array, recipient: string) =>
+    finalizeEvent(
+      {
+        kind: 1059,
+        created_at: Math.floor(Date.now() / 1000),
+        tags: [["p", recipient]],
+        content: "sealed",
+      },
+      sk,
+    );
+
+  beforeEach(() => {
+    sentMessages = [];
+    console.error = () => {};
+    console.log = () => {};
+
+    mockStorage = {
+      event: async (_event: NostrEvent) => {},
+      query: async (_filters: Filter[]) => [],
+      count: async (_filters: Filter[]) => ({ count: 7 }),
+      remove: async (_filters: Filter[]) => {},
+    } as unknown as AnalyzableRelay;
+
+    streamSk = generateSecretKey();
+    streamPk = finalizeEvent(
+      { kind: 1, created_at: 0, tags: [], content: "" },
+      streamSk,
+    ).pubkey;
+    otherPk = finalizeEvent(
+      { kind: 1, created_at: 0, tags: [], content: "" },
+      generateSecretKey(),
+    ).pubkey;
+
+    mockWs = {
+      send: (message: string) => {
+        sentMessages.push(JSON.parse(message));
+      },
+      data: {
+        subscriptions: new Set(),
+        challenge: "test-challenge",
+        challengeSent: false,
+        authedPubkeys: new Set(),
+      },
+    } as unknown as RelayConn;
+
+    relay = new Relay(mockStorage, {
+      relayUrl: "wss://relay.test/",
+      authKinds: new Set([4, 1059]),
+      authorExemptKinds: new Set([1059]),
+    });
+  });
+
+  afterEach(() => {
+    console.error = () => {};
+    console.log = () => {};
+  });
+
+  it("serves an unauthenticated REQ for kind 1059 scoped to explicit authors", async () => {
+    const wrap = wrapBy(streamSk, otherPk);
+    mockStorage.query = async () => [wrap];
+
+    await relay.handleReq(mockWs, "sub1", [
+      { kinds: [1059], authors: [streamPk] },
+    ]);
+
+    const eventMsgs = sentMessages.filter((m) => m[0] === "EVENT");
+    assert.equal(eventMsgs.length, 1);
+    assert.equal((eventMsgs[0][2] as NostrEvent).id, wrap.id);
+    assert.ok(sentMessages.find((m) => m[0] === "EOSE"));
+    assert.ok(!sentMessages.find((m) => m[0] === "CLOSED"));
+    assert.ok(!sentMessages.find((m) => m[0] === "AUTH"));
+  });
+
+  it("serves an unauthenticated COUNT for kind 1059 scoped to explicit authors", async () => {
+    await relay.handleCount(mockWs, "c1", [
+      { kinds: [1059], authors: [streamPk] },
+    ]);
+
+    const count = sentMessages.find((m) => m[0] === "COUNT");
+    assert.ok(count);
+    assert.deepEqual(count[2], { count: 7 });
+    assert.ok(!sentMessages.find((m) => m[0] === "CLOSED"));
+  });
+
+  it("still rejects an unauthenticated #p-scoped REQ for kind 1059", async () => {
+    await relay.handleReq(mockWs, "sub1", [{ kinds: [1059], "#p": [otherPk] }]);
+
+    assert.equal(sentMessages[0][0], "AUTH");
+    const closed = sentMessages.find((m) => m[0] === "CLOSED");
+    assert.ok(closed);
+    assert.ok((closed[2] as string).startsWith("auth-required:"));
+  });
+
+  it("still rejects an unauthenticated authors-scoped REQ for a non-exempt auth kind", async () => {
+    await relay.handleReq(mockWs, "sub1", [
+      { kinds: [4], authors: [streamPk] },
+    ]);
+
+    const closed = sentMessages.find((m) => m[0] === "CLOSED");
+    assert.ok(closed);
+    assert.ok((closed[2] as string).startsWith("auth-required:"));
+  });
+
+  it("still rejects when the filter mixes exempt and non-exempt auth kinds", async () => {
+    await relay.handleReq(mockWs, "sub1", [
+      { kinds: [4, 1059], authors: [streamPk] },
+    ]);
+
+    const closed = sentMessages.find((m) => m[0] === "CLOSED");
+    assert.ok(closed);
+    assert.ok((closed[2] as string).startsWith("auth-required:"));
+  });
+
+  it("still rejects an unauthenticated REQ for kind 1059 without authors", async () => {
+    await relay.handleReq(mockWs, "sub1", [{ kinds: [1059] }]);
+
+    const closed = sentMessages.find((m) => m[0] === "CLOSED");
+    assert.ok(closed);
+    assert.ok((closed[2] as string).startsWith("auth-required:"));
+  });
+
+  it("withholds a returned wrap whose author the filter did not name", async () => {
+    // Fail closed if storage produces an auth-kind event outside the
+    // exemption's grant (e.g. via another filter in the same REQ).
+    const foreign = wrapBy(generateSecretKey(), otherPk);
+    mockStorage.query = async () => [foreign];
+
+    await relay.handleReq(mockWs, "sub1", [
+      { kinds: [1059], authors: [streamPk] },
+    ]);
+
+    assert.ok(!sentMessages.find((m) => m[0] === "EVENT"));
+    const closed = sentMessages.find((m) => m[0] === "CLOSED");
+    assert.ok(closed);
+    assert.ok((closed[2] as string).startsWith("auth-required:"));
+  });
+
+  it("broadcasts a live wrap to an unauthenticated authors-scoped subscription", async () => {
+    relay.handleOpen(mockWs);
+    await relay.handleReq(mockWs, "sub1", [
+      { kinds: [1059], authors: [streamPk] },
+    ]);
+    sentMessages.length = 0;
+
+    const sender = {
+      send: () => {},
+      data: {
+        subscriptions: new Set(),
+        challenge: "",
+        challengeSent: false,
+        authedPubkeys: new Set(),
+      },
+    } as unknown as RelayConn;
+    relay.handleOpen(sender);
+
+    // A wrap by the subscribed stream address is delivered; a wrap by a
+    // different author is not.
+    await relay.handleEvent(sender, wrapBy(streamSk, otherPk));
+    await relay.handleEvent(sender, wrapBy(generateSecretKey(), otherPk));
+    relay.flushBroadcasts();
+
+    const eventMsgs = sentMessages.filter((m) => m[0] === "EVENT");
+    assert.equal(eventMsgs.length, 1);
+    assert.equal((eventMsgs[0][2] as NostrEvent).pubkey, streamPk);
+  });
+
+  it("does not exempt anything when the option is unset", async () => {
+    const gated = new Relay(mockStorage, {
+      relayUrl: "wss://relay.test/",
+      authKinds: new Set([4, 1059]),
+    });
+
+    await gated.handleReq(mockWs, "sub1", [
+      { kinds: [1059], authors: [streamPk] },
+    ]);
+
+    const closed = sentMessages.find((m) => m[0] === "CLOSED");
+    assert.ok(closed);
+    assert.ok((closed[2] as string).startsWith("auth-required:"));
+  });
+});

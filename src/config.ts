@@ -52,6 +52,18 @@ export class Config {
    */
   readonly authKinds: Set<number>;
   /**
+   * Subset of `authKinds` that a REQ/COUNT/NEG-OPEN filter may read WITHOUT
+   * NIP-42 when it names a non-empty `authors` list (and every auth kind in
+   * the filter is in this set). Meant for kinds authored by unguessable
+   * ephemeral or derived pubkeys rather than user identities — NIP-59 gift
+   * wraps (kind 1059): knowing the wrap author to ask for is itself the read
+   * capability, and readers of write-restricted streams (e.g. Concord's
+   * staff-signed control plane) hold the address without its secret, so they
+   * can never authenticate as it. `#p`-scoped and unscoped queries stay
+   * auth-gated. Set via `AUTH_AUTHOR_EXEMPT_KINDS`. Default: 1059.
+   */
+  readonly authorExemptKinds: Set<number>;
+  /**
    * Set of pubkeys (hex) granted unconditional read access to auth-protected
    * kinds. A connection that authenticates (NIP-42) as any of these pubkeys
    * bypasses all AUTH gating and can read every user's auth-kind events
@@ -282,6 +294,18 @@ export class Config {
         .map((s) => parseInt(s.trim(), 10))
         .filter((n) => !Number.isNaN(n));
       this.authKinds = new Set(kinds);
+    }
+
+    // authorExemptKinds
+    const authorExemptValue = env.get("AUTH_AUTHOR_EXEMPT_KINDS");
+    if (authorExemptValue === undefined) {
+      this.authorExemptKinds = new Set([1059]);
+    } else {
+      const kinds = authorExemptValue
+        .split(",")
+        .map((s) => parseInt(s.trim(), 10))
+        .filter((n) => !Number.isNaN(n));
+      this.authorExemptKinds = new Set(kinds);
     }
 
     // masterPubkeys

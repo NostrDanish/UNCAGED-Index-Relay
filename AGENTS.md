@@ -155,6 +155,12 @@ Edit `.env` to configure the application:
   (`max(1, min(16, floor(cores / 4)))`); must be `>= 1` when set.
 - `AUTH_KINDS` - Comma-separated kinds requiring NIP-42 AUTH for REQ/COUNT and
   excluded from unscoped queries (default: `4,1059` — DMs and gift wraps).
+- `AUTH_AUTHOR_EXEMPT_KINDS` - Subset of `AUTH_KINDS` served WITHOUT
+  authentication to filters naming a non-empty `authors` list (when every
+  auth kind in the filter is exempt). For these kinds the author is an
+  unguessable ephemeral/derived pubkey (NIP-59 gift wraps, Concord stream
+  addresses), so knowing it is the read capability; `#p`-scoped and unscoped
+  queries stay gated. Default: `1059`.
 - `MASTER_PUBKEYS` - Comma-separated hex pubkeys. A
   connection that authenticates (NIP-42) as any of these gets unconditional
   read access to all `AUTH_KINDS` events for every user — bypassing all AUTH

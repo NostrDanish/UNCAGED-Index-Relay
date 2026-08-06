@@ -138,6 +138,15 @@ wraps) are auth-protected:
   supports conversation-scoped queries like
   `{"kinds":[4],"authors":["<me>"],"#p":["<them>"]}` while authenticated as
   either party.
+- Exception: kinds listed in `AUTH_AUTHOR_EXEMPT_KINDS` (default `1059`) are
+  served **without** authentication to filters that name a non-empty
+  `authors` list (as long as every auth kind in the filter is exempt). Gift
+  wraps are authored by unguessable ephemeral or derived pubkeys — never a
+  user identity — so knowing the author to ask for is itself the read
+  capability, and readers of write-restricted streams (e.g. Concord's
+  staff-signed control plane, CORD-02 §2) hold the address without its
+  secret and could never authenticate as it. `#p`-scoped and unscoped
+  queries stay gated, which is where DM metadata harvesting lives.
 - Filters without explicit kinds silently exclude auth-protected kinds.
 - Queries by event ID return auth-protected events only to a party of the
   event (author or p-tagged recipient).
@@ -226,6 +235,7 @@ All options:
 | `OPENSEARCH_USERNAME` | OpenSearch basic-auth username | unset |
 | `OPENSEARCH_PASSWORD` | OpenSearch basic-auth password | unset |
 | `AUTH_KINDS` | Kinds requiring NIP-42 AUTH to query | `4,1059` |
+| `AUTH_AUTHOR_EXEMPT_KINDS` | Auth kinds readable unauthenticated via explicit `authors` filters | `1059` |
 | `HISTORY_ENABLED` | Preserve history of replaceable events | `true` |
 | `HISTORY_KINDS_WHITELIST` | Only these kinds get history | unset |
 | `HISTORY_KINDS_EXCLUDED` | Kinds excluded from history | `30382,30383,30384,30385` |

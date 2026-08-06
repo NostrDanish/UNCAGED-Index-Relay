@@ -143,6 +143,7 @@ const relay = new Relay(storage, {
   logger: log,
   relayUrl: config.relayUrl,
   authKinds: config.authKinds,
+  authorExemptKinds: config.authorExemptKinds,
   masterPubkeys: config.masterPubkeys,
   maxMessageLength: config.maxMessageLength,
   maxFilterValues: config.maxFilterValues,

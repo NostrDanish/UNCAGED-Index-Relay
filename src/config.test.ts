@@ -262,6 +262,25 @@ describe("Config", () => {
     });
   });
 
+  describe("authorExemptKinds", () => {
+    it("should default to kind 1059", () => {
+      const config = new Config(baseEnv());
+      assert.deepEqual(config.authorExemptKinds, new Set([1059]));
+    });
+
+    it("should parse comma-separated kind numbers", () => {
+      const config = new Config(
+        baseEnv([["AUTH_AUTHOR_EXEMPT_KINDS", "1059,104"]]),
+      );
+      assert.deepEqual(config.authorExemptKinds, new Set([1059, 104]));
+    });
+
+    it("should return empty set for empty string", () => {
+      const config = new Config(baseEnv([["AUTH_AUTHOR_EXEMPT_KINDS", ""]]));
+      assert.deepEqual(config.authorExemptKinds, new Set());
+    });
+  });
+
   describe("masterPubkeys", () => {
     const hex =
       "4b1b7f0d17e5ee24ccd091afacfe7923329c21387f1f3ee14c3cf3fa31e2a813";
