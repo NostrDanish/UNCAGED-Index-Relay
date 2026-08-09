@@ -1912,12 +1912,16 @@ export class OpenSearchRelay implements NStore, AsyncDisposable {
    * excluded kinds).  Runs asynchronously so it doesn't block the main
    * event loop.
    *
+   * The winner is decided over the union of the just-indexed event and
+   * the versions the `msearch` could see, because Phase 1 waits only one
+   * refresh_interval and the new document is not reliably searchable by
+   * then. It is never assumed to be the top hit.
+   *
    * Batched implementation:
-   *   1. One {@link Client.msearch} over all slots returns winner + a peek
-   *      at any prior version (`size: 2`). Routed through the read client
+   *   1. One {@link Client.msearch} over all slots returns a peek at the
+   *      slot's live versions (`size: 3`). Routed through the read client
    *      since it's a single query per flush. Counted as `slot_resolution`.
-   *   2. Slots whose `msearch` returned only the just-indexed event have
-   *      no prior versions and are skipped — a fast-path that dominates
+   *   2. Slots with no losers are skipped — a fast-path that dominates
    *      first-time-write workloads (e.g. Bluesky bridge backfill).
    *   3. Slots that need cleanup are resolved in at most three combined
    *      ops:
@@ -1963,6 +1967,14 @@ export class OpenSearchRelay implements NStore, AsyncDisposable {
       eventId: string;
       createdAt: number;
     };
+
+    /** A candidate version of a slot, as returned by the msearch. */
+    type SlotDoc = { id: string; created_at: number; deleted?: boolean };
+
+    /** NIP-01 slot ordering: newest wins, lowest id breaks ties. */
+    const beats = (a: SlotDoc, b: SlotDoc): boolean =>
+      a.created_at > b.created_at ||
+      (a.created_at === b.created_at && a.id < b.id);
 
     const slots = new Map<string, Slot>();
 
@@ -2038,7 +2050,7 @@ export class OpenSearchRelay implements NStore, AsyncDisposable {
         query: { bool: { must: buildSlotMust(slot) } },
         sort: [{ created_at: { order: "desc" } }, { id: { order: "asc" } }],
         size: 3,
-        _source: ["id", "deleted"],
+        _source: ["id", "created_at", "deleted"],
       },
     }));
 
@@ -2048,7 +2060,7 @@ export class OpenSearchRelay implements NStore, AsyncDisposable {
     });
     let msearchResponses: Array<{
       hits?: {
-        hits?: Array<{ _source?: { id: string; deleted?: boolean } }>;
+        hits?: Array<{ _source?: SlotDoc }>;
       };
     }>;
     try {
@@ -2060,7 +2072,7 @@ export class OpenSearchRelay implements NStore, AsyncDisposable {
             responses?: Array<{
               hits?: {
                 hits?: Array<{
-                  _source?: { id: string; deleted?: boolean };
+                  _source?: SlotDoc;
                 }>;
               };
             }>;
@@ -2091,6 +2103,7 @@ export class OpenSearchRelay implements NStore, AsyncDisposable {
     //                   future replacement event.
     type Loser = { slot: Slot; loserId: string };
     const historyLosers: Loser[] = [];
+    const unsearchableDeleteIds: string[] = [];
     const deleteSlots: Slot[] = [];
     const deleteWinnerIds: string[] = [];
     const deepHistorySlots: Slot[] = [];
@@ -2099,19 +2112,47 @@ export class OpenSearchRelay implements NStore, AsyncDisposable {
     for (let i = 0; i < slotList.length; i++) {
       const slot = slotList[i];
       const resp = msearchResponses[i];
-      const hits = resp?.hits?.hits ?? [];
+      const hits = (resp?.hits?.hits ?? [])
+        .map((hit) => hit._source)
+        .filter((source): source is SlotDoc => !!source?.id);
 
-      // No hits at all — Phase 1 refresh may not have caught up yet.
-      // The next flush touching this slot will resolve it.
-      if (hits.length === 0) continue;
+      // The just-indexed event competes for the slot even when it is not
+      // searchable yet: Phase 1 only waits one refresh_interval, so an
+      // msearch that outruns the refresh cycle can't see it. Taking
+      // `hits[0]` as the winner in that case crowns the previous version
+      // and leaves the new one unreplaced forever — the slot converges on
+      // two live versions instead of one — and lets the sweeps below
+      // replace or delete the event that should have won.
+      const indexed: SlotDoc = {
+        id: slot.eventId,
+        created_at: slot.createdAt,
+      };
+      const indexedSearchable = hits.some((hit) => hit.id === indexed.id);
+      const candidates = indexedSearchable ? hits : [...hits, indexed];
 
-      const winnerId = hits[0]?._source?.id;
-      if (!winnerId) continue;
+      let winner = candidates[0];
+      for (const candidate of candidates) {
+        if (beats(candidate, winner)) winner = candidate;
+      }
 
-      // No prior versions visible. Common case for first-write events
-      // (e.g. brand-new bridge accounts). Skip both the cleanup query
-      // and the partial-doc update entirely.
-      if (hits.length < 2) continue;
+      // Losers that were concurrently soft-deleted (NIP-09) are skipped:
+      // overwriting one would clobber `deleted: true` back to
+      // `replaced: true` and resurrect the doc into history queries. It's
+      // already excluded from queries by the `deleted: false` filter, so
+      // leaving it alone is correct.
+      const loserIds = candidates
+        .filter((c) => c.id !== winner.id && c.deleted !== true)
+        .map((c) => c.id);
+
+      // Nothing to clean up. Common case for first-write events (e.g.
+      // brand-new bridge accounts): skip the cleanup query and the
+      // partial-doc update entirely.
+      if (loserIds.length === 0) continue;
+
+      // An older version arriving late loses to what's already stored. No
+      // query-based sweep can reach it while it's unsearchable, so it has
+      // to be named by id.
+      const indexedLost = !indexedSearchable && winner.id !== indexed.id;
 
       const preserve = this.shouldPreserveHistory(slot.kind);
       const hitDeepHistory = hits.length >= 3;
@@ -2129,25 +2170,19 @@ export class OpenSearchRelay implements NStore, AsyncDisposable {
         if (hitDeepHistory) {
           // Defer entirely to the scoped updateByQuery sweep in 3c, which
           // covers every straggler in the slot. Skipping 3a here avoids
-          // double-writing the visible loser.
+          // double-writing the visible losers.
           deepHistorySlots.push(slot);
-          deepHistoryWinnerIds.push(winnerId);
+          deepHistoryWinnerIds.push(winner.id);
+          if (indexedLost) historyLosers.push({ slot, loserId: indexed.id });
         } else {
-          const loser = hits[1]?._source;
-          const loserId = loser?.id;
-          if (!loserId) continue;
-          // Loser was concurrently soft-deleted (NIP-09) between msearch
-          // and this code path. Skip the partial-doc update — overwriting
-          // would clobber `deleted: true` back to `replaced: true` and
-          // resurrect the doc into history queries. It's already excluded
-          // from queries by the `deleted: false` filter, so leaving it
-          // alone is correct.
-          if (loser?.deleted === true) continue;
-          historyLosers.push({ slot, loserId });
+          for (const loserId of loserIds) {
+            historyLosers.push({ slot, loserId });
+          }
         }
       } else {
         deleteSlots.push(slot);
-        deleteWinnerIds.push(winnerId);
+        deleteWinnerIds.push(winner.id);
+        if (indexedLost) unsearchableDeleteIds.push(indexed.id);
       }
 
       // Mark kind 0 pubkey as dirty so follower count gets recomputed on
@@ -2166,11 +2201,12 @@ export class OpenSearchRelay implements NStore, AsyncDisposable {
     // (history bulk update + delete sweep + deep-history sweep), and only
     // when each path has slots to act on.
     //
-    // 3a. Bulk partial-doc update of known history losers. Avoids the
-    //     painless script entirely, which is much cheaper than
-    //     updateByQuery (no script compile/cache, no query scan, direct
-    //     doc-id lookup on the write thread pool).
-    if (historyLosers.length > 0) {
+    // 3a. Bulk partial-doc update of known history losers, plus by-id
+    //     deletes for excluded-kind losers the query sweep in 3b can't
+    //     reach. Avoids the painless script entirely, which is much
+    //     cheaper than updateByQuery (no script compile/cache, no query
+    //     scan, direct doc-id lookup on the write thread pool).
+    if (historyLosers.length > 0 || unsearchableDeleteIds.length > 0) {
       opensearchQueriesCounter.inc({ type: "slot_cleanup_history" });
       const cleanupEnd = opensearchQueryDurationHistogram.startTimer({
         type: "slot_cleanup_history",
@@ -2182,6 +2218,11 @@ export class OpenSearchRelay implements NStore, AsyncDisposable {
             update: { _index: this.indexName, _id: loserId },
           });
           bulkBody.push({ doc: REPLACED_DOC });
+        }
+        for (const loserId of unsearchableDeleteIds) {
+          bulkBody.push({
+            delete: { _index: this.indexName, _id: loserId },
+          });
         }
         await this.writeClient.bulk({ body: bulkBody });
       } catch (error) {

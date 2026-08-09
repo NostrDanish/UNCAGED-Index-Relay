@@ -236,12 +236,19 @@ describe("OpenSearchRelay", () => {
 
   const createHistoryMockClient = () => {
     const documents = new Map<string, unknown>();
+    // Docs indexed but not yet visible to search, modelling OpenSearch's
+    // refresh_interval. `get` still sees them (realtime), searches don't.
+    // Off by default; `setDeferVisibility(true)` makes subsequent bulk
+    // index ops land here until `refresh()` is called.
+    const unsearchable = new Set<string>();
+    let deferVisibility = false;
     // biome-ignore lint/suspicious/noExplicitAny: shared search impl reused by msearch
     const runSearch = (body: any) => {
       const results: unknown[] = [];
       const filters = extractFilters(body.query.bool);
 
-      for (const [_id, doc] of documents.entries()) {
+      for (const [id, doc] of documents.entries()) {
+        if (unsearchable.has(id)) continue;
         const d = doc as NostrEvent & {
           deleted?: boolean;
           replaced?: boolean;
@@ -251,9 +258,16 @@ describe("OpenSearchRelay", () => {
         results.push(doc);
       }
 
-      results.sort(
-        (a, b) => (b as NostrEvent).created_at - (a as NostrEvent).created_at,
-      );
+      // Matches the relay's msearch sort: newest first, lowest id breaks
+      // ties.
+      results.sort((a, b) => {
+        const ea = a as NostrEvent;
+        const eb = b as NostrEvent;
+        if (eb.created_at !== ea.created_at) {
+          return eb.created_at - ea.created_at;
+        }
+        return ea.id < eb.id ? -1 : ea.id > eb.id ? 1 : 0;
+      });
 
       const size = body.size ?? results.length;
       return {
@@ -264,6 +278,14 @@ describe("OpenSearchRelay", () => {
     };
     return {
       documents,
+      /** Simulate refresh lag for subsequently indexed documents. */
+      setDeferVisibility: (value: boolean) => {
+        deferVisibility = value;
+      },
+      /** Make every indexed document searchable, as a refresh would. */
+      refresh: () => {
+        unsearchable.clear();
+      },
       client: {
         // biome-ignore lint/suspicious/noExplicitAny: mock accepts any query shape
         search: async ({ body }: { body: any }) => {
@@ -276,15 +298,27 @@ describe("OpenSearchRelay", () => {
         },
         bulk: async ({ body }: { body: unknown[] }) => {
           const items: Array<Record<string, unknown>> = [];
-          for (let i = 0; i < body.length; i += 2) {
+          // `index` and `update` actions are followed by a source line;
+          // `delete` actions stand alone.
+          for (let i = 0; i < body.length; i++) {
             const action = body[i] as {
               index?: { _id: string };
               update?: { _id: string };
+              delete?: { _id: string };
             };
-            const payload = body[i + 1] as Record<string, unknown>;
+
+            if (action.delete) {
+              documents.delete(action.delete._id);
+              unsearchable.delete(action.delete._id);
+              items.push({ delete: {} });
+              continue;
+            }
+
+            const payload = body[++i] as Record<string, unknown>;
 
             if (action.index) {
               documents.set(action.index._id, payload);
+              if (deferVisibility) unsearchable.add(action.index._id);
               items.push({ index: {} });
             } else if (action.update) {
               if (payload.doc) {
@@ -318,6 +352,7 @@ describe("OpenSearchRelay", () => {
           let deleted = 0;
 
           for (const [id, doc] of documents.entries()) {
+            if (unsearchable.has(id)) continue;
             const d = doc as NostrEvent & {
               deleted?: boolean;
               replaced?: boolean;
@@ -334,7 +369,8 @@ describe("OpenSearchRelay", () => {
         updateByQuery: async ({ body }: { body: any }) => {
           let updated = 0;
 
-          for (const [_id, doc] of documents.entries()) {
+          for (const [id, doc] of documents.entries()) {
+            if (unsearchable.has(id)) continue;
             const d = doc as NostrEvent & {
               deleted?: boolean;
               replaced?: boolean;
@@ -825,6 +861,199 @@ describe("OpenSearchRelay", () => {
       assert.ok(replaced, "Should have a replaced event");
       assert.equal(current?.id, event1.id, "Newer event should be current");
       assert.equal(replaced?.id, event2.id, "Older event should be replaced");
+    });
+
+    // Phase 2 waits one refresh_interval before searching for the document
+    // it just indexed, which is not a guarantee — the msearch regularly
+    // outruns the refresh cycle in production. When that happens the
+    // just-indexed event is missing from the hits, and treating the top hit
+    // as the slot winner leaves two live versions behind on every update.
+    describe("slot resolution when the new event is not yet searchable", () => {
+      const mkArticle = (sk: Uint8Array, createdAt: number, content: string) =>
+        finalizeEvent(
+          {
+            kind: 30023,
+            created_at: createdAt,
+            content,
+            tags: [["d", "my-article"]],
+          },
+          sk,
+        );
+
+      it("should replace the prior version when the new one is unsearchable", async () => {
+        const mock = createHistoryMockClient();
+        const relay = new OpenSearchRelay(mock.client as unknown as Client, {
+          indexName: "test-index",
+          bulkMaxSize: 1,
+          refreshDelayMs: 0,
+        });
+
+        const sk = generateSecretKey();
+
+        const v1 = mkArticle(sk, 1000, "article-v1");
+        await relay.event(v1);
+        mock.refresh();
+
+        mock.setDeferVisibility(true);
+        const v2 = mkArticle(sk, 2000, "article-v2");
+        await relay.event(v2);
+        mock.refresh();
+
+        const docs = Array.from(mock.documents.values()) as Array<
+          NostrEvent & { replaced?: boolean }
+        >;
+        const live = docs.filter((d) => !d.replaced);
+
+        assert.equal(
+          live.length,
+          1,
+          "Slot should have exactly one live version",
+        );
+        assert.equal(live[0].id, v2.id, "The newest version should be live");
+        assert.equal(
+          docs.find((d) => d.id === v1.id)?.replaced,
+          true,
+          "The prior version should be marked replaced",
+        );
+      });
+
+      it("should converge on one live version across repeated updates", async () => {
+        const mock = createHistoryMockClient();
+        const relay = new OpenSearchRelay(mock.client as unknown as Client, {
+          indexName: "test-index",
+          bulkMaxSize: 1,
+          refreshDelayMs: 0,
+        });
+
+        const sk = generateSecretKey();
+        const versions: NostrEvent[] = [];
+
+        // Every write lands while the previous refresh has already caught
+        // up but its own has not — the steady state in production.
+        mock.setDeferVisibility(true);
+        for (let i = 1; i <= 5; i++) {
+          const version = mkArticle(sk, 1000 * i, `article-v${i}`);
+          versions.push(version);
+          await relay.event(version);
+          mock.refresh();
+        }
+
+        const docs = Array.from(mock.documents.values()) as Array<
+          NostrEvent & { replaced?: boolean }
+        >;
+        const live = docs.filter((d) => !d.replaced);
+
+        assert.equal(docs.length, 5, "All versions should be retained");
+        assert.equal(
+          live.length,
+          1,
+          "Slot should have exactly one live version",
+        );
+        assert.equal(
+          live[0].id,
+          versions[versions.length - 1].id,
+          "The newest version should be the live one",
+        );
+      });
+
+      it("should replace a late older version that is unsearchable", async () => {
+        const mock = createHistoryMockClient();
+        const relay = new OpenSearchRelay(mock.client as unknown as Client, {
+          indexName: "test-index",
+          bulkMaxSize: 1,
+          refreshDelayMs: 0,
+        });
+
+        const sk = generateSecretKey();
+
+        const newer = mkArticle(sk, 2000, "article-v2");
+        await relay.event(newer);
+        mock.refresh();
+
+        mock.setDeferVisibility(true);
+        const older = mkArticle(sk, 1000, "article-v1");
+        await relay.event(older);
+        mock.refresh();
+
+        const docs = Array.from(mock.documents.values()) as Array<
+          NostrEvent & { replaced?: boolean }
+        >;
+        const live = docs.filter((d) => !d.replaced);
+
+        assert.equal(
+          live.length,
+          1,
+          "Slot should have exactly one live version",
+        );
+        assert.equal(
+          live[0].id,
+          newer.id,
+          "The newer version should stay live",
+        );
+        assert.equal(
+          docs.find((d) => d.id === older.id)?.replaced,
+          true,
+          "The late older version should be marked replaced",
+        );
+      });
+
+      it("should delete prior versions, not the new one, when history is disabled", async () => {
+        const mock = createHistoryMockClient();
+        const relay = new OpenSearchRelay(mock.client as unknown as Client, {
+          indexName: "test-index",
+          bulkMaxSize: 1,
+          refreshDelayMs: 0,
+          historyEnabled: false,
+        });
+
+        const sk = generateSecretKey();
+
+        const v1 = mkArticle(sk, 1000, "article-v1");
+        await relay.event(v1);
+        mock.refresh();
+
+        mock.setDeferVisibility(true);
+        const v2 = mkArticle(sk, 2000, "article-v2");
+        await relay.event(v2);
+        mock.refresh();
+
+        const remaining = Array.from(mock.documents.values()) as NostrEvent[];
+        assert.equal(remaining.length, 1, "Only one version should survive");
+        assert.equal(
+          remaining[0].id,
+          v2.id,
+          "The newest version should survive",
+        );
+      });
+
+      it("should delete a late older version that is unsearchable", async () => {
+        const mock = createHistoryMockClient();
+        const relay = new OpenSearchRelay(mock.client as unknown as Client, {
+          indexName: "test-index",
+          bulkMaxSize: 1,
+          refreshDelayMs: 0,
+          historyEnabled: false,
+        });
+
+        const sk = generateSecretKey();
+
+        const newer = mkArticle(sk, 2000, "article-v2");
+        await relay.event(newer);
+        mock.refresh();
+
+        mock.setDeferVisibility(true);
+        const older = mkArticle(sk, 1000, "article-v1");
+        await relay.event(older);
+        mock.refresh();
+
+        const remaining = Array.from(mock.documents.values()) as NostrEvent[];
+        assert.equal(remaining.length, 1, "Only one version should survive");
+        assert.equal(
+          remaining[0].id,
+          newer.id,
+          "The newer version should survive",
+        );
+      });
     });
 
     it("should not archive a duplicate event", async () => {
