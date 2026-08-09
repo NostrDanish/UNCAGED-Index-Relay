@@ -413,6 +413,22 @@ export const opensearchPhase2DroppedCounter = new Counter({
   help: "Phase 2 tasks dropped due to waiter-queue overflow",
 });
 
+/**
+ * Count of stale replaceable/addressable versions dropped from query
+ * results because more than one `replaced: false` document was live in the
+ * same slot, labeled by kind.
+ *
+ * A low background rate is expected — Phase 2 runs a refresh cycle behind
+ * the write, so a slot legitimately holds two live versions for that
+ * window. A sustained or growing rate means Phase 2 is not converging and
+ * duplicates are accumulating in the index.
+ */
+export const opensearchSlotDuplicatesCounter = new Counter({
+  name: "ditto_opensearch_slot_duplicates_total",
+  help: "Stale replaceable/addressable versions dropped from query results",
+  labelNames: ["kind"] as const,
+});
+
 /** Duration of OpenSearch queries in seconds, labeled by type. */
 export const opensearchQueryDurationHistogram = new Histogram({
   name: "ditto_opensearch_query_duration_seconds",

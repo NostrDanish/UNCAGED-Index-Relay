@@ -2558,6 +2558,171 @@ describe("OpenSearchRelay", () => {
     });
   });
 
+  describe("query-time slot deduplication", () => {
+    /**
+     * Index a document directly, bypassing `event()`. Phase 2 is what
+     * normally marks losing versions `replaced: true`; seeding lets us
+     * reproduce the state it leaves behind when it lags, fails, or is
+     * dropped under load — two live versions in one slot.
+     */
+    const seed = (
+      documents: Map<string, unknown>,
+      event: NostrEvent,
+      replaced = false,
+    ): NostrEvent => {
+      const dTag = event.tags.find(([name]) => name === "d")?.[1];
+      documents.set(event.id, {
+        ...event,
+        deleted: false,
+        replaced,
+        ...(dTag !== undefined && { tags_map: { d: [dTag] } }),
+      });
+      return event;
+    };
+
+    const mkRelay = () => {
+      const { client, documents } = createHistoryMockClient();
+      const relay = new OpenSearchRelay(client as unknown as Client, {
+        indexName: "test-index",
+        bulkMaxSize: 1,
+        refreshDelayMs: 0,
+      });
+      return { relay, documents };
+    };
+
+    const mkArticle = (
+      sk: Uint8Array,
+      createdAt: number,
+      content: string,
+    ): NostrEvent =>
+      finalizeEvent(
+        {
+          kind: 30078,
+          created_at: createdAt,
+          tags: [["d", "app/settings"]],
+          content,
+        },
+        sk,
+      );
+
+    it("returns only the newest version of an addressable slot", async () => {
+      const { relay, documents } = mkRelay();
+      const sk = generateSecretKey();
+
+      seed(documents, mkArticle(sk, 1000, "v1"));
+      const newer = seed(documents, mkArticle(sk, 2000, "v2"));
+
+      const results = await relay.query([
+        { kinds: [30078], authors: [getPublicKey(sk)] },
+      ]);
+
+      assert.equal(results.length, 1, "One version per slot");
+      assert.equal(results[0].id, newer.id);
+    });
+
+    it("returns only the newest version of a replaceable slot", async () => {
+      const { relay, documents } = mkRelay();
+      const sk = generateSecretKey();
+
+      const mkProfile = (createdAt: number, name: string): NostrEvent =>
+        finalizeEvent(
+          {
+            kind: 0,
+            created_at: createdAt,
+            tags: [],
+            content: JSON.stringify({ name }),
+          },
+          sk,
+        );
+
+      seed(documents, mkProfile(1000, "Old Alice"));
+      const newer = seed(documents, mkProfile(2000, "Alice"));
+
+      const results = await relay.query([{ kinds: [0] }]);
+
+      assert.equal(results.length, 1, "One version per slot");
+      assert.equal(results[0].id, newer.id);
+    });
+
+    it("breaks a created_at tie by lowest id, not by result order", async () => {
+      const { relay, documents } = mkRelay();
+      const sk = generateSecretKey();
+
+      const a = mkArticle(sk, 1000, "v1");
+      const b = mkArticle(sk, 1000, "v2");
+      const [winner, loser] = a.id < b.id ? [a, b] : [b, a];
+
+      // Seed the loser first: the query sorts on `created_at` alone, so a
+      // "first hit wins" dedup would keep this one.
+      seed(documents, loser);
+      seed(documents, winner);
+
+      const results = await relay.query([
+        { kinds: [30078], authors: [getPublicKey(sk)] },
+      ]);
+
+      assert.equal(results.length, 1, "One version per slot");
+      assert.equal(results[0].id, winner.id, "Lowest id should win the tie");
+    });
+
+    it("keeps every version for a naddr-shaped history filter", async () => {
+      const { relay, documents } = mkRelay();
+      const sk = generateSecretKey();
+
+      const older = seed(documents, mkArticle(sk, 1000, "v1"), true);
+      const newer = seed(documents, mkArticle(sk, 2000, "v2"));
+
+      const results = await relay.query([
+        {
+          kinds: [30078],
+          authors: [getPublicKey(sk)],
+          "#d": ["app/settings"],
+        },
+      ]);
+
+      const ids = results.map((e) => e.id).sort();
+      assert.deepEqual(ids, [older.id, newer.id].sort());
+    });
+
+    it("keeps every version for an ids filter", async () => {
+      const { relay, documents } = mkRelay();
+      const sk = generateSecretKey();
+
+      const older = seed(documents, mkArticle(sk, 1000, "v1"), true);
+      const newer = seed(documents, mkArticle(sk, 2000, "v2"));
+
+      const results = await relay.query([{ ids: [older.id, newer.id] }]);
+
+      const ids = results.map((e) => e.id).sort();
+      assert.deepEqual(ids, [older.id, newer.id].sort());
+    });
+
+    it("leaves regular kinds alone", async () => {
+      const { relay, documents } = mkRelay();
+      const sk = generateSecretKey();
+
+      const mkNote = (createdAt: number, content: string): NostrEvent =>
+        finalizeEvent(
+          { kind: 1, created_at: createdAt, tags: [], content },
+          sk,
+        );
+
+      const first = seed(documents, mkNote(1000, "hello"));
+      const second = seed(documents, mkNote(2000, "world"));
+
+      const results = await relay.query([
+        { kinds: [1], authors: [getPublicKey(sk)] },
+      ]);
+
+      const ids = results.map((e) => e.id).sort();
+      assert.deepEqual(
+        ids,
+        [first.id, second.id].sort(),
+        "Regular kinds have no slot and must not be collapsed",
+      );
+    });
+  });
+
   describe("pendingDirty cap", () => {
     it("MAX_PENDING_DIRTY constant is exposed and has a reasonable value", () => {
       assert.equal(typeof OpenSearchRelay.MAX_PENDING_DIRTY, "number");

@@ -13,6 +13,7 @@ import {
   opensearchQueriesCounter,
   opensearchQueryDurationHistogram,
   opensearchSlotDeepHistoryCounter,
+  opensearchSlotDuplicatesCounter,
 } from "./metrics.ts";
 import type {
   ClientOptions,
@@ -954,6 +955,86 @@ export class OpenSearchRelay implements NStore, AsyncDisposable {
   }
 
   /**
+   * The replaceable/addressable slot an event occupies, or `null` for
+   * regular kinds, which have no slot.
+   */
+  private static slotKey(event: NostrEvent): string | null {
+    if (NKinds.replaceable(event.kind)) {
+      return `${event.kind}:${event.pubkey}`;
+    }
+    if (NKinds.addressable(event.kind)) {
+      const dTag = event.tags.find(([name]) => name === "d")?.[1] ?? "";
+      return `${event.kind}:${event.pubkey}:${dTag}`;
+    }
+    return null;
+  }
+
+  /**
+   * Drop stale versions of replaceable/addressable events from a result
+   * set, keeping one event per slot.
+   *
+   * The `replaced: true` flag that {@link buildQuery} filters on is set by
+   * Phase 2 of {@link flush}, which is fire-and-forget: it runs a refresh
+   * cycle behind the write, can fail transiently, and is dropped outright
+   * under sustained load (see {@link opensearchPhase2DroppedCounter}). A
+   * slot can therefore hold more than one `replaced: false` document, and
+   * no query-side predicate can hide the extras. Collapsing them here is
+   * what makes REQ results NIP-01-correct irrespective of write-side state.
+   *
+   * The winner is the newest `created_at`, ties broken by lowest `id`. The
+   * comparison has to be explicit rather than "first hit wins": the query
+   * sorts on `created_at` alone, and duplicated slots routinely hold
+   * versions written within the same second.
+   *
+   * Exempt are filters that asked for history — `ids` and naddr-shaped,
+   * per {@link isHistoryFilter} — and filters that cannot match a
+   * replaceable or addressable kind at all.
+   *
+   * This only ever shrinks a page: a REQ for `limit` events may come back
+   * with fewer. Nothing servable is lost (the dropped versions are stale by
+   * definition, and paging with `until` still advances), but a client that
+   * reads a short page as end-of-results will stop early.
+   */
+  private dedupeSlots(events: NostrEvent[], filter: NostrFilter): NostrEvent[] {
+    if (this.isHistoryFilter(filter)) return events;
+    if (
+      filter.kinds &&
+      !filter.kinds.some((k) => NKinds.replaceable(k) || NKinds.addressable(k))
+    ) {
+      return events;
+    }
+
+    const winners = new Map<string, NostrEvent>();
+    let slotEvents = 0;
+
+    for (const event of events) {
+      const key = OpenSearchRelay.slotKey(event);
+      if (!key) continue;
+      slotEvents++;
+
+      const current = winners.get(key);
+      if (
+        !current ||
+        event.created_at > current.created_at ||
+        (event.created_at === current.created_at && event.id < current.id)
+      ) {
+        winners.set(key, event);
+      }
+    }
+
+    // Every slot in the page held exactly one version — the overwhelmingly
+    // common case. Return the original array without reallocating.
+    if (slotEvents === winners.size) return events;
+
+    return events.filter((event) => {
+      const key = OpenSearchRelay.slotKey(event);
+      if (!key || winners.get(key) === event) return true;
+      opensearchSlotDuplicatesCounter.inc({ kind: event.kind });
+      return false;
+    });
+  }
+
+  /**
    * Query events using precomputed engagement scores.
    *
    * Each sort mode uses the building-block score fields (followers,
@@ -1669,7 +1750,10 @@ export class OpenSearchRelay implements NStore, AsyncDisposable {
         type: "sort",
       });
       try {
-        return await this.querySortedEvents(filter, sortMode, limit);
+        return this.dedupeSlots(
+          await this.querySortedEvents(filter, sortMode, limit),
+          filter,
+        );
       } finally {
         sortEnd();
       }
@@ -1709,7 +1793,7 @@ export class OpenSearchRelay implements NStore, AsyncDisposable {
         body: searchBody,
       });
 
-      return this.hitsToEvents(response);
+      return this.dedupeSlots(this.hitsToEvents(response), filter);
     } finally {
       queryEnd();
     }
