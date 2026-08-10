@@ -670,4 +670,55 @@ describe("Config", () => {
       );
     });
   });
+
+  describe("uncaged index", () => {
+    it("should default uncagedDomains to the general-purpose wildcard", () => {
+      const config = new Config(baseEnv());
+      assert.deepEqual(config.uncagedDomains, ["*"]);
+    });
+
+    it("should parse UNCAGED_DOMAINS as a comma-separated list", () => {
+      const config = new Config(
+        baseEnv([["UNCAGED_DOMAINS", "GitHub.com, *.onion , sr.ht"]]),
+      );
+      assert.deepEqual(config.uncagedDomains, [
+        "github.com",
+        "*.onion",
+        "sr.ht",
+      ]);
+    });
+
+    it("should fall back to the wildcard for an empty UNCAGED_DOMAINS", () => {
+      const config = new Config(baseEnv([["UNCAGED_DOMAINS", " , ,"]]));
+      assert.deepEqual(config.uncagedDomains, ["*"]);
+    });
+
+    it("should default uncagedScope to global and honor UNCAGED_SCOPE", () => {
+      assert.equal(new Config(baseEnv()).uncagedScope, "global");
+      assert.equal(
+        new Config(baseEnv([["UNCAGED_SCOPE", "eu"]])).uncagedScope,
+        "eu",
+      );
+    });
+
+    it("should default uncagedLanguages and uncagedDocTypes to empty", () => {
+      const config = new Config(baseEnv());
+      assert.deepEqual(config.uncagedLanguages, []);
+      assert.deepEqual(config.uncagedDocTypes, []);
+    });
+
+    it("should parse UNCAGED_LANGUAGES keeping only ISO 639-1 codes", () => {
+      const config = new Config(
+        baseEnv([["UNCAGED_LANGUAGES", "en,de,english,!x"]]),
+      );
+      assert.deepEqual(config.uncagedLanguages, ["en", "de"]);
+    });
+
+    it("should parse UNCAGED_DOC_TYPES as lowercase type tokens", () => {
+      const config = new Config(
+        baseEnv([["UNCAGED_DOC_TYPES", "Page,Repository, pdf,not a type"]]),
+      );
+      assert.deepEqual(config.uncagedDocTypes, ["page", "repository", "pdf"]);
+    });
+  });
 });

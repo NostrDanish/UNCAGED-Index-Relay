@@ -100,7 +100,10 @@ the hot path.
 │   ├── autocomplete-text.ts      # Shared buildAutocompleteText for edge-ngram autocomplete indexing
 │   ├── autocomplete-text.test.ts # Autocomplete text tests
 │   ├── trends.ts           # Trending tag computation and publishing
-│   └── trends.test.ts      # Trends tests
+│   ├── trends.test.ts      # Trends tests
+│   ├── web-document.ts     # SIP-01 (kind 39697) web index observations: URL
+│   │                       # normalization (§8), d/x identity, validation, extraction
+│   └── web-document.test.ts # SIP-01 web document tests
 ├── scripts/
 │   ├── analyze-client.ts          # Analyze a client's users (active/inactive, engagement, cohorts)
 │   ├── backfill-client-address.ts # Backfill client field (NIP-89 client address) for existing events
@@ -167,6 +170,40 @@ Edit `.env` to configure the application:
   gating on REQ/COUNT/NEG-OPEN and live subscriptions, including catch-all
   filters. Intended for operator-controlled services such as bridges and
   notification servers. Default: empty (no master pubkeys).
+- `UNCAGED_DOMAINS` - Comma-separated domain suffixes this index covers,
+  advertised via NIP-11 `uncaged_index.domains` (e.g. `github.com`,
+  `*.onion`). Default: `*` (general-purpose index).
+- `UNCAGED_SCOPE` - Free-form scope label advertised via NIP-11
+  `uncaged_index.scope` (e.g. `global`, `eu`, `crypto`, `tor`). Default:
+  `global`.
+- `UNCAGED_LANGUAGES` - Comma-separated ISO 639-1 codes advertised via
+  NIP-11 `uncaged_index.languages`. Unset: not advertised (all languages).
+- `UNCAGED_DOC_TYPES` - Comma-separated web-document types advertised via
+  NIP-11 `uncaged_index.document_types`. Unset: not advertised (all types).
+
+## SIP-01 Web Index Observations
+
+Kind 39697 (SIP-01) is the first-class document type of this relay. Key
+rules, all implemented in `src/web-document.ts`:
+
+- The `d` tag is the URL identity: `widx:` + `sha256(normalized_url)[0:32]`,
+  where normalization is SIP-01 §8 (strip `www.`, tracking params, fragment;
+  sort query params; drop trailing slash). Multiple indexers observing the
+  same URL share one `d` — independent-observation counting is a `#d` query
+  plus distinct-author count.
+- The `x` tag is the content identity: `sha256(title + "\n" + description)`,
+  verified at ingestion when present.
+- Ingestion is strict: schema version, required tags, URL allowlist, `d`/`x`
+  consistency, and field caps are enforced with `invalid:` OK rejections.
+- Structured fields (`url`, `url_host`, `url_domain_hierarchy`, `title`,
+  `description`, `language`, `content_hash`, `published_at`, `observed_at`,
+  `source`, `doc_type`, `platform`, `category`, `network`, `country`,
+  `content_type`) are indexed for the NIP-50 web-search operators (`site:`,
+  `domain:`, `url:`, `inurl:`, `title:`, `topic:`, `type:`, `platform:`,
+  `category:`, `network:`, `country:`, `mime:`, `filetype:`, `source:`,
+  `lang:`, `before:`, `after:`, `distinct:domain`).
+- Ranking is the search engines' job: `crawl_score`, `authority_score`,
+  `quality_score`, `spam_score` are relay-side signal fields (seeded 0).
 
 ## Performance Notes
 

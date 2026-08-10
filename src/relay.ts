@@ -24,6 +24,7 @@ import {
   Negentropy,
   NegentropyStorageVector,
 } from "./negentropy.ts";
+import { validateWebDocument, WEB_DOCUMENT_KIND } from "./web-document.ts";
 
 /**
  * Cached zod schemas. NSchema.event() and NSchema.filter() construct a fresh
@@ -502,8 +503,9 @@ export class Relay {
     this.rejectedKinds = opts.rejectedKinds ?? new Set();
     this.negentropyMaxRecords = opts.negentropyMaxRecords ?? 1_000_000;
     this.relayInfo = {
-      name: "Ditto Relay",
-      description: "A Nostr relay backed by OpenSearch",
+      name: "UNCAGED Index Relay",
+      description:
+        "Decentralized web search index infrastructure: a Nostr relay backed by OpenSearch, native to SIP-01 (kind 39697) web index observations. The index belongs to no one — anyone can crawl, publish, replicate, query, filter, and rank.",
       supported_nips: [1, 9, 11, 13, 40, 42, 45, 50, 62, 70, 77],
       software: "https://gitlab.com/soapbox-pub/ditto-relay",
       version: "0.1.0",
@@ -868,6 +870,22 @@ export class Relay {
         accepted: false,
         message: "blocked: event contains a banned hashtag",
       };
+    }
+
+    // UNCAGED: strictly validate SIP-01 web index observations (kind
+    // 39697) at ingestion. Crawlers publish signed index records; malformed
+    // documents (bad URL, d tag that doesn't match the normalized URL, bad
+    // content hash, invalid fields) are rejected here so they never reach
+    // the index. See web-document.ts.
+    if (event.kind === WEB_DOCUMENT_KIND) {
+      const invalidReason = validateWebDocument(event);
+      if (invalidReason) {
+        return {
+          eventId: event.id,
+          accepted: false,
+          message: `invalid: ${invalidReason}`,
+        };
+      }
     }
 
     // Handle deletion events (kind 5) using the storage remove method

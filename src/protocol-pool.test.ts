@@ -112,8 +112,22 @@ describe("ProtocolPool", () => {
 
   it("start() resolves the relay info document", async () => {
     const info = await pool.start();
-    assert.equal(info.name, "Ditto Relay");
+    assert.equal(info.name, "UNCAGED Index Relay");
     assert.ok(info.supported_nips?.includes(1));
+    // UNCAGED index capabilities are advertised for relay discovery.
+    const uncaged = info.uncaged_index as
+      | {
+          sip01?: boolean;
+          document_kinds?: number[];
+          domains?: string[];
+          scope?: string;
+        }
+      | undefined;
+    assert.ok(uncaged);
+    assert.equal(uncaged.sip01, true);
+    assert.deepEqual(uncaged.document_kinds, [39697]);
+    assert.deepEqual(uncaged.domains, ["*"]);
+    assert.equal(uncaged.scope, "global");
   });
 
   it("responds to malformed JSON with a NOTICE frame", async () => {

@@ -58,6 +58,33 @@ describe("buildAutocompleteText", () => {
       assert.equal(buildAutocompleteText(event(0, "not json")), "");
     });
 
+    it("extracts the page title from kind 39697 (SIP-01) content JSON", () => {
+      const content = JSON.stringify({
+        title: "Example Page",
+        description: "Not autocompleted",
+      });
+      assert.equal(buildAutocompleteText(event(39697, content)), "Example Page");
+    });
+
+    it("skips widx: d tags (URL identity hashes, not slugs)", () => {
+      const content = JSON.stringify({ title: "Example Page" });
+      const tags = [
+        ["d", "widx:9f86d081884c7d659a2feaa0c55ad015"],
+        ["u", "https://example.com/"],
+      ];
+      assert.equal(
+        buildAutocompleteText(event(39697, content, tags)),
+        "Example Page",
+      );
+    });
+
+    it("keeps ordinary d-tag slugs for other kinds", () => {
+      assert.equal(
+        buildAutocompleteText(event(30023, "", [["d", "my-article"]])),
+        "my-article",
+      );
+    });
+
     it("returns empty string when no relevant fields are present", () => {
       const content = JSON.stringify({ picture: "https://example.com/a.jpg" });
       assert.equal(buildAutocompleteText(event(0, content)), "");

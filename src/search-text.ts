@@ -63,32 +63,11 @@ const JSON_KINDS = new Set([
   30018, // Product (NIP-15)
   30019, // Marketplace UI/UX (NIP-15)
   30020, // Auction Product (NIP-15)
-]);
-
-/** Kinds whose content is known to be plaintext. */
-const TEXT_KINDS = new Set([
-  1, // Short Text Note (NIP-01)
-  5, // Event Deletion Request (NIP-09)
-  7, // Reaction (NIP-25)
-  9, // Chat Message (NIP-C7)
-  11, // Thread (NIP-7D)
-  20, // Picture (NIP-68)
-  21, // Video (NIP-71)
-  22, // Short-form Portrait Video (NIP-71)
-  42, // Channel Message (NIP-28)
-  1063, // File Metadata (NIP-94)
-  1068, // Poll (NIP-88)
-  1111, // Comment (NIP-22)
-  1311, // Live Chat Message (NIP-53)
-  9802, // Highlights (NIP-84)
-  30023, // Long-form Content (NIP-23)
-  30024, // Draft Long-form Content (NIP-23)
-  31922, // Date-Based Calendar Event (NIP-52)
-  31923, // Time-Based Calendar Event (NIP-52)
+  39697, // Web Index Observation (SIP-01) — {"title", "description", "image"}
 ]);
 
 /** Field names to extract from JSON content for search. */
-const SEARCH_JSON_FIELDS = ["name", "about", "description", "display_name"];
+const SEARCH_JSON_FIELDS = ["name", "about", "description", "display_name", "title"];
 
 /** Tag names to extract for search (kind-agnostic). */
 const SEARCH_TAGS = new Set([

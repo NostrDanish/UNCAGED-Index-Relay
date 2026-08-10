@@ -1,10 +1,59 @@
-# Ditto Relay
+# UNCAGED Index Relay
 
-A high-performance Nostr relay backed by OpenSearch, designed for horizontal
-scalability and full-text search capabilities.
+A high-performance Nostr relay backed by OpenSearch, native to **SIP-01
+(kind 39697) web index observations** — the decentralized search-index
+infrastructure layer underneath independent search engines.
+
+Forked from [Ditto Relay](https://gitlab.com/soapbox-pub/ditto-relay), it
+keeps the full general-purpose relay and adds a SIP-01-native indexing,
+validation, and search layer on top.
+
+**Anyone can crawl. Anyone can publish. Anyone can run an index relay.
+Anyone can replicate an index. Anyone can build a search engine. Anyone can
+choose their ranking and filtering. Nobody owns the index.**
+
+```
+                 THE WEB
+                   │
+        ┌──────────┴──────────┐
+        │       CRAWLSTR      │  browser + server crawlers
+        └──────────┬──────────┘
+                   │  SIP-01 / kind 39697 (signed observations)
+                   ▼
+        ┌─────────────────────┐
+        │  UNCAGED INDEX      │  ← this project
+        │  RELAY NETWORK      │  validate · dedupe · index · serve
+        └──────────┬──────────┘
+                   │  NIP-01 filters · NIP-50 search · NIP-77 sync
+       ┌───────────┼───────────────┐
+       ▼           ▼               ▼
+  0xSearchstr  0xPresearchstr  UNCAGED Engine
+       │           │               │
+   own ranking  own ranking    own ranking
+   own filters  own filters    own filters
+```
+
+The relay deliberately does **not** decide what the "best" result is. It
+stores observations, derives structured fields and ranking *signals*, and
+lets every search engine rank and filter the shared index its own way.
 
 ## Features
 
+- **SIP-01 Native**: Kind 39697 web index observations are strictly
+  validated (schema, `d` ↔ normalized-URL identity, `x` content hash, field
+  caps) and indexed into dedicated OpenSearch fields — not treated as
+  generic Nostr events
+- **Web-Search Operators**: `site:`, `domain:`, `url:`, `inurl:`, `title:`,
+  `topic:`, `type:`, `platform:`, `category:`, `network:`, `country:`,
+  `mime:`, `filetype:`, `source:`, `lang:`, `before:`, `after:`, and
+  `distinct:domain` NIP-50 extensions
+- **Indexer Agreement**: multiple crawlers observing the same URL share the
+  deterministic `d` tag — independent-observation counting is a query away
+- **Index Federation**: NIP-77 Negentropy sync lets index relays replicate
+  each other's SIP-01 observations without a central master
+- **Relay Discovery**: NIP-11 `uncaged_index` capability advertisement
+  (scope, domains, languages, supported filters) for client-side relay
+  selection
 - **True NIP-01 WebSocket Relay**: Implements the full Nostr protocol via WebSocket
 - **OpenSearch Backend**: Scalable, distributed storage with powerful search
   capabilities, using a custom fetch-based client for minimal overhead
@@ -78,6 +127,45 @@ Events are stored in OpenSearch with the following enhancements:
   `reaction_cnt`, `repost_cnt`, `quote_cnt`, `zap_cnt`, and
   `zap_amount_msats` (zaps received), maintained by the background worker and
   used for search ranking and NIP-85 assertions
+
+### SIP-01 Web Index Observations (kind 39697)
+
+The relay natively understands
+[SIP-01](https://github.com/NostrDanish/0xSearchstr/blob/main/docs/SEARCH_INDEX_PROTOCOL.md)
+web index observations — signed statements by crawlers (Crawlstr and others)
+of the form *"indexer `pubkey` observed this web document at this time"*.
+
+**Validation at ingestion** (`invalid:` OK on failure): exactly one `d`, `u`,
+`v`, and `alt` tag; schema version `v=1`; `u` must be a valid http(s) URL;
+`d` must equal `widx:` + `sha256(normalized_u)[0:32]` (SIP-01 §8 URL
+normalization — `www.` stripping, tracking-parameter removal, query-param
+sorting, trailing-slash removal — applied byte-compatibly); content JSON must
+carry a 1–300 char `title` (plus optional `description` ≤ 1000 chars and an
+https `image`); when the `x` content hash is present it is verified against
+`sha256(title + "\n" + description)`; topic (`t`) tags are capped at 8
+lowercase topics.
+
+**Structured indexing**: instead of lumping observations into generic search
+text, they become dedicated OpenSearch fields — `url`, `url_host`,
+`url_domain_hierarchy` (host + parent suffixes), `file_ext`, `title`,
+`description`, `language` (from the `l` tag, taking precedence over
+detection), `content_hash` (from `x`), `published_at` (from `published`),
+`observed_at` (the event's `created_at`), `source`, and the optional
+extension tags `type`, `platform`, `category`, `network`, `country`, `mime`.
+
+**Ranking signals, not ranking**: documents are seeded with
+`crawl_score`, `authority_score`, `quality_score`, and `spam_score` fields
+(zero at ingest), reserved for relay-side computed signals. The relay never
+decides the universal best result — search engines combine signals however
+they choose.
+
+**Addressable identity**: a recrawl replaces the crawler's previous
+observation of the same URL (one slot per `(pubkey, d)`); with history
+preservation enabled, superseded versions remain queryable for change
+tracking. Multiple indexers observing the same URL produce separate events
+sharing one `d` tag — `{"kinds":[39697], "#d":["widx:..."]}` returns all
+independent observations, and COUNT with `distinct:author` approximates the
+independent-indexer count.
 
 ### Replaceable Events (NIP-01)
 
@@ -191,6 +279,8 @@ The following NIP-50 search extensions are supported:
   matching (on by default for kind-0-only filters, off otherwise)
 - `sort:<mode>` — Sort results: `top`, `hot`, `controversial`, `rising`, `zaps`
 - `distinct:author` — Return at most one event per author
+- `distinct:domain` — Return at most one result per host (web documents;
+  the answer to "ten links from the same site crowding the page")
 
 Extensions can be combined with each other and with free-text search:
 
@@ -198,6 +288,45 @@ Extensions can be combined with each other and with free-text search:
 {
   "kinds": [1],
   "search": "bitcoin media:true language:en"
+}
+```
+
+#### Web-search operators (SIP-01 documents, kind 39697)
+
+These extensions map onto the structured web-document fields. They only
+match kind 39697 observations (other events never carry the fields), and
+each has a negated `-key:value` form:
+
+- `site:<host>` — Host or any subdomain (`site:github.com` also matches
+  `docs.github.com`); repeated `site:` tokens OR together
+- `domain:<host>` — Exact host match, no subdomains
+- `url:<url>` — Exact normalized-URL match (the value is normalized with the
+  same SIP-01 §8 rules, so `url:HTTPS://WWW.Example.Com/?utm_source=x#top`
+  finds `https://example.com/`)
+- `inurl:<text>` — Tokenized match against the URL
+- `title:<text>` — Match against the document title; repeated tokens AND
+- `topic:<topic>` — SIP-01 `t` topic tag (`topic:privacy`)
+- `type:<type>` — Logical document type extension tag (`type:repository`)
+- `platform:<name>` — Source platform extension tag (`platform:github`)
+- `category:<name>` — Content category extension tag
+- `network:<name>` — Network extension tag (`network:clearnet`, `network:tor`)
+- `country:<code>` — ISO 3166-1 alpha-2 country extension tag
+- `mime:<type>` — MIME type extension tag (`mime:application/pdf`)
+- `filetype:<ext>` — File extension from the URL path (`filetype:pdf`)
+- `source:<id>` — Indexer software (`source:crawlstr/1`)
+- `lang:<code>` — Alias of `language:` (the SIP-01 `l` tag takes precedence
+  over detected language)
+- `before:<date>` / `after:<date>` — Content-freshness range on the page's
+  claimed `published` time (unix seconds or `YYYY-MM-DD`; undated documents
+  don't match). The observation time is available via the native
+  `since`/`until` filter fields
+
+Extensions can be combined with each other and with free-text search:
+
+```json
+{
+  "kinds": [39697],
+  "search": "bitcoin privacy site:github.com lang:en after:2026-01-01"
 }
 ```
 
@@ -251,6 +380,10 @@ All options:
 | `RELAY_NEGENTROPY_MAX_RECORDS` | Max records per NIP-77 sync session | `1000000` |
 | `PROTOCOL_WORKERS` | Protocol worker threads (unset = auto, must be >= 1) | auto |
 | `BULK_MAX_QUEUE` | Max OpenSearch bulk queue size | `5000` |
+| `UNCAGED_DOMAINS` | Domain suffixes this index covers (NIP-11 `uncaged_index.domains`) | `*` |
+| `UNCAGED_SCOPE` | Scope label for this index (e.g. `global`, `eu`, `github`, `tor`) | `global` |
+| `UNCAGED_LANGUAGES` | ISO 639-1 codes this index covers (advertised) | unset (all) |
+| `UNCAGED_DOC_TYPES` | Web-document types this index covers (advertised) | unset (all) |
 
 ## Running
 

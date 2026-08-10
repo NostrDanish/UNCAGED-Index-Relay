@@ -39,6 +39,7 @@ import {
   type RelayConn,
   type SyncableStorage,
 } from "./relay.ts";
+import { WEB_DOCUMENT_KIND } from "./web-document.ts";
 
 // ---------------------------------------------------------------------------
 // Initialise from environment (same .env as the main process)
@@ -167,6 +168,45 @@ const relay = new Relay(storage, {
     self: await config.nostrSigner.getPublicKey(),
     icon: new URL("/icon.png", config.publicUrl).toString(),
     banner: new URL("/banner.jpg", config.publicUrl).toString(),
+    // UNCAGED Index Relay capabilities: SIP-01 support, which document kinds
+    // this relay indexes, which slice of the web it covers, and which
+    // web-search operators it understands — so search engines (0xSearchstr,
+    // 0xPresearchstr, UNCAGED Engine, …) can discover this relay and route
+    // queries to specialized indexes.
+    uncaged_index: {
+      sip01: true,
+      nip50: true,
+      nip77: true,
+      document_kinds: [WEB_DOCUMENT_KIND],
+      scope: config.uncagedScope,
+      domains: config.uncagedDomains,
+      filters: [
+        "site",
+        "domain",
+        "url",
+        "inurl",
+        "title",
+        "topic",
+        "type",
+        "platform",
+        "category",
+        "network",
+        "country",
+        "mime",
+        "filetype",
+        "source",
+        "lang",
+        "before",
+        "after",
+        "distinct:domain",
+      ],
+      ...(config.uncagedLanguages.length > 0 && {
+        languages: config.uncagedLanguages,
+      }),
+      ...(config.uncagedDocTypes.length > 0 && {
+        document_types: config.uncagedDocTypes,
+      }),
+    },
   },
 });
 

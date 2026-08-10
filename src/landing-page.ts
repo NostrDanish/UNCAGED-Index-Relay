@@ -219,7 +219,7 @@ export function renderLandingPage(
       </div>
     </div>
   </div>
-  <div class="footer">${software ? `<a href="${software}">Ditto Relay</a>` : "Ditto Relay"}${version ? ` <span class="version">${version}</span>` : ""}</div>
+  <div class="footer">${software ? `<a href="${software}">UNCAGED Index Relay</a>` : "UNCAGED Index Relay"}${version ? ` <span class="version">${version}</span>` : ""}</div>
   <script>
     function copyUrl(btn){
       var input=btn.parentNode.querySelector('.relay-url-input');

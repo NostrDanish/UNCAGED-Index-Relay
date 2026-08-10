@@ -26,6 +26,13 @@ import {
 } from "./opensearch-client.ts";
 import { getPow } from "./pow.ts";
 import { buildSearchText } from "./search-text.ts";
+import {
+  extractWebDocumentFields,
+  normalizeIndexUrl,
+  searchHostValue,
+  type WebDocumentFields,
+  webDocumentLanguage,
+} from "./web-document.ts";
 
 /** The 7 core Nostr event fields — used as `_source` filter so OpenSearch
  *  only returns these fields in read queries, reducing JSON response size
@@ -160,7 +167,7 @@ const DECAY_SORT_WINDOW_SECONDS = 7 * 24 * 3600;
 /**
  * OpenSearch document structure for Nostr events
  */
-interface NostrEventDocument extends NostrEvent {
+interface NostrEventDocument extends NostrEvent, Partial<WebDocumentFields> {
   tags_map: Record<string, string[]>;
   /** Indexed full-text search field, built per-kind from event content. */
   search_text: string;
@@ -257,6 +264,34 @@ export interface SyncItem {
 }
 
 /**
+ * NIP-50 keyword term operators for web documents: `key:value` produces a
+ * `terms` clause on the indexed field (OR across repeated tokens), and the
+ * `-key:value` form excludes. Values are normalized the same way the indexer
+ * normalizes them, so an operator always behaves like the field it queries.
+ */
+const WEB_KEYWORD_OPERATORS: ReadonlyArray<{
+  key: string;
+  field: string;
+  normalize: (value: string) => string;
+}> = [
+  // topic:<t> — SIP-01 topic tags (this is how topical engines — Foodstr,
+  // DeveloperSearch — slice the shared index without a new event kind).
+  { key: "topic", field: "tags_map.t", normalize: (v) => v.toLowerCase() },
+  { key: "type", field: "doc_type", normalize: (v) => v.toLowerCase() },
+  { key: "platform", field: "platform", normalize: (v) => v.toLowerCase() },
+  { key: "category", field: "category", normalize: (v) => v.toLowerCase() },
+  { key: "network", field: "network", normalize: (v) => v.toLowerCase() },
+  { key: "country", field: "country", normalize: (v) => v.toUpperCase() },
+  { key: "mime", field: "content_type", normalize: (v) => v.toLowerCase() },
+  { key: "source", field: "source", normalize: (v) => v },
+  {
+    key: "filetype",
+    field: "file_ext",
+    normalize: (v) => v.replace(/^\./, "").toLowerCase(),
+  },
+];
+
+/**
  * The shape {@link OpenSearchRelay.buildQuery} always returns. Declared
  * concretely (rather than `Record<string, unknown>`) so callers that need to
  * append clauses can reach `bool.must` without casting.
@@ -266,6 +301,33 @@ interface BoolQuery {
     must: Record<string, unknown>[];
     must_not?: Record<string, unknown>[];
   };
+}
+
+/** A parsed NIP-50 search token: a bare word, or a `key:value` extension. */
+type SearchToken = ReturnType<typeof NIP50.parseInput>[number];
+
+/** Collect the values of all extension tokens with the given key. */
+function searchTokenValues(tokens: SearchToken[], key: string): string[] {
+  const out: string[] = [];
+  for (const token of tokens) {
+    if (typeof token === "object" && token.key === key && token.value) {
+      out.push(token.value);
+    }
+  }
+  return out;
+}
+
+/**
+ * Parse a `before:`/`after:` operator value into a unix timestamp (seconds).
+ * Accepts unix seconds verbatim or an ISO calendar date (`YYYY-MM-DD`).
+ * Returns undefined for anything else — an unparseable token adds no clause.
+ */
+function parseSearchDateToken(value: string): number | undefined {
+  if (/^\d{1,16}$/.test(value)) return Number(value);
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+  if (!m) return undefined;
+  const ms = Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+  return Number.isNaN(ms) ? undefined : Math.floor(ms / 1000);
 }
 
 /**
@@ -781,8 +843,15 @@ export class OpenSearchRelay implements NStore, AsyncDisposable {
       amount_msats = OpenSearchRelay.parseOnchainZapAmount(event);
     }
 
-    const language = analysis?.language;
+    const language = webDocumentLanguage(event) ?? analysis?.language;
     const sentiment = analysis?.sentiment;
+
+    // SIP-01 web index observations (kind 39697): extract the structured
+    // index fields (url, url_host, title, published_at, ...) from the event's
+    // tags and content JSON. Invalid documents yield undefined and index as
+    // plain events — on the ingest path they are rejected by validation
+    // before reaching this point.
+    const webDoc = extractWebDocumentFields(event);
 
     // Use pre-computed media detection from the analyze worker when available,
     // otherwise detect on the main thread (direct event() calls, eg tests).
@@ -813,6 +882,7 @@ export class OpenSearchRelay implements NStore, AsyncDisposable {
       media: mediaResult.media ?? false,
       video: mediaResult.video ?? false,
       pow: getPow(event),
+      ...webDoc,
       followers: 0,
       engagers: 0,
       comment_cnt: 0,
@@ -825,34 +895,44 @@ export class OpenSearchRelay implements NStore, AsyncDisposable {
   }
 
   /**
-   * Check if the NIP-50 search string contains a distinct:author extension token.
+   * The field requested by a NIP-50 `distinct:<field>` extension token, if
+   * any. `distinct:author` collapses to one event per author (pubkey);
+   * `distinct:domain` — aimed at web documents — collapses to one result per
+   * host (url_host), the search-engine answer to "ten links from the same
+   * site crowding the page".
    */
-  private hasDistinctAuthor(filter: NostrFilter): boolean {
-    if (!filter.search) return false;
+  private distinctField(
+    filter: NostrFilter,
+  ): "pubkey" | "url_host" | undefined {
+    if (!filter.search) return undefined;
 
     const tokens = NIP50.parseInput(filter.search);
-    return tokens.some(
-      (t) =>
-        typeof t === "object" && t.key === "distinct" && t.value === "author",
+    const token = tokens.find(
+      (t) => typeof t === "object" && t.key === "distinct",
     );
+    if (!token || typeof token !== "object") return undefined;
+    if (token.value === "author") return "pubkey";
+    if (token.value === "domain") return "url_host";
+    return undefined;
   }
 
   /**
-   * The `collapse` clause implementing `distinct:author`, or undefined when
+   * The `collapse` clause implementing `distinct:<field>`, or undefined when
    * the filter doesn't ask for it.
    *
-   * Collapsing is what makes `distinct:author` return a full `limit` worth
+   * Collapsing is what makes `distinct:` return a full `limit` worth
    * of results: OpenSearch keeps searching until it has `limit` distinct
-   * pubkeys, whereas de-duplicating the response in JS can only ever shrink
+   * values, whereas de-duplicating the response in JS can only ever shrink
    * an already-truncated page.
    *
    * Filters restricted to replaceable kinds are exempt — those already hold
    * at most one current event per author, so collapsing buys nothing.
    */
-  private collapseClause(filter: NostrFilter): { field: "pubkey" } | undefined {
-    if (!this.hasDistinctAuthor(filter)) return undefined;
+  private collapseClause(filter: NostrFilter): { field: string } | undefined {
+    const field = this.distinctField(filter);
+    if (!field) return undefined;
     if (filter.kinds?.every((k) => NKinds.replaceable(k))) return undefined;
-    return { field: "pubkey" };
+    return { field };
   }
 
   /**
@@ -1570,7 +1650,7 @@ export class OpenSearchRelay implements NStore, AsyncDisposable {
           must.push({
             multi_match: {
               query: positiveTerms,
-              fields: ["search_text", "search_text.url"],
+              fields: ["search_text", "search_text.url", "url.text"],
               operator: "and",
               type: "best_fields",
             },
@@ -1588,7 +1668,7 @@ export class OpenSearchRelay implements NStore, AsyncDisposable {
           mustNot.push({
             multi_match: {
               query: term,
-              fields: ["search_text", "search_text.url"],
+              fields: ["search_text", "search_text.url", "url.text"],
             },
           });
         }
@@ -1620,9 +1700,11 @@ export class OpenSearchRelay implements NStore, AsyncDisposable {
         });
       }
 
-      // Handle language: extension (NIP-50)
+      // Handle language: extension (NIP-50), with `lang:` as an alias.
       const languageToken = tokens.find(
-        (t) => typeof t === "object" && t.key === "language",
+        (t) =>
+          typeof t === "object" &&
+          (t.key === "language" || t.key === "lang"),
       );
       if (languageToken && typeof languageToken === "object") {
         must.push({
@@ -1699,6 +1781,107 @@ export class OpenSearchRelay implements NStore, AsyncDisposable {
         } else {
           mustNot.push(clause);
         }
+      }
+
+      // ---- UNCAGED web-search operators (kind 39697 SIP-01 documents) ----
+      // These map onto the structured web-document fields extracted at index
+      // time (see web-document.ts). Documents without those fields — all
+      // non-39697 events — simply never match the positive clauses, so the
+      // operators are safe to use in mixed-kind filters. Each operator has a
+      // negated form (`-site:x`, `-topic:x`, ...) targeting must_not.
+
+      // site:<host> — the document's host IS <host> or a subdomain of it
+      // (Google-style site: semantics, via the indexed domain hierarchy).
+      // Multiple site: tokens OR together.
+      const siteHosts = searchTokenValues(tokens, "site")
+        .map(searchHostValue)
+        .filter((h): h is string => h !== undefined);
+      if (siteHosts.length > 0) {
+        must.push({ terms: { url_domain_hierarchy: siteHosts } });
+      }
+      const negSiteHosts = searchTokenValues(tokens, "-site")
+        .map(searchHostValue)
+        .filter((h): h is string => h !== undefined);
+      if (negSiteHosts.length > 0) {
+        mustNot.push({ terms: { url_domain_hierarchy: negSiteHosts } });
+      }
+
+      // domain:<host> — exact host match (no subdomains).
+      const domainHosts = searchTokenValues(tokens, "domain")
+        .map(searchHostValue)
+        .filter((h): h is string => h !== undefined);
+      if (domainHosts.length > 0) {
+        must.push({ terms: { url_host: domainHosts } });
+      }
+      const negDomainHosts = searchTokenValues(tokens, "-domain")
+        .map(searchHostValue)
+        .filter((h): h is string => h !== undefined);
+      if (negDomainHosts.length > 0) {
+        mustNot.push({ terms: { url_host: negDomainHosts } });
+      }
+
+      // url:<url> — exact normalized-URL match. The value is normalized with
+      // the same SIP-01 §8 rules used at index time, so
+      // `url:HTTPS://WWW.Example.COM/page?utm_source=x` finds the document
+      // indexed from `https://example.com/page`. A value that fails to
+      // normalize can't equal any stored URL, so the raw value is used (it
+      // will simply match nothing).
+      const urlValue = searchTokenValues(tokens, "url").at(0);
+      if (urlValue !== undefined) {
+        must.push({ term: { url: normalizeIndexUrl(urlValue) ?? urlValue } });
+      }
+      const negUrlValue = searchTokenValues(tokens, "-url").at(0);
+      if (negUrlValue !== undefined) {
+        mustNot.push({
+          term: { url: normalizeIndexUrl(negUrlValue) ?? negUrlValue },
+        });
+      }
+
+      // inurl:<text> / title:<text> — tokenized match against the URL text
+      // subfield / the title field. Multiple tokens AND (one clause each),
+      // so `title:nostr title:protocol` requires both words in the title.
+      for (const value of searchTokenValues(tokens, "inurl")) {
+        must.push({ match: { "url.text": value } });
+      }
+      for (const value of searchTokenValues(tokens, "-inurl")) {
+        mustNot.push({ match: { "url.text": value } });
+      }
+      for (const value of searchTokenValues(tokens, "title")) {
+        must.push({ match: { title: value } });
+      }
+      for (const value of searchTokenValues(tokens, "-title")) {
+        mustNot.push({ match: { title: value } });
+      }
+
+      // Keyword term operators: topic:, type:, platform:, category:,
+      // network:, country:, mime:, source:, filetype: (each OR across
+      // repeated tokens, with a negated `-key:` form).
+      for (const { key, field, normalize } of WEB_KEYWORD_OPERATORS) {
+        const values = searchTokenValues(tokens, key).map(normalize);
+        if (values.length > 0) must.push({ terms: { [field]: values } });
+        const negValues = searchTokenValues(tokens, `-${key}`).map(normalize);
+        if (negValues.length > 0) {
+          mustNot.push({ terms: { [field]: negValues } });
+        }
+      }
+
+      // before:<date> / after:<date> — content-freshness range on the
+      // page's claimed publication time (the SIP-01 `published` tag; unix
+      // seconds or YYYY-MM-DD). Documents without a declared publication
+      // date don't match. The observation time itself (`observed_at`, the
+      // event's created_at) remains available through the native
+      // since/until filter fields.
+      const beforeTs = searchTokenValues(tokens, "before")
+        .map(parseSearchDateToken)
+        .find((ts) => ts !== undefined);
+      if (beforeTs !== undefined) {
+        must.push({ range: { published_at: { lt: beforeTs } } });
+      }
+      const afterTs = searchTokenValues(tokens, "after")
+        .map(parseSearchDateToken)
+        .find((ts) => ts !== undefined);
+      if (afterTs !== undefined) {
+        must.push({ range: { published_at: { gte: afterTs } } });
       }
     }
 
@@ -2936,6 +3119,43 @@ export class OpenSearchRelay implements NStore, AsyncDisposable {
     quote_cnt: { type: "integer" },
     zap_amount_msats: { type: "long" },
     zap_cnt: { type: "integer" },
+    // --- SIP-01 web document fields (kind 39697, see web-document.ts) ---
+    // Sparse: only web index observations carry these. `url` is a keyword
+    // for exact normalized-URL lookup (`url:`) with a standard-analyzed
+    // subfield for tokenized URL search (`inurl:`, and part of the default
+    // text query fields).
+    url: {
+      type: "keyword",
+      ignore_above: 2048,
+      fields: { text: { type: "text", analyzer: "standard" } },
+    },
+    url_host: { type: "keyword" },
+    url_domain_hierarchy: { type: "keyword" },
+    file_ext: { type: "keyword" },
+    title: {
+      type: "text",
+      analyzer: "standard",
+      fields: { keyword: { type: "keyword", ignore_above: 512 } },
+    },
+    description: { type: "text", analyzer: "standard" },
+    image: { type: "keyword", ignore_above: 2048 },
+    doc_type: { type: "keyword" },
+    platform: { type: "keyword" },
+    category: { type: "keyword" },
+    network: { type: "keyword" },
+    country: { type: "keyword" },
+    content_type: { type: "keyword" },
+    content_hash: { type: "keyword" },
+    source: { type: "keyword" },
+    observed_at: { type: "long" },
+    published_at: { type: "long" },
+    // Relay-computed ranking signals, seeded at 0 on indexing so ranking
+    // queries can stay cheap indexed-field operations. The relay provides
+    // signals; search engines decide ranking.
+    crawl_score: { type: "float" },
+    authority_score: { type: "float" },
+    quality_score: { type: "float" },
+    spam_score: { type: "float" },
   };
 
   /**

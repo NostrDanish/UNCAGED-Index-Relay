@@ -169,6 +169,18 @@ describe("buildSearchText", () => {
       assert.equal(buildSearchText(event(0, content)), "alice");
     });
 
+    it("should extract title and description from kind 39697 (SIP-01 web index observation)", () => {
+      const content = JSON.stringify({
+        title: "Example Page",
+        description: "A page about examples",
+        image: "https://example.com/og.jpg",
+      });
+      assert.equal(
+        buildSearchText(event(39697, content)),
+        "Example Page\nA page about examples",
+      );
+    });
+
     it("should extract name and about from kind 40 (channel creation)", () => {
       const content = JSON.stringify({
         name: "Bitcoin Chat",

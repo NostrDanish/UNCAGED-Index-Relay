@@ -169,6 +169,32 @@ export class Config {
    * - `N`  → exactly N workers (must be >= 1).
    */
   readonly protocolWorkers: number | undefined;
+  /**
+   * UNCAGED index specialization advertised via the NIP-11 `uncaged_index`
+   * field: the domain suffixes this relay indexes. Default `["*"]` declares
+   * a general-purpose index; entries like `github.com` or `*.onion` declare
+   * a specialized one. Set via `UNCAGED_DOMAINS` (comma-separated).
+   */
+  readonly uncagedDomains: string[];
+  /**
+   * Free-form scope label for this index relay (e.g. `global`, `eu`, `us`,
+   * `crypto`, `github`, `tor`), advertised via NIP-11 `uncaged_index.scope`.
+   * Set via `UNCAGED_SCOPE`. Default: `global`.
+   */
+  readonly uncagedScope: string;
+  /**
+   * ISO 639-1 language codes this index covers, advertised via NIP-11
+   * `uncaged_index.languages`. Empty = not advertised (all languages).
+   * Set via `UNCAGED_LANGUAGES` (comma-separated).
+   */
+  readonly uncagedLanguages: string[];
+  /**
+   * Logical web-document types this index covers (`page`, `repository`,
+   * `pdf`, ...), advertised via NIP-11 `uncaged_index.document_types`.
+   * Empty = not advertised (all types). Set via `UNCAGED_DOC_TYPES`
+   * (comma-separated).
+   */
+  readonly uncagedDocTypes: string[];
   readonly nostrSigner: NostrSigner;
 
   constructor(env: { get(key: string): string | undefined }) {
@@ -482,6 +508,43 @@ export class Config {
         throw new Error("PROTOCOL_WORKERS must be a positive integer.");
       }
       this.protocolWorkers = n;
+    }
+
+    // uncagedDomains
+    const uncagedDomainsValue = env.get("UNCAGED_DOMAINS");
+    if (!uncagedDomainsValue) {
+      this.uncagedDomains = ["*"];
+    } else {
+      const domains = uncagedDomainsValue
+        .split(",")
+        .map((s) => s.trim().toLowerCase())
+        .filter((s) => s.length > 0);
+      this.uncagedDomains = domains.length > 0 ? domains : ["*"];
+    }
+
+    // uncagedScope
+    this.uncagedScope = env.get("UNCAGED_SCOPE")?.trim() || "global";
+
+    // uncagedLanguages (ISO 639-1, same validation as DITTO_LANGUAGES)
+    const uncagedLanguagesValue = env.get("UNCAGED_LANGUAGES");
+    if (!uncagedLanguagesValue) {
+      this.uncagedLanguages = [];
+    } else {
+      this.uncagedLanguages = uncagedLanguagesValue
+        .split(",")
+        .map((s) => s.trim())
+        .filter((s) => /^[a-z]{2}$/.test(s));
+    }
+
+    // uncagedDocTypes
+    const uncagedDocTypesValue = env.get("UNCAGED_DOC_TYPES");
+    if (!uncagedDocTypesValue) {
+      this.uncagedDocTypes = [];
+    } else {
+      this.uncagedDocTypes = uncagedDocTypesValue
+        .split(",")
+        .map((s) => s.trim().toLowerCase())
+        .filter((s) => /^[a-z0-9][a-z0-9_-]*$/.test(s));
     }
 
     // nostrSigner

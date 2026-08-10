@@ -14,6 +14,8 @@
 
 import type { NostrEvent } from "nostr-tools";
 
+import { WEB_DOCUMENT_D_PREFIX, WEB_DOCUMENT_KIND } from "./web-document.ts";
+
 /**
  * Kinds whose JSON content carries a profile/channel `name` (and friends).
  * For each kind, the listed fields are extracted from `JSON.parse(content)`.
@@ -26,6 +28,7 @@ const JSON_KIND_FIELDS: Record<number, readonly string[]> = {
   30018: ["name"], // NIP-15 Product
   30019: ["name"], // NIP-15 Marketplace UI/UX
   30020: ["name"], // NIP-15 Auction Product
+  [WEB_DOCUMENT_KIND]: ["title"], // SIP-01 Web Index Observation — page title
 };
 
 /**
@@ -98,6 +101,12 @@ export function buildAutocompleteText(event: NostrEvent): string {
   // 2. Extract from autocomplete tags (kind-agnostic).
   for (const tag of event.tags) {
     if (tag.length >= 2 && AUTOCOMPLETE_TAGS.has(tag[0]) && tag[1]) {
+      // SIP-01 web index observations use `widx:` d tags — URL identity
+      // hashes, not human-readable slugs. Never an autocomplete surface;
+      // their title arrives via JSON_KIND_FIELDS instead.
+      if (tag[0] === "d" && tag[1].startsWith(WEB_DOCUMENT_D_PREFIX)) {
+        continue;
+      }
       parts.push(tag[1]);
     }
   }

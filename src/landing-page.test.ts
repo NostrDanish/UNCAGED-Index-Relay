@@ -87,8 +87,8 @@ describe("renderLandingPage", () => {
       );
       assert.ok(!html.includes("javascript:"));
       assert.ok(!html.includes("alert(3)"));
-      // Footer should still render the plain "Ditto Relay" text.
-      assert.ok(html.includes("Ditto Relay"));
+      // Footer should still render the plain relay name text.
+      assert.ok(html.includes("UNCAGED Index Relay"));
     });
 
     it("drops javascript: contact in mailto branch", () => {

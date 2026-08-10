@@ -5,6 +5,11 @@ import { finalizeEvent, generateSecretKey, getPublicKey } from "nostr-tools";
 import { Config } from "./config.ts";
 import { OpenSearchRelay } from "./opensearch.ts";
 import type { Client } from "./opensearch-client.ts";
+import {
+  normalizeIndexUrl,
+  webDocumentContentHash,
+  webDocumentDTag,
+} from "./web-document.ts";
 
 describe("OpenSearchRelay", () => {
   // Shared mock OpenSearch client. It evaluates queries for real (rather than
@@ -8667,5 +8672,693 @@ describe("OpenSearchRelay.recomputeScores", () => {
     const result = await relay.recomputeScores();
     assert.equal(result.count, 0);
     assert.equal(result.eventScores.size, 0);
+  });
+
+  describe("web index observations (SIP-01 kind 39697)", () => {
+    /**
+     * Mock OpenSearch client that evaluates the web-search operator clauses
+     * for real: term/terms on the structured web fields, match on
+     * url.text/title, range on published_at, multi_match on search_text,
+     * plus collapse for distinct:domain. Phase 2 slot resolution is handled
+     * via an msearch implementation that understands slot queries, so
+     * replaceable-slot behavior can be tested end to end.
+     */
+    const createWebDocMockClient = () => {
+      type WebDoc = NostrEvent & {
+        deleted?: boolean;
+        replaced?: boolean;
+        tags_map?: Record<string, string[]>;
+        search_text?: string;
+        url?: string;
+        url_host?: string;
+        url_domain_hierarchy?: string[];
+        file_ext?: string;
+        title?: string;
+        description?: string;
+        doc_type?: string;
+        platform?: string;
+        network?: string;
+        country?: string;
+        source?: string;
+        language?: string;
+        published_at?: number;
+        observed_at?: number;
+        [key: string]: unknown;
+      };
+
+      const documents = new Map<string, WebDoc>();
+
+      const fieldValue = (doc: WebDoc, field: string): unknown =>
+        field.split(".").reduce<unknown>(
+          (acc, part) =>
+            acc && typeof acc === "object"
+              ? (acc as Record<string, unknown>)[part]
+              : undefined,
+          doc,
+        );
+
+      const termMatches = (
+        doc: WebDoc,
+        field: string,
+        value: unknown,
+      ): boolean => {
+        const v = fieldValue(doc, field);
+        if (Array.isArray(v)) return v.includes(value as never);
+        return v === value;
+      };
+
+      const matchMatches = (
+        doc: WebDoc,
+        field: string,
+        clause: unknown,
+      ): boolean => {
+        const query = String(
+          clause && typeof clause === "object"
+            ? (clause as { query?: unknown }).query
+            : clause,
+        ).toLowerCase();
+        // `url.text` is the analyzed subfield of `url`; the mock evaluates
+        // it against the stored keyword value directly.
+        const actualField = field === "url.text" ? "url" : field;
+        const v = fieldValue(doc, actualField);
+        if (typeof v !== "string") return false;
+        return v.toLowerCase().includes(query);
+      };
+
+      const rangeMatches = (
+        doc: WebDoc,
+        field: string,
+        range: Record<string, unknown>,
+      ): boolean => {
+        let v = fieldValue(doc, field);
+        if (Array.isArray(v)) v = v[0];
+        if (v === undefined || v === null) return false;
+        const n = Number(v);
+        if (Number.isNaN(n)) return false;
+        if (range.lt !== undefined && !(n < Number(range.lt))) return false;
+        if (range.lte !== undefined && !(n <= Number(range.lte))) return false;
+        if (range.gt !== undefined && !(n > Number(range.gt))) return false;
+        if (range.gte !== undefined && !(n >= Number(range.gte))) return false;
+        return true;
+      };
+
+      /** All words of a multi_match query must appear in search_text. */
+      const multiMatchMatches = (
+        doc: WebDoc,
+        clause: { query?: unknown },
+      ): boolean => {
+        const words = String(clause.query ?? "")
+          .toLowerCase()
+          .split(/\s+/)
+          .filter((w) => w.length > 0);
+        const haystack = `${doc.search_text ?? ""} ${doc.url ?? ""}`
+          .toLowerCase();
+        return words.every((w) => haystack.includes(w));
+      };
+
+      const matchesBool = (
+        doc: WebDoc,
+        bool: {
+          must?: Array<Record<string, unknown>>;
+          must_not?: Array<Record<string, unknown>>;
+        },
+      ): boolean => {
+        for (const clause of bool.must ?? []) {
+          if (clause.term) {
+            const [field, value] = Object.entries(clause.term)[0];
+            if (!termMatches(doc, field, value)) return false;
+          } else if (clause.terms) {
+            const [field, values] = Object.entries(clause.terms)[0];
+            if (!(values as unknown[]).some((v) => termMatches(doc, field, v)))
+              return false;
+          } else if (clause.match) {
+            const [field, value] = Object.entries(clause.match)[0];
+            if (!matchMatches(doc, field, value)) return false;
+          } else if (clause.multi_match) {
+            if (
+              !multiMatchMatches(
+                doc,
+                clause.multi_match as { query?: unknown },
+              )
+            )
+              return false;
+          } else if (clause.range) {
+            const [field, range] = Object.entries(clause.range)[0];
+            if (!rangeMatches(doc, field, range as Record<string, unknown>))
+              return false;
+          }
+        }
+        for (const clause of bool.must_not ?? []) {
+          if (clause.term) {
+            const [field, value] = Object.entries(clause.term)[0];
+            if (termMatches(doc, field, value)) return false;
+          } else if (clause.terms) {
+            const [field, values] = Object.entries(clause.terms)[0];
+            if ((values as unknown[]).some((v) => termMatches(doc, field, v)))
+              return false;
+          } else if (clause.match) {
+            const [field, value] = Object.entries(clause.match)[0];
+            if (matchMatches(doc, field, value)) return false;
+          } else if (clause.range) {
+            const [field, range] = Object.entries(clause.range)[0];
+            if (rangeMatches(doc, field, range as Record<string, unknown>))
+              return false;
+          }
+        }
+        return true;
+      };
+
+      // biome-ignore lint/suspicious/noExplicitAny: mock accepts any query shape
+      const runSearch = (body: any): WebDoc[] => {
+        const bool = body?.query?.bool ?? {};
+        let results = Array.from(documents.values()).filter((doc) =>
+          matchesBool(doc, bool),
+        );
+
+        results.sort((a, b) => {
+          if (b.created_at !== a.created_at) return b.created_at - a.created_at;
+          return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+        });
+
+        const collapseField = body?.collapse?.field as string | undefined;
+        if (collapseField) {
+          const seen = new Set<unknown>();
+          results = results.filter((doc) => {
+            const key = fieldValue(doc, collapseField) ?? null;
+            if (seen.has(key)) return false;
+            seen.add(key);
+            return true;
+          });
+        }
+
+        const size = body?.size ?? results.length;
+        return results.slice(0, size);
+      };
+
+      return {
+        documents,
+        client: {
+          // biome-ignore lint/suspicious/noExplicitAny: mock accepts any query shape
+          search: async ({ body }: { body: any }) => ({
+            body: {
+              hits: {
+                hits: runSearch(body).map((doc) => ({ _source: doc })),
+              },
+            },
+          }),
+          // biome-ignore lint/suspicious/noExplicitAny: mock accepts any query shape
+          msearch: async (requests: Array<{ body: any }>) => ({
+            body: {
+              responses: requests.map((req) => ({
+                hits: {
+                  hits: runSearch(req.body).map((doc) => ({ _source: doc })),
+                },
+              })),
+            },
+          }),
+          // biome-ignore lint/suspicious/noExplicitAny: mock accepts any query shape
+          count: async ({ body }: { body: any }) => ({
+            body: { count: runSearch(body).length },
+          }),
+          bulk: async ({ body }: { body: unknown[] }) => {
+            const items: Array<Record<string, unknown>> = [];
+            for (let i = 0; i < body.length; i++) {
+              const action = body[i] as {
+                index?: { _id: string };
+                update?: { _id: string };
+                delete?: { _id: string };
+              };
+              if (action.delete) {
+                documents.delete(action.delete._id);
+                items.push({ delete: {} });
+                continue;
+              }
+              const payload = body[++i] as Record<string, unknown>;
+              if (action.index) {
+                documents.set(action.index._id, payload as WebDoc);
+                items.push({ index: {} });
+              } else if (action.update) {
+                if (payload.doc) {
+                  const existing = documents.get(action.update._id);
+                  if (existing) {
+                    documents.set(action.update._id, {
+                      ...existing,
+                      ...(payload.doc as Record<string, unknown>),
+                    });
+                  }
+                } else if (payload.upsert) {
+                  if (!documents.has(action.update._id)) {
+                    documents.set(action.update._id, payload.upsert as WebDoc);
+                  }
+                }
+                items.push({ update: {} });
+              }
+            }
+            return { body: { errors: false, items } };
+          },
+          updateByQuery: async () => ({ body: { updated: 0 } }),
+          deleteByQuery: async () => ({ body: { deleted: 0 } }),
+          indices: {
+            exists: async () => ({ body: true }),
+            create: async () => ({ body: {} }),
+          },
+          close: async () => {},
+        },
+      };
+    };
+
+    const sk = generateSecretKey();
+    const now = Math.floor(Date.now() / 1000);
+
+    /** Build and sign a valid SIP-01 web index observation (kind 39697). */
+    const makeDoc = (
+      url: string,
+      extraTags: string[][] = [],
+      docContent: { title: string; description?: string; image?: string } = {
+        title: "Example Page",
+      },
+      createdAt = now,
+    ) => {
+      const normalized = normalizeIndexUrl(url) ?? url;
+      return finalizeEvent(
+        {
+          kind: 39697,
+          created_at: createdAt,
+          tags: [
+            ["d", webDocumentDTag(normalized)],
+            ["u", url],
+            ["v", "1"],
+            ["alt", `Web index observation: ${docContent.title}`],
+            ...extraTags,
+          ],
+          content: JSON.stringify(docContent),
+        },
+        sk,
+      );
+    };
+
+    const makeRelay = (client: unknown) =>
+      new OpenSearchRelay(client as unknown as Client, {
+        indexName: "test-index",
+        bulkMaxSize: 1,
+        refreshDelayMs: 0,
+      });
+
+    it("indexes structured web document fields", async () => {
+      const { client, documents } = createWebDocMockClient();
+      const relay = makeRelay(client);
+
+      await relay.event(
+        makeDoc(
+          "https://WWW.GitHub.com/about/",
+          [
+            ["l", "en"],
+            ["x", webDocumentContentHash("About GitHub", "About page")],
+            ["published", "1786000000"],
+            ["source", "crawlstr/1"],
+            ["type", "Documentation"],
+            ["platform", "GitHub"],
+            ["country", "us"],
+            ["mime", "Text/HTML"],
+          ],
+          { title: "About GitHub", description: "About page" },
+        ),
+      );
+
+      const doc = Array.from(documents.values())[0];
+      // SIP-01 §8 normalization: www. stripped, trailing slash removed.
+      assert.equal(doc.url, "https://github.com/about");
+      assert.equal(doc.url_host, "github.com");
+      assert.deepEqual(doc.url_domain_hierarchy, ["github.com"]);
+      assert.equal(doc.title, "About GitHub");
+      assert.equal(doc.description, "About page");
+      assert.equal(doc.published_at, 1786000000);
+      assert.equal(doc.observed_at, now);
+      assert.equal(
+        doc.content_hash,
+        webDocumentContentHash("About GitHub", "About page"),
+      );
+      assert.equal(doc.source, "crawlstr/1");
+      assert.equal(doc.doc_type, "documentation");
+      assert.equal(doc.platform, "github");
+      assert.equal(doc.country, "US");
+      assert.equal(doc.content_type, "text/html");
+      // The indexer's l tag takes precedence over detected language.
+      assert.equal(doc.language, "en");
+      // Ranking signals are seeded at zero for the background worker.
+      assert.equal(doc.crawl_score, 0);
+      assert.equal(doc.authority_score, 0);
+      assert.equal(doc.quality_score, 0);
+      assert.equal(doc.spam_score, 0);
+      // Title/description from the content JSON are indexed for search.
+      assert.ok((doc.search_text as string).includes("About GitHub"));
+      assert.ok((doc.search_text as string).includes("About page"));
+    });
+
+    it("site: matches the host itself and subdomains", async () => {
+      const { client } = createWebDocMockClient();
+      const relay = makeRelay(client);
+
+      const root = makeDoc("https://github.com/");
+      const sub = makeDoc("https://docs.github.com/actions");
+      const other = makeDoc("https://gitlab.com/");
+      for (const doc of [root, sub, other]) await relay.event(doc);
+
+      const results = await relay.query([
+        { kinds: [39697], search: "site:github.com" },
+      ]);
+      assert.deepEqual(
+        new Set(results.map((e) => e.id)),
+        new Set([root.id, sub.id]),
+      );
+    });
+
+    it("site: ORs multiple tokens and -site: excludes", async () => {
+      const { client } = createWebDocMockClient();
+      const relay = makeRelay(client);
+
+      const gh = makeDoc("https://github.com/a");
+      const gl = makeDoc("https://gitlab.com/b");
+      const srht = makeDoc("https://sr.ht/c");
+      const spam = makeDoc("https://spam.github.com/d");
+      for (const doc of [gh, gl, srht, spam]) await relay.event(doc);
+
+      const orResults = await relay.query([
+        { kinds: [39697], search: "site:github.com site:sr.ht" },
+      ]);
+      assert.deepEqual(
+        new Set(orResults.map((e) => e.id)),
+        new Set([gh.id, srht.id, spam.id]),
+      );
+
+      const negResults = await relay.query([
+        { kinds: [39697], search: "site:github.com -site:spam.github.com" },
+      ]);
+      assert.deepEqual(
+        new Set(negResults.map((e) => e.id)),
+        new Set([gh.id]),
+      );
+    });
+
+    it("domain: matches the exact host only", async () => {
+      const { client } = createWebDocMockClient();
+      const relay = makeRelay(client);
+
+      const root = makeDoc("https://github.com/");
+      const sub = makeDoc("https://docs.github.com/actions");
+      for (const doc of [root, sub]) await relay.event(doc);
+
+      const results = await relay.query([
+        { kinds: [39697], search: "domain:github.com" },
+      ]);
+      assert.deepEqual(results.map((e) => e.id), [root.id]);
+    });
+
+    it("url: canonicalizes the query value before matching", async () => {
+      const { client } = createWebDocMockClient();
+      const relay = makeRelay(client);
+
+      const doc = makeDoc("https://example.com/page");
+      await relay.event(doc);
+
+      const results = await relay.query([
+        { kinds: [39697], search: "url:HTTPS://Example.COM:443/page#frag" },
+      ]);
+      assert.deepEqual(results.map((e) => e.id), [doc.id]);
+    });
+
+    it("inurl: matches URL tokens, title: matches titles (AND across tokens)", async () => {
+      const { client } = createWebDocMockClient();
+      const relay = makeRelay(client);
+
+      const hit = makeDoc("https://example.com/blog/nostr-protocol", [], {
+        title: "The Nostr Protocol Explained",
+      });
+      const wrongPath = makeDoc("https://example.com/about", [], {
+        title: "The Nostr Protocol Explained",
+      });
+      const wrongTitle = makeDoc(
+        "https://example.com/blog/nostr-protocol",
+        [],
+        { title: "Something else entirely" },
+      );
+      for (const doc of [hit, wrongPath, wrongTitle]) await relay.event(doc);
+
+      const urlResults = await relay.query([
+        { kinds: [39697], search: "inurl:blog" },
+      ]);
+      assert.deepEqual(
+        new Set(urlResults.map((e) => e.id)),
+        new Set([hit.id, wrongTitle.id]),
+      );
+
+      const titleResults = await relay.query([
+        { kinds: [39697], search: "title:nostr title:protocol" },
+      ]);
+      assert.deepEqual(
+        new Set(titleResults.map((e) => e.id)),
+        new Set([hit.id, wrongPath.id]),
+      );
+
+      const both = await relay.query([
+        { kinds: [39697], search: "inurl:blog title:nostr" },
+      ]);
+      assert.deepEqual(both.map((e) => e.id), [hit.id]);
+    });
+
+    it("topic:, type:, platform: and filetype: filter structured fields", async () => {
+      const { client } = createWebDocMockClient();
+      const relay = makeRelay(client);
+
+      const repo = makeDoc(
+        "https://github.com/searchstr/relay",
+        [
+          ["t", "nostr"],
+          ["type", "repository"],
+          ["platform", "github"],
+        ],
+        { title: "Searchstr Relay" },
+      );
+      const paper = makeDoc(
+        "https://example.com/paper.pdf",
+        [
+          ["t", "privacy"],
+          ["type", "pdf"],
+        ],
+        { title: "A Paper" },
+      );
+      const food = makeDoc(
+        "https://recipes.example/pasta",
+        [["t", "food"]],
+        { title: "Pasta Recipe" },
+      );
+      for (const doc of [repo, paper, food]) await relay.event(doc);
+
+      const topicResults = await relay.query([
+        { kinds: [39697], search: "topic:privacy" },
+      ]);
+      assert.deepEqual(topicResults.map((e) => e.id), [paper.id]);
+
+      const typeResults = await relay.query([
+        { kinds: [39697], search: "type:repository" },
+      ]);
+      assert.deepEqual(typeResults.map((e) => e.id), [repo.id]);
+
+      const platformResults = await relay.query([
+        { kinds: [39697], search: "platform:github" },
+      ]);
+      assert.deepEqual(platformResults.map((e) => e.id), [repo.id]);
+
+      const filetypeResults = await relay.query([
+        { kinds: [39697], search: "filetype:pdf" },
+      ]);
+      assert.deepEqual(filetypeResults.map((e) => e.id), [paper.id]);
+
+      const negTopicResults = await relay.query([
+        { kinds: [39697], search: "-topic:food" },
+      ]);
+      assert.deepEqual(
+        negTopicResults.map((e) => e.id).sort(),
+        [repo.id, paper.id].sort(),
+      );
+    });
+
+    it("before:/after: filter on published_at (unix or YYYY-MM-DD)", async () => {
+      const { client } = createWebDocMockClient();
+      const relay = makeRelay(client);
+
+      const old = makeDoc("https://example.com/old", [
+        ["published", "1700000000"], // 2023-11-14
+      ]);
+      const fresh = makeDoc("https://example.com/fresh", [
+        ["published", "1786000000"], // 2026-08-08
+      ]);
+      const undated = makeDoc("https://example.com/undated");
+      for (const doc of [old, fresh, undated]) await relay.event(doc);
+
+      const afterUnix = await relay.query([
+        { kinds: [39697], search: "after:1780000000" },
+      ]);
+      assert.deepEqual(afterUnix.map((e) => e.id), [fresh.id]);
+
+      const afterDate = await relay.query([
+        { kinds: [39697], search: "after:2026-01-01" },
+      ]);
+      assert.deepEqual(afterDate.map((e) => e.id), [fresh.id]);
+
+      const beforeDate = await relay.query([
+        { kinds: [39697], search: "before:2026-01-01" },
+      ]);
+      assert.deepEqual(beforeDate.map((e) => e.id), [old.id]);
+    });
+
+    it("lang: is an alias of language:", async () => {
+      const { client } = createWebDocMockClient();
+      const relay = makeRelay(client);
+
+      const en = makeDoc("https://example.com/en", [["l", "en"]]);
+      const de = makeDoc("https://example.de/", [["l", "de"]]);
+      for (const doc of [en, de]) await relay.event(doc);
+
+      const results = await relay.query([
+        { kinds: [39697], search: "lang:en" },
+      ]);
+      assert.deepEqual(results.map((e) => e.id), [en.id]);
+    });
+
+    it("plain text search matches SIP-01 title and description", async () => {
+      const { client } = createWebDocMockClient();
+      const relay = makeRelay(client);
+
+      const hit = makeDoc("https://example.com/privacy", [], {
+        title: "A guide to privacy-preserving protocols",
+        description: "How to stay private online",
+      });
+      const miss = makeDoc("https://example.com/cooking", [], {
+        title: "Recipes",
+      });
+      for (const doc of [hit, miss]) await relay.event(doc);
+
+      // sort:new keeps the query off the engagement-sort path; this test is
+      // about text matching, not ranking.
+      const results = await relay.query([
+        { kinds: [39697], search: "privacy sort:new" },
+      ]);
+      assert.deepEqual(results.map((e) => e.id), [hit.id]);
+    });
+
+    it("distinct:domain collapses results to one per host", async () => {
+      const { client } = createWebDocMockClient();
+      const relay = makeRelay(client);
+
+      const a1 = makeDoc("https://github.com/a", [], { title: "a" }, now);
+      const a2 = makeDoc("https://github.com/b", [], { title: "b" }, now - 1);
+      const a3 = makeDoc(
+        "https://docs.github.com/c",
+        [],
+        { title: "c" },
+        now - 2,
+      );
+      const b1 = makeDoc("https://gitlab.com/d", [], { title: "d" }, now - 3);
+      for (const doc of [a1, a2, a3, b1]) await relay.event(doc);
+
+      const results = await relay.query([
+        { kinds: [39697], search: "distinct:domain" },
+      ]);
+      // docs.github.com and github.com are distinct hosts → 3 groups.
+      assert.deepEqual(results.map((e) => e.id), [a1.id, a3.id, b1.id]);
+    });
+
+    it("COUNT honors web-search operators", async () => {
+      const { client } = createWebDocMockClient();
+      const relay = makeRelay(client);
+
+      const a = makeDoc("https://github.com/a");
+      const b = makeDoc("https://docs.github.com/b");
+      const c = makeDoc("https://gitlab.com/c");
+      for (const doc of [a, b, c]) await relay.event(doc);
+
+      const { count } = await relay.count([
+        { kinds: [39697], search: "site:github.com" },
+      ]);
+      assert.equal(count, 2);
+    });
+
+    it("a recrawl replaces the indexer's previous observation of the URL", async () => {
+      const { client, documents } = createWebDocMockClient();
+      const relay = makeRelay(client);
+
+      const v1 = makeDoc(
+        "https://example.com/",
+        [],
+        { title: "Old title" },
+        now - 100,
+      );
+      await relay.event(v1);
+
+      const v2 = makeDoc(
+        "https://example.com/",
+        [],
+        { title: "New title" },
+        now,
+      );
+      await relay.event(v2);
+
+      // Let fire-and-forget Phase 2 slot resolution complete.
+      await new Promise((resolve) => setImmediate(resolve));
+      await new Promise((resolve) => setImmediate(resolve));
+
+      // Normal queries return only the current version.
+      const results = await relay.query([
+        { kinds: [39697], authors: [getPublicKey(sk)] },
+      ]);
+      assert.deepEqual(results.map((e) => e.id), [v2.id]);
+
+      // The loser is preserved as replaced history (history is enabled by
+      // default and kind 39697 is not excluded).
+      const oldDoc = documents.get(v1.id);
+      assert.equal(oldDoc?.replaced, true);
+    });
+
+    it("multiple indexers observing the same URL share the d tag (SIP-01 §4)", async () => {
+      const { client } = createWebDocMockClient();
+      const relay = makeRelay(client);
+
+      const url = "https://example.com/shared";
+      const normalized = normalizeIndexUrl(url) ?? url;
+      const dTag = webDocumentDTag(normalized);
+
+      // Two different indexer keys, same URL → same d tag, distinct events.
+      const sk2 = generateSecretKey();
+      const observation = (key: Uint8Array, title: string, createdAt: number) =>
+        finalizeEvent(
+          {
+            kind: 39697,
+            created_at: createdAt,
+            tags: [
+              ["d", dTag],
+              ["u", url],
+              ["v", "1"],
+              ["alt", `Web index observation: ${title}`],
+            ],
+            content: JSON.stringify({ title }),
+          },
+          key,
+        );
+
+      const first = observation(sk, "Shared Page", now - 10);
+      const second = observation(sk2, "Shared Page", now);
+      await relay.event(first);
+      await relay.event(second);
+
+      // Both observations live side by side — the relay does NOT collapse
+      // them; grouping by d and counting distinct authors is a client/ranking
+      // concern (independent-observation signal).
+      const results = await relay.query([{ kinds: [39697], "#d": [dTag] }]);
+      assert.deepEqual(
+        new Set(results.map((e) => e.id)),
+        new Set([first.id, second.id]),
+      );
+    });
   });
 });

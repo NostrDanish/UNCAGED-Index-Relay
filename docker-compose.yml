@@ -1,0 +1,53 @@
+# UNCAGED Index Relay + OpenSearch, single-node development deployment.
+#
+#   cp .env.example .env   # set RELAY_URL and NOSTR_NSEC
+#   docker compose up
+#
+# The relay is reachable at ws://localhost:13131 (NIP-11 document at
+# http://localhost:13131 with Accept: application/nostr+json) and Prometheus
+# metrics at http://localhost:13131/metrics.
+#
+# For production, put a TLS-terminating reverse proxy in front, enable
+# OpenSearch auth/TLS, and size shards/heap to your index.
+
+services:
+  opensearch:
+    image: opensearchproject/opensearch:2
+    environment:
+      - discovery.type=single-node
+      - plugins.security.disabled=true
+      - OPENSEARCH_JAVA_OPTS=-Xms512m -Xmx512m
+    ports:
+      - "9200:9200"
+    volumes:
+      - opensearch-data:/usr/share/opensearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  relay:
+    build: .
+    depends_on:
+      opensearch:
+        condition: service_healthy
+    ports:
+      - "13131:13131"
+    environment:
+      PORT: "13131"
+      RELAY_URL: ${RELAY_URL:-ws://localhost:13131/}
+      NOSTR_NSEC: ${NOSTR_NSEC:?set NOSTR_NSEC in .env}
+      RELAY_PUBKEY: ${RELAY_PUBKEY:-}
+      RELAY_CONTACT: ${RELAY_CONTACT:-}
+      OPENSEARCH_NODE: http://opensearch:9200
+      OPENSEARCH_INDEX: ${OPENSEARCH_INDEX:-nostr-events}
+      # UNCAGED index specialization (see .env.example)
+      UNCAGED_DOMAINS: ${UNCAGED_DOMAINS:-*}
+      UNCAGED_SCOPE: ${UNCAGED_SCOPE:-global}
+      UNCAGED_LANGUAGES: ${UNCAGED_LANGUAGES:-}
+      UNCAGED_DOC_TYPES: ${UNCAGED_DOC_TYPES:-}
+    restart: unless-stopped
+
+volumes:
+  opensearch-data:

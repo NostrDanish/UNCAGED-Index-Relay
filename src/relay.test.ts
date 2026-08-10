@@ -18,6 +18,7 @@ import {
   Relay,
   type RelayConn,
 } from "./relay.ts";
+import { normalizeIndexUrl, webDocumentDTag } from "./web-document.ts";
 
 describe("Relay", () => {
   let relay: Relay;
@@ -68,7 +69,7 @@ describe("Relay", () => {
   describe("constructor", () => {
     it("should create relay with default relay info", () => {
       const info = relay.getRelayInfo();
-      assert.equal(info.name, "Ditto Relay");
+      assert.equal(info.name, "UNCAGED Index Relay");
       assert.equal(info.software, "https://gitlab.com/soapbox-pub/ditto-relay");
       assert.equal(info.version, "0.1.0");
       assert.deepEqual(
@@ -151,6 +152,150 @@ describe("Relay", () => {
 
       assert.equal(sentMessages.length, 1);
       assert.deepEqual(sentMessages[0], ["OK", deletionEvent.id, true, ""]);
+    });
+
+    it("should accept a valid SIP-01 web index observation (kind 39697)", async () => {
+      const sk = generateSecretKey();
+      const url = "https://example.com/";
+      const doc = finalizeEvent(
+        {
+          kind: 39697,
+          created_at: Math.floor(Date.now() / 1000),
+          tags: [
+            ["d", webDocumentDTag(normalizeIndexUrl(url) ?? url)],
+            ["u", url],
+            ["v", "1"],
+            ["l", "en"],
+            ["source", "crawlstr/1"],
+            ["alt", "Web index observation: Example Domain"],
+          ],
+          content: JSON.stringify({
+            title: "Example Domain",
+            description: "An example page",
+          }),
+        },
+        sk,
+      );
+
+      await relay.handleEvent(mockWs, doc);
+      relay.flushBroadcasts();
+
+      assert.equal(sentMessages.length, 1);
+      assert.deepEqual(sentMessages[0], ["OK", doc.id, true, ""]);
+    });
+
+    it("should reject a web index observation without a d tag", async () => {
+      const sk = generateSecretKey();
+      const doc = finalizeEvent(
+        {
+          kind: 39697,
+          created_at: Math.floor(Date.now() / 1000),
+          tags: [
+            ["u", "https://example.com/"],
+            ["v", "1"],
+            ["alt", "Web index observation: Example"],
+          ],
+          content: JSON.stringify({ title: "Example" }),
+        },
+        sk,
+      );
+
+      await relay.handleEvent(mockWs, doc);
+
+      assert.equal(sentMessages.length, 1);
+      assert.deepEqual(sentMessages[0], [
+        "OK",
+        doc.id,
+        false,
+        "invalid: web document missing d tag",
+      ]);
+    });
+
+    it("should reject an observation whose d tag doesn't match the normalized URL", async () => {
+      const sk = generateSecretKey();
+      const doc = finalizeEvent(
+        {
+          kind: 39697,
+          created_at: Math.floor(Date.now() / 1000),
+          tags: [
+            ["d", "widx:00000000000000000000000000000000"],
+            ["u", "https://example.com/"],
+            ["v", "1"],
+            ["alt", "Web index observation: Example"],
+          ],
+          content: JSON.stringify({ title: "Example" }),
+        },
+        sk,
+      );
+
+      await relay.handleEvent(mockWs, doc);
+
+      assert.equal(sentMessages.length, 1);
+      assert.deepEqual(sentMessages[0], [
+        "OK",
+        doc.id,
+        false,
+        "invalid: d tag does not match the normalized u tag (widx: + sha256(u)[0:32])",
+      ]);
+    });
+
+    it("should reject an observation with a wrong content hash (x tag)", async () => {
+      const sk = generateSecretKey();
+      const url = "https://example.com/";
+      const doc = finalizeEvent(
+        {
+          kind: 39697,
+          created_at: Math.floor(Date.now() / 1000),
+          tags: [
+            ["d", webDocumentDTag(normalizeIndexUrl(url) ?? url)],
+            ["u", url],
+            ["v", "1"],
+            ["x", "a".repeat(64)],
+            ["alt", "Web index observation: Example"],
+          ],
+          content: JSON.stringify({ title: "Example" }),
+        },
+        sk,
+      );
+
+      await relay.handleEvent(mockWs, doc);
+
+      assert.equal(sentMessages.length, 1);
+      assert.deepEqual(sentMessages[0], [
+        "OK",
+        doc.id,
+        false,
+        "invalid: x tag does not match sha256(title + \\n + description)",
+      ]);
+    });
+
+    it("should reject an observation with an unknown schema version", async () => {
+      const sk = generateSecretKey();
+      const url = "https://example.com/";
+      const doc = finalizeEvent(
+        {
+          kind: 39697,
+          created_at: Math.floor(Date.now() / 1000),
+          tags: [
+            ["d", webDocumentDTag(normalizeIndexUrl(url) ?? url)],
+            ["u", url],
+            ["v", "2"],
+            ["alt", "Web index observation: Example"],
+          ],
+          content: JSON.stringify({ title: "Example" }),
+        },
+        sk,
+      );
+
+      await relay.handleEvent(mockWs, doc);
+
+      assert.equal(sentMessages.length, 1);
+      assert.deepEqual(sentMessages[0], [
+        "OK",
+        doc.id,
+        false,
+        'invalid: unsupported web document schema version "2"',
+      ]);
     });
 
     it("should only allow deletion of own events via a-tag (NIP-09)", async () => {
