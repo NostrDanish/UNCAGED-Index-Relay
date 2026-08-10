@@ -1821,7 +1821,7 @@ export class OpenSearchRelay implements NStore, AsyncDisposable {
       }
 
       // url:<url> — exact normalized-URL match. The value is normalized with
-      // the same SIP-01 §8 rules used at index time, so
+      // the same SIP-01 §7 rules used at index time, so
       // `url:HTTPS://WWW.Example.COM/page?utm_source=x` finds the document
       // indexed from `https://example.com/page`. A value that fails to
       // normalize can't equal any stored URL, so the raw value is used (it

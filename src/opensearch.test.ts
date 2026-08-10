@@ -8986,7 +8986,7 @@ describe("OpenSearchRelay.recomputeScores", () => {
       );
 
       const doc = Array.from(documents.values())[0];
-      // SIP-01 §8 normalization: www. stripped, trailing slash removed.
+      // SIP-01 §7 normalization: www. stripped, trailing slash removed.
       assert.equal(doc.url, "https://github.com/about");
       assert.equal(doc.url_host, "github.com");
       assert.deepEqual(doc.url_domain_hierarchy, ["github.com"]);
@@ -9320,7 +9320,7 @@ describe("OpenSearchRelay.recomputeScores", () => {
       assert.equal(oldDoc?.replaced, true);
     });
 
-    it("multiple indexers observing the same URL share the d tag (SIP-01 §4)", async () => {
+    it("multiple indexers observing the same URL share the d tag (SIP-01 §3)", async () => {
       const { client } = createWebDocMockClient();
       const relay = makeRelay(client);
 

@@ -102,8 +102,8 @@ the hot path.
 │   ├── trends.ts           # Trending tag computation and publishing
 │   ├── trends.test.ts      # Trends tests
 │   ├── web-document.ts     # SIP-01 (kind 39697) web index observations: URL
-│   │                       # normalization (§8), d/x identity, validation, extraction
-│   └── web-document.test.ts # SIP-01 web document tests
+│   │                       # normalization (§7), d/x identity, validation, extraction
+│   └── web-document.test.ts # SIP-01 web document tests (incl. §13 test vectors)
 ├── scripts/
 │   ├── analyze-client.ts          # Analyze a client's users (active/inactive, engagement, cohorts)
 │   ├── backfill-client-address.ts # Backfill client field (NIP-89 client address) for existing events
@@ -187,7 +187,7 @@ Kind 39697 (SIP-01) is the first-class document type of this relay. Key
 rules, all implemented in `src/web-document.ts`:
 
 - The `d` tag is the URL identity: `widx:` + `sha256(normalized_url)[0:32]`,
-  where normalization is SIP-01 §8 (strip `www.`, tracking params, fragment;
+  where normalization is SIP-01 §7 (strip `www.`, tracking params, fragment;
   sort query params; drop trailing slash). Multiple indexers observing the
   same URL share one `d` — independent-observation counting is a `#d` query
   plus distinct-author count.

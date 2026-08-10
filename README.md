@@ -131,17 +131,19 @@ Events are stored in OpenSearch with the following enhancements:
 ### SIP-01 Web Index Observations (kind 39697)
 
 The relay natively understands
-[SIP-01](https://github.com/NostrDanish/0xSearchstr/blob/main/docs/SEARCH_INDEX_PROTOCOL.md)
+[SIP-01](https://github.com/NostrDanish/SIP-01)
 web index observations — signed statements by crawlers (Crawlstr and others)
 of the form *"indexer `pubkey` observed this web document at this time"*.
 
 **Validation at ingestion** (`invalid:` OK on failure): exactly one `d`, `u`,
 `v`, and `alt` tag; schema version `v=1`; `u` must be a valid http(s) URL;
-`d` must equal `widx:` + `sha256(normalized_u)[0:32]` (SIP-01 §8 URL
+`d` must equal `widx:` + `sha256(normalized_u)[0:32]` (SIP-01 §7 URL
 normalization — `www.` stripping, tracking-parameter removal, query-param
-sorting, trailing-slash removal — applied byte-compatibly); content JSON must
+sorting, trailing-slash removal — applied byte-compatibly and covered by the
+§13 test vectors); content JSON must
 carry a 1–300 char `title` (plus optional `description` ≤ 1000 chars and an
-https `image`); when the `x` content hash is present it is verified against
+https `image`); when the `x` content hash is present it is
+verified against
 `sha256(title + "\n" + description)`; topic (`t`) tags are capped at 8
 lowercase topics.
 
@@ -301,7 +303,7 @@ each has a negated `-key:value` form:
   `docs.github.com`); repeated `site:` tokens OR together
 - `domain:<host>` — Exact host match, no subdomains
 - `url:<url>` — Exact normalized-URL match (the value is normalized with the
-  same SIP-01 §8 rules, so `url:HTTPS://WWW.Example.Com/?utm_source=x#top`
+  same SIP-01 §7 rules, so `url:HTTPS://WWW.Example.Com/?utm_source=x#top`
   finds `https://example.com/`)
 - `inurl:<text>` — Tokenized match against the URL
 - `title:<text>` — Match against the document title; repeated tokens AND

@@ -56,7 +56,72 @@ function webDoc(
   );
 }
 
-describe("normalizeIndexUrl (SIP-01 §8)", () => {
+describe("SIP-01 §13 test vectors (byte-compatibility)", () => {
+  // These vectors are the ecosystem's wire-compatibility contract — every
+  // crawler, relay, and engine reproduces them exactly. If one fails here,
+  // this relay's d tags stop matching everyone else's and dedup breaks.
+
+  it("normalizes and hashes the §13.1 URL vectors", () => {
+    const vectors: Array<[string, string, string]> = [
+      [
+        "https://example.com/",
+        "https://example.com/",
+        "widx:0f115db062b7c0dd030b16878c99dea5",
+      ],
+      [
+        "HTTPS://WWW.Example.Com:443/page/?b=2&utm_source=x&a=1#top",
+        "https://example.com/page?a=1&b=2",
+        "widx:f68176b3eb966bd682c3c6eadcc5fe44",
+      ],
+      [
+        "https://example.com/page",
+        "https://example.com/page",
+        "widx:3641c5f2274c5471278ab5bf1df6d185",
+      ],
+      [
+        "https://github.com/NostrDanish/Crwalstr",
+        "https://github.com/NostrDanish/Crwalstr",
+        "widx:cdfd4df8c01d609fc9cdf943afa80197",
+      ],
+    ];
+    for (const [input, normalized, dTag] of vectors) {
+      const result = normalizeIndexUrl(input);
+      assert.equal(result, normalized, `normalization drift for ${input}`);
+      assert.equal(
+        webDocumentDTag(result),
+        dTag,
+        `d-tag drift for ${input} — check byte-compatibility`,
+      );
+    }
+  });
+
+  it("reproduces the §13.2 content-hash vectors", () => {
+    assert.equal(
+      webDocumentContentHash("Example"),
+      "e1762f14d9924e37b32f1c81dfd256410af462f5136415c96877efa8c80345d0",
+    );
+    assert.equal(
+      webDocumentContentHash("Example Page", "A page about examples."),
+      "2a5cbdf44513f552fb571d6c6de2ddf16c5452b235cc887980b52898fb38e7c1",
+    );
+  });
+
+  it("accepts the spec §19 minimal example", () => {
+    const doc = event(
+      WEB_DOCUMENT_KIND,
+      '{"title":"Example"}',
+      [
+        ["d", "widx:0f115db062b7c0dd030b16878c99dea5"],
+        ["u", "https://example.com/"],
+        ["v", "1"],
+        ["alt", "Web index observation: Example"],
+      ],
+    );
+    assert.equal(validateWebDocument(doc), undefined);
+  });
+});
+
+describe("normalizeIndexUrl (SIP-01 §7)", () => {
   it("lowercases scheme and host", () => {
     assert.equal(
       normalizeIndexUrl("HTTPS://Example.COM/Page"),
@@ -100,6 +165,20 @@ describe("normalizeIndexUrl (SIP-01 §8)", () => {
     );
   });
 
+  it("removes tracking parameters case-insensitively", () => {
+    assert.equal(
+      normalizeIndexUrl("https://example.com/a?UTM_SOURCE=x&Id=42&GCLID=y"),
+      "https://example.com/a?Id=42",
+    );
+  });
+
+  it("trims surrounding whitespace before parsing", () => {
+    assert.equal(
+      normalizeIndexUrl("  https://example.com/a\n"),
+      "https://example.com/a",
+    );
+  });
+
   it("sorts query parameters alphabetically by key", () => {
     assert.equal(
       normalizeIndexUrl("https://example.com/a?b=2&a=1&c=3"),
@@ -134,7 +213,7 @@ describe("normalizeIndexUrl (SIP-01 §8)", () => {
   });
 });
 
-describe("webDocumentDTag (SIP-01 §4)", () => {
+describe("webDocumentDTag (SIP-01 §3)", () => {
   it("is widx: + sha256(url)[0:32]", () => {
     const url = "https://example.com/page";
     const hash = createHash("sha256")
@@ -153,7 +232,7 @@ describe("webDocumentDTag (SIP-01 §4)", () => {
   });
 });
 
-describe("webDocumentContentHash (SIP-01 §9)", () => {
+describe("webDocumentContentHash (SIP-01 §8)", () => {
   it("is sha256(title + \\n + description)", () => {
     const expected = createHash("sha256")
       .update("Title\nDescription", "utf8")
@@ -367,7 +446,7 @@ describe("validateWebDocument (SIP-01)", () => {
     );
   });
 
-  it("verifies the x content hash when present (SIP-01 §9)", () => {
+  it("verifies the x content hash when present (SIP-01 §8)", () => {
     const title = "Example Page";
     const ok = webDoc(
       "https://example.com/",

@@ -1,12 +1,18 @@
 /**
- * SIP-01 Web Index Observation events (kind 39697) — the Searchstr index
- * record.
+ * SIP-01 Web Index Observation events (kind 39697) — the decentralized
+ * index record.
  *
- * SIP-01 (Search Index Protocol) is the shared contract between the Searchstr
- * ecosystem crawlers and search engines: Crawlstr (and any other crawler)
+ * SIP-01 (Search Index Protocol) is the shared contract between the
+ * ecosystem's crawlers and search engines: Crawlstr (and any other crawler)
  * publishes signed observations of web pages; this relay stores, validates,
- * and indexes them; search engines (0xSearchstr, 0xPresearchstr, UNCAGED, …)
- * consume and rank them however they choose.
+ * and indexes them; search engines (0xSearchstr, 0xPresearchstr, UNCAGED
+ * Engine, …) consume and rank them however they choose.
+ *
+ * Canonical specification: https://github.com/NostrDanish/SIP-01
+ * (`public/spec/SIP-01.md`). The §13 test vectors are covered by
+ * web-document.test.ts — keep them green; a single character of drift in
+ * normalization or hashing breaks deduplication against every other
+ * implementation.
  *
  * One shared decentralized index. Many independent indexers. No single owner.
  *
@@ -30,7 +36,7 @@
  * }
  * ```
  *
- * ## Identities (SIP-01 §4)
+ * ## Identities (SIP-01 §3)
  *
  * - **URL identity** — the `d` tag: `"widx:" + sha256(normalized_url)[0:32]`.
  *   All indexers observing the same normalized URL produce the same `d`, so
@@ -38,7 +44,7 @@
  *   query away. Per-indexer recrawls replace the indexer's previous
  *   observation (one addressable slot per `(pubkey, d)`), and relays with
  *   history preservation keep superseded versions for change tracking.
- * - **Canonical URL** — the `u` tag, normalized per SIP-01 §8.
+ * - **Canonical URL** — the `u` tag, normalized per SIP-01 §7.
  * - **Content identity** — the `x` tag: `sha256(title + "\n" + description)`.
  *   Same `d` + same `x` = indexers agree; same `d` + different `x` = the page
  *   changed or they disagree. Both are ranking signals.
@@ -49,8 +55,8 @@
  *   rejected at ingestion with an `invalid:` OK message — schema version,
  *   URL allowlist, `d` ↔ normalized `u` consistency, `x` ↔ content
  *   consistency, and the spec's hard length caps are all enforced. Garbage in
- *   = garbage index; SIP-01 §16 tells consumers to drop invalid events, and
- *   the relay simply does it at the door.
+ *   = garbage index — SIP-01 §12.4 is reader guidance applied at the door:
+ *   the relay simply refuses invalid observations.
  * - **Structured indexing** ({@link extractWebDocumentFields}): the event
  *   becomes dedicated keyword/text fields (`url`, `url_host`,
  *   `url_domain_hierarchy`, `title`, `description`, `language`,
@@ -76,19 +82,19 @@ export const WEB_DOCUMENT_KIND = 39697;
 /** Current SIP-01 schema version (the `v` tag). */
 export const WEB_DOCUMENT_SCHEMA_VERSION = "1";
 
-/** Prefix of the URL-identity `d` tag (SIP-01 §4). */
+/** Prefix of the URL-identity `d` tag (SIP-01 §3). */
 export const WEB_DOCUMENT_D_PREFIX = "widx:";
 
 /** Maximum length of the `u` tag value. */
 export const WEB_DOC_URL_MAX_LENGTH = 2048;
 
-/** Title length cap (SIP-01 §6): 1–300 chars after trim. */
+/** Title length cap (SIP-01 §5): 1–300 chars after trim. */
 export const WEB_DOC_TITLE_MAX_LENGTH = 300;
 
-/** Description length cap (SIP-01 §7). */
+/** Description length cap (SIP-01 §6). */
 export const WEB_DOC_DESCRIPTION_MAX_LENGTH = 1000;
 
-/** Maximum number of topic (`t`) tags (SIP-01 §7). */
+/** Maximum number of topic (`t`) tags (SIP-01 §6). */
 export const WEB_DOC_MAX_TOPICS = 8;
 
 /** Generous cap for the NIP-31 `alt` description. */
@@ -98,7 +104,7 @@ const ALT_MAX_LENGTH = 1000;
 const SOURCE_MAX_LENGTH = 100;
 
 /**
- * Tracking parameters stripped during SIP-01 §8 URL normalization. All other
+ * Tracking parameters stripped during SIP-01 §7 URL normalization. All other
  * query parameters are preserved (many are semantically required).
  */
 const TRACKING_PARAMS = [
@@ -118,10 +124,13 @@ const TRACKING_PARAMS = [
   "si",
 ] as const;
 
+/** Lookup set for {@link TRACKING_PARAMS} (matched case-insensitively). */
+const TRACKING_SET: ReadonlySet<string> = new Set(TRACKING_PARAMS);
+
 /** ISO 639-1 two-letter language code (the `l` tag). */
 const LANG_RE = /^[a-z]{2}$/;
 
-/** Lowercase topic tag value (SIP-01 §7: `t` tags are lowercase topics). */
+/** Lowercase topic tag value (SIP-01 §6: `t` tags are lowercase topics). */
 const TOPIC_RE = /^[a-z0-9][a-z0-9-]{0,99}$/;
 
 /** Extension tag values: `page`, `repository`, `github`, `onion`, `DE`, ... */
@@ -141,7 +150,7 @@ export interface WebDocumentContent {
 }
 
 /**
- * Normalize a URL per SIP-01 §8. Implementations MUST produce byte-identical
+ * Normalize a URL per SIP-01 §7. Implementations MUST produce byte-identical
  * results across the ecosystem or `d`-tag deduplication breaks:
  *
  * 1. Parse; reject anything not `http://` or `https://`.
@@ -161,7 +170,7 @@ export interface WebDocumentContent {
 export function normalizeIndexUrl(raw: string): string | undefined {
   let url: URL;
   try {
-    url = new URL(raw);
+    url = new URL(raw.trim());
   } catch {
     return undefined;
   }
@@ -175,13 +184,12 @@ export function normalizeIndexUrl(raw: string): string | undefined {
   // 4. Fragment.
   url.hash = "";
 
-  // 5–6. Drop tracking parameters, then sort the rest by key. Assigning
+  // 5–6. Drop tracking parameters (case-insensitively — `UTM_SOURCE` is as
+  // much a tracker as `utm_source`), then sort the rest by key. Assigning
   // `url.search` unconditionally also normalizes away a bare trailing `?`.
-  for (const name of TRACKING_PARAMS) {
-    url.searchParams.delete(name);
-  }
-  const entries = [...url.searchParams.entries()];
-  entries.sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+  const entries = [...url.searchParams.entries()]
+    .filter(([key]) => !TRACKING_SET.has(key.toLowerCase()))
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
   const sorted = new URLSearchParams();
   for (const [key, value] of entries) sorted.append(key, value);
   url.search = sorted.toString();
@@ -195,7 +203,7 @@ export function normalizeIndexUrl(raw: string): string | undefined {
 }
 
 /**
- * The SIP-01 §4 `d` tag value for a normalized URL:
+ * The SIP-01 §3 `d` tag value for a normalized URL:
  * `"widx:" + sha256(url)[0:32]` (lowercase hex). Deterministic across all
  * indexers — that is what makes independent-observation counting work.
  */
@@ -205,7 +213,7 @@ export function webDocumentDTag(normalizedUrl: string): string {
 }
 
 /**
- * The SIP-01 §9 content identity: lowercase hex SHA-256 of
+ * The SIP-01 §8 content identity: lowercase hex SHA-256 of
  * `title + "\n" + description` (empty string when description is absent).
  */
 export function webDocumentContentHash(
@@ -258,7 +266,7 @@ export function parseWebDocumentContent(
  * Returns a human-readable reason string (without the `invalid:` prefix) when
  * the event is malformed, or `undefined` when it is acceptable. Called by the
  * relay after signature verification; invalid observations are rejected and
- * never reach the index (SIP-01 §16 reader guidance, applied at the door).
+ * never reach the index (SIP-01 §12.4 relay-side validation).
  */
 export function validateWebDocument(event: NostrEvent): string | undefined {
   if (event.kind !== WEB_DOCUMENT_KIND) return undefined;
@@ -291,7 +299,7 @@ export function validateWebDocument(event: NostrEvent): string | undefined {
     return `alt tag exceeds ${ALT_MAX_LENGTH} characters`;
   }
 
-  // --- URL allowlist + d ↔ normalized u consistency (SIP-01 §8, §12).
+  // --- URL allowlist + d ↔ normalized u consistency (SIP-01 §7, §11).
 
   if (uTag.length > WEB_DOC_URL_MAX_LENGTH) {
     return `u tag exceeds ${WEB_DOC_URL_MAX_LENGTH} characters`;
@@ -351,7 +359,7 @@ export function validateWebDocument(event: NostrEvent): string | undefined {
   }
 
   // The x tag is the content-agreement signal; an incorrect hash is worse
-  // than none, so it is verified against the observed metadata (SIP-01 §9).
+  // than none, so it is verified against the observed metadata (SIP-01 §8).
   const x = tagValue(event, "x");
   if (x !== undefined) {
     if (!/^[0-9a-f]{64}$/.test(x)) {
@@ -372,7 +380,7 @@ export function validateWebDocument(event: NostrEvent): string | undefined {
     return `source tag exceeds ${SOURCE_MAX_LENGTH} characters`;
   }
 
-  // Optional extension tags (SIP-01 §7): free-form but token-shaped.
+  // Optional extension tags (SIP-01 §9): free-form but keyword-shaped.
   for (const name of ["type", "platform", "category", "network"]) {
     const value = tagValue(event, name);
     if (value !== undefined && !EXTENSION_VALUE_RE.test(value)) {
@@ -400,7 +408,7 @@ export function validateWebDocument(event: NostrEvent): string | undefined {
  * always set, so freshness ranges/sorts work uniformly.
  */
 export interface WebDocumentFields {
-  /** Normalized canonical URL (SIP-01 §8). */
+  /** Normalized canonical URL (SIP-01 §7). */
   url: string;
   /** Full hostname, lowercased, e.g. `docs.github.com`. */
   url_host: string;
@@ -583,7 +591,7 @@ function fileExtension(pathname: string): string | undefined {
  * Normalize a `site:`/`domain:` operator value to a bare host, forgiving
  * common input forms (`https://github.com/x` → `github.com`,
  * `GitHub.com.` → `github.com`, `www.github.com` → `github.com` — matching
- * SIP-01 §8 host normalization). Returns undefined when unusable; an
+ * SIP-01 §7 host normalization). Returns undefined when unusable; an
  * unusable operator value adds no clause.
  */
 export function searchHostValue(value: string): string | undefined {
