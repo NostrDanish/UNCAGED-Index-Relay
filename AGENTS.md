@@ -192,16 +192,20 @@ rules, all implemented in `src/web-document.ts`:
   same URL share one `d` — independent-observation counting is a `#d` query
   plus distinct-author count.
 - The `x` tag is the content identity: `sha256(title + "\n" + description)`,
-  verified at ingestion when present.
+  verified at ingestion when present (a metadata-agreement hash, not a
+  page-body hash).
 - Ingestion is strict: schema version, required tags, URL allowlist, `d`/`x`
   consistency, and field caps are enforced with `invalid:` OK rejections.
 - Structured fields (`url`, `url_host`, `url_domain_hierarchy`, `title`,
   `description`, `language`, `content_hash`, `published_at`, `observed_at`,
-  `source`, `doc_type`, `platform`, `category`, `network`, `country`,
-  `content_type`) are indexed for the NIP-50 web-search operators (`site:`,
-  `domain:`, `url:`, `inurl:`, `title:`, `topic:`, `type:`, `platform:`,
-  `category:`, `network:`, `country:`, `mime:`, `filetype:`, `source:`,
-  `lang:`, `before:`, `after:`, `distinct:domain`).
+  `first_seen_at`, `source`, `doc_type`, `platform`, `category`, `network`,
+  `country`, `content_type`) are indexed for the NIP-50 web-search operators
+  (`site:`, `domain:`, `url:`, `inurl:`, `title:`, `topic:`, `type:`,
+  `platform:`, `category:`, `network:`, `country:`, `mime:`, `filetype:`,
+  `source:`, `lang:`, `before:`, `after:`, `distinct:domain`).
+  `first_seen_at` is relay-local index time (the only relay-attested
+  timestamp); `observed_at` is the crawler's signed claim;
+  `published_at` is the page's own claim.
 - Ranking is the search engines' job: `crawl_score`, `authority_score`,
   `quality_score`, `spam_score` are relay-side signal fields (seeded 0).
 

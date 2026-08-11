@@ -7,6 +7,8 @@
 
 import type { NostrEvent } from "nostr-tools";
 
+import { WEB_DOCUMENT_KIND } from "./web-document.ts";
+
 /** Kinds whose content is not meaningful text and should be skipped entirely. */
 const SKIP_CONTENT_KINDS = new Set([
   // Reposts — content is stringified JSON of another event (NIP-18)
@@ -52,6 +54,28 @@ const SKIP_CONTENT_KINDS = new Set([
   39092, // Media Starter Packs
   // Other non-searchable content
   9735, // Zap Receipt (NIP-57) — content is empty
+]);
+
+/** Kinds whose content is known to be plaintext. */
+const TEXT_KINDS = new Set([
+  1, // Short Text Note (NIP-01)
+  5, // Event Deletion Request (NIP-09)
+  7, // Reaction (NIP-25)
+  9, // Chat Message (NIP-C7)
+  11, // Thread (NIP-7D)
+  20, // Picture (NIP-68)
+  21, // Video (NIP-71)
+  22, // Short-form Portrait Video (NIP-71)
+  42, // Channel Message (NIP-28)
+  1063, // File Metadata (NIP-94)
+  1068, // Poll (NIP-88)
+  1111, // Comment (NIP-22)
+  1311, // Live Chat Message (NIP-53)
+  9802, // Highlights (NIP-84)
+  30023, // Long-form Content (NIP-23)
+  30024, // Draft Long-form Content (NIP-23)
+  31922, // Date-Based Calendar Event (NIP-52)
+  31923, // Time-Based Calendar Event (NIP-52)
 ]);
 
 /** Kinds whose content is JSON with searchable fields. */
@@ -130,8 +154,8 @@ function looksLikeBase64(content: string): boolean {
  *
  * 1. **Skipped kinds** (reposts, encrypted, NIP-51 lists/sets, zap receipts):
  *    content is not meaningful text, so it is ignored entirely.
- * 2. **JSON kinds** (0, 40, 41, 30017-30020): parse JSON content and extract
- *    `name`, `about`, `description`, `display_name`.
+ * 2. **JSON kinds** (0, 40, 41, 30017-30020, 39697): parse JSON content and
+ *    extract `name`, `about`, `description`, `display_name`, `title`.
  * 3. **Text kinds** (1, 5, 7, 9, 11, 20, 21, 22, 42, 1063, 1068, 1111, 1311,
  *    9802, 30023, 30024, 31922, 31923): use `content` as plaintext.
  * 4. **Unknown kinds**: auto-detect — try JSON extraction, skip base64, else
@@ -172,6 +196,19 @@ export function buildSearchText(event: NostrEvent): string {
   for (const tag of event.tags) {
     if (tag.length >= 2 && SEARCH_TAGS.has(tag[0]) && tag[1]) {
       parts.push(tag[1]);
+    }
+  }
+
+  // 3. SIP-01 web index observations: `t` topic tags are curated document
+  // keywords and part of the searchable surface — search engines match
+  // queries against title + description + topics (UNCAGED-ENGINE's
+  // client-side matcher), so relay-side text search must cover them too.
+  // (Scoped to 39697: `t` on other kinds stays out, per the existing tests.)
+  if (event.kind === WEB_DOCUMENT_KIND) {
+    for (const tag of event.tags) {
+      if (tag.length >= 2 && tag[0] === "t" && tag[1]) {
+        parts.push(tag[1]);
+      }
     }
   }
 

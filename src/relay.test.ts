@@ -70,7 +70,10 @@ describe("Relay", () => {
     it("should create relay with default relay info", () => {
       const info = relay.getRelayInfo();
       assert.equal(info.name, "UNCAGED Index Relay");
-      assert.equal(info.software, "https://gitlab.com/soapbox-pub/ditto-relay");
+      assert.equal(
+        info.software,
+        "https://github.com/NostrDanish/UNCAGED-Index-Relay",
+      );
       assert.equal(info.version, "0.1.0");
       assert.deepEqual(
         info.supported_nips,
@@ -92,7 +95,10 @@ describe("Relay", () => {
       assert.equal(info.name, "Custom Relay");
       assert.equal(info.description, "My custom relay");
       assert.equal(info.pubkey, "abc123");
-      assert.equal(info.software, "https://gitlab.com/soapbox-pub/ditto-relay"); // defaults still work
+      assert.equal(
+        info.software,
+        "https://github.com/NostrDanish/UNCAGED-Index-Relay",
+      ); // defaults still work
     });
   });
 

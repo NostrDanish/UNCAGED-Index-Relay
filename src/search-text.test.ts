@@ -181,6 +181,16 @@ describe("buildSearchText", () => {
       );
     });
 
+    it("should include t topic tags for kind 39697 only", () => {
+      const content = JSON.stringify({ title: "Example Page" });
+      assert.equal(
+        buildSearchText(event(39697, content, [["t", "nostr"]])),
+        "Example Page\nnostr",
+      );
+      // Notes: t tags stay out of search_text (hashtags are not body text).
+      assert.equal(buildSearchText(event(1, "Hello", [["t", "nostr"]])), "Hello");
+    });
+
     it("should extract name and about from kind 40 (channel creation)", () => {
       const content = JSON.stringify({
         name: "Bitcoin Chat",

@@ -431,8 +431,21 @@ export interface WebDocumentFields {
   content_hash?: string;
   /** The page's claimed publication time (the `published` tag). */
   published_at?: number;
-  /** Observation time: the event's `created_at`. */
+  /**
+   * Observation time: the event's `created_at` — the crawler's SIGNED claim.
+   * A signer can backdate it; treat as crawler-asserted, not relay-attested.
+   */
   observed_at: number;
+  /**
+   * When the relay first indexed this observation event: relay-local wall
+   * clock at index time. The only timestamp in the document the relay itself
+   * attests — it cannot be backdated by a publisher. Provenance tiers:
+   * `published_at` = page's claim, `observed_at` = crawler's claim,
+   * `first_seen_at` = relay-local evidence. Set by the indexer at write time
+   * (not by the extractor, which stays pure), and never part of the SIP-01
+   * wire format.
+   */
+  first_seen_at?: number;
   /** Indexer software identifier (the `source` tag), e.g. `crawlstr/1`. */
   source?: string;
   /** Logical document type (the `type` extension tag), lowercased. */

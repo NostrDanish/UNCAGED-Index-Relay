@@ -142,9 +142,9 @@ normalization — `www.` stripping, tracking-parameter removal, query-param
 sorting, trailing-slash removal — applied byte-compatibly and covered by the
 §13 test vectors); content JSON must
 carry a 1–300 char `title` (plus optional `description` ≤ 1000 chars and an
-https `image`); when the `x` content hash is present it is
-verified against
-`sha256(title + "\n" + description)`; topic (`t`) tags are capped at 8
+https `image`); when the `x` content hash is present it is verified against
+`sha256(title + "\n" + description)` (a metadata-agreement hash —
+deliberately not a page-body hash); topic (`t`) tags are capped at 8
 lowercase topics.
 
 **Structured indexing**: instead of lumping observations into generic search
@@ -154,6 +154,12 @@ text, they become dedicated OpenSearch fields — `url`, `url_host`,
 detection), `content_hash` (from `x`), `published_at` (from `published`),
 `observed_at` (the event's `created_at`), `source`, and the optional
 extension tags `type`, `platform`, `category`, `network`, `country`, `mime`.
+
+**Provenance tiers**: timestamps are indexed with their trust level
+explicit — `published_at` is the page's own claim, `observed_at`
+(`created_at`) is the crawler's signed claim (a signer can backdate it), and
+`first_seen_at` is relay-local wall clock at index time — the one timestamp
+the relay itself attests.
 
 **Ranking signals, not ranking**: documents are seeded with
 `crawl_score`, `authority_score`, `quality_score`, and `spam_score` fields
@@ -167,7 +173,9 @@ preservation enabled, superseded versions remain queryable for change
 tracking. Multiple indexers observing the same URL produce separate events
 sharing one `d` tag — `{"kinds":[39697], "#d":["widx:..."]}` returns all
 independent observations, and COUNT with `distinct:author` approximates the
-independent-indexer count.
+independent-indexer count (distinct *signing pubkeys* — Sybil keys and key
+rotation mean it is an independence estimate, not proof; engines should
+weight indexer age, diversity, and content agreement).
 
 ### Replaceable Events (NIP-01)
 

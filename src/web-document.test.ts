@@ -518,6 +518,9 @@ describe("extractWebDocumentFields", () => {
     assert.equal(fields.title, "About GitHub");
     assert.equal(fields.description, "About page");
     assert.equal(fields.observed_at, 1_700_000_000);
+    // The extractor stays pure — first_seen_at is stamped by the indexer
+    // (relay-local time), never derived from the event.
+    assert.equal(fields.first_seen_at, undefined);
     assert.equal(fields.crawl_score, 0);
     assert.equal(fields.authority_score, 0);
     assert.equal(fields.quality_score, 0);

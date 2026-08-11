@@ -8703,6 +8703,7 @@ describe("OpenSearchRelay.recomputeScores", () => {
         language?: string;
         published_at?: number;
         observed_at?: number;
+        first_seen_at?: number;
         [key: string]: unknown;
       };
 
@@ -8994,6 +8995,9 @@ describe("OpenSearchRelay.recomputeScores", () => {
       assert.equal(doc.description, "About page");
       assert.equal(doc.published_at, 1786000000);
       assert.equal(doc.observed_at, now);
+      // Relay-local provenance: stamped at index time, not crawler-asserted.
+      const firstSeen = doc.first_seen_at;
+      assert.ok(typeof firstSeen === "number" && firstSeen >= now);
       assert.equal(
         doc.content_hash,
         webDocumentContentHash("About GitHub", "About page"),

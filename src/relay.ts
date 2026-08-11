@@ -507,7 +507,7 @@ export class Relay {
       description:
         "Decentralized web search index infrastructure: a Nostr relay backed by OpenSearch, native to SIP-01 (kind 39697) web index observations. The index belongs to no one — anyone can crawl, publish, replicate, query, filter, and rank.",
       supported_nips: [1, 9, 11, 13, 40, 42, 45, 50, 62, 70, 77],
-      software: "https://gitlab.com/soapbox-pub/ditto-relay",
+      software: "https://github.com/NostrDanish/UNCAGED-Index-Relay",
       version: "0.1.0",
       limitation: {
         max_message_length: opts.maxMessageLength ?? 4_000_000,

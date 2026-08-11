@@ -1,11 +1,16 @@
 # SIP-01 Relay Profile — UNCAGED Index Relay
 
-This document defines how UNCAGED Index Relay stores, validates, indexes, and
-serves [SIP-01](https://github.com/NostrDanish/SIP-01) web index observations
-(kind 39697). It is the relay-side profile referenced by the specification
-(§20) — the contract between the relay and the ecosystem: **Crawlstr and
-other crawlers publish, the relay validates and indexes, search engines query
-and rank.**
+This document defines how a SIP-01 index relay stores, validates, indexes,
+and serves [SIP-01](https://github.com/NostrDanish/SIP-01) web index
+observations (kind 39697). It is the relay-side profile referenced by the
+specification (§20) — the contract between the relay and the ecosystem:
+**Crawlstr and other crawlers publish, the relay validates and indexes,
+search engines query and rank.**
+
+The profile is **implementation-independent**: any relay software can conform
+to it — UNCAGED Index Relay is the reference implementation. The substitution
+test: another conforming relay can replace it without any change to Crawlstr
+or the search engines.
 
 > One shared decentralized index. Many independent indexers. Many independent
 > search engines. No single owner. The relay never decides what the "best"
@@ -68,9 +73,10 @@ event fields, `tags_map`, and `search_text`, which contains
 | `description` | text | content JSON |
 | `image` | keyword | content JSON |
 | `language` | keyword | `l` tag (precedence over detection) |
-| `content_hash` | keyword | `x` tag |
-| `published_at` | long | `published` tag (§12.2 naming deviation, mapped here) |
-| `observed_at` | long | event `created_at` (always set) |
+| `content_hash` | keyword | `x` tag — a **metadata-agreement hash** (`sha256(title + "\n" + description)`), deliberately *not* a page-body hash (§8); same `d` + same `x` = indexers agree, different `x` = page changed or disagreement |
+| `published_at` | long | `published` tag (§12.2 naming deviation, mapped here) — the page's own claim |
+| `observed_at` | long | event `created_at` (always set) — the crawler's *signed* claim; a signer can backdate it |
+| `first_seen_at` | long | relay-local wall clock at index time — the only timestamp the relay itself attests; not on the wire |
 | `source` | keyword | `source` tag |
 | `doc_type` / `platform` / `category` / `network` | keyword | §9.2 extension tags (lowercased) |
 | `country` | keyword | `country` tag (uppercased) |
@@ -91,7 +97,11 @@ acceleration layer.
 - The `d` tag is deterministic across all indexers, so
   `{"kinds":[39697], "#d":["widx:…"]}` returns every independent observation
   of a URL, and COUNT with `distinct:author` approximates the
-  independent-indexer count.
+  independent-indexer count — *approximately*: it counts distinct signing
+  pubkeys, and Sybil key generation or indexer key rotation make "distinct
+  pubkeys" and "independent indexers" different concepts. Engines should
+  weight indexer age, diversity, and content agreement rather than treating
+  a raw pubkey count as proof of independence.
 - Addressable slots are per `(pubkey, d)`: a recrawl replaces that indexer's
   previous observation. With history preservation enabled (default), the
   relay MAY preserve superseded versions (§2) — it does, marked `replaced`

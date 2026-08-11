@@ -850,8 +850,14 @@ export class OpenSearchRelay implements NStore, AsyncDisposable {
     // index fields (url, url_host, title, published_at, ...) from the event's
     // tags and content JSON. Invalid documents yield undefined and index as
     // plain events — on the ingest path they are rejected by validation
-    // before reaching this point.
-    const webDoc = extractWebDocumentFields(event);
+    // before reaching this point. `first_seen_at` is stamped here (relay-local
+    // wall clock), not by the extractor: it is the one timestamp the relay
+    // itself attests, since a publisher can backdate the signed created_at.
+    const webDocFields = extractWebDocumentFields(event);
+    const webDoc = webDocFields && {
+      ...webDocFields,
+      first_seen_at: Math.floor(Date.now() / 1000),
+    };
 
     // Use pre-computed media detection from the analyze worker when available,
     // otherwise detect on the main thread (direct event() calls, eg tests).
@@ -3149,6 +3155,8 @@ export class OpenSearchRelay implements NStore, AsyncDisposable {
     source: { type: "keyword" },
     observed_at: { type: "long" },
     published_at: { type: "long" },
+    // Relay-local ingestion time — not crawler-asserted, not page-claimed.
+    first_seen_at: { type: "long" },
     // Relay-computed ranking signals, seeded at 0 on indexing so ranking
     // queries can stay cheap indexed-field operations. The relay provides
     // signals; search engines decide ranking.
